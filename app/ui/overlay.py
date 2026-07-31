@@ -1,0 +1,157 @@
+# app/ui/overlay.py
+from __future__ import annotations
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication
+from PySide6.QtCore import Qt, QPoint
+
+from app.ui import theme
+from app.ui.widgets.nt_button import NtButton
+from app.ui.widgets.nt_panel import NtPanel
+from app.ui.widgets.log_panel import LogPanel
+from app.module_registry import MODULES
+
+
+class Overlay(QWidget):
+    WIDTH  = 220
+    HEIGHT = 420
+
+    def __init__(self, config, window_manager, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.wm = window_manager
+        self._drag_pos = QPoint()
+        self._open_windows: dict[str, QWidget] = {}
+
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(self.WIDTH, self.HEIGHT)
+        self._build_ui()
+
+    def _build_ui(self):
+        panel = NtPanel(self)
+        panel.setGeometry(0, 0, self.WIDTH, self.HEIGHT)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(theme.PADDING, theme.PADDING, theme.PADDING, theme.PADDING)
+        layout.setSpacing(theme.SPACING)
+
+        # ── Header ──────────────────────────────────────────────────────────
+        header = QHBoxLayout()
+        title = QLabel("AVATARIA HELPER")
+        title.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
+        title.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
+        close_btn = NtButton("×")
+        close_btn.setFixedSize(24, 24)
+        close_btn.clicked.connect(self.close)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(close_btn)
+        layout.addLayout(header)
+
+        # ── Separator ───────────────────────────────────────────────────────
+        sep = QLabel()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{theme.BORDER};")
+        layout.addWidget(sep)
+        layout.addSpacing(4)
+
+        # ── Module buttons ──────────────────────────────────────────────────
+        self._module_buttons: dict[str, NtButton] = {}
+        for module_cls in MODULES:
+            btn = NtButton(f"{module_cls.icon}  {module_cls.name}")
+            btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
+            self._module_buttons[module_cls.name] = btn
+            layout.addWidget(btn)
+
+        layout.addSpacing(8)
+
+        # ── Log section ─────────────────────────────────────────────────────
+        log_label = QLabel("LOG")
+        log_label.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
+        log_label.setStyleSheet(f"color:{theme.TEXT_DIM}; background:transparent;")
+        layout.addWidget(log_label)
+
+        self.log_panel = LogPanel()
+        self.log_panel.setFixedHeight(110)
+        layout.addWidget(self.log_panel)
+
+        clear_btn = NtButton("CLEAR")
+        clear_btn.setMinimumHeight(26)
+        clear_btn.clicked.connect(self.log_panel.clear_logs)
+        layout.addWidget(clear_btn)
+
+        layout.addStretch()
+
+        # ── Drag bar ────────────────────────────────────────────────────────
+        drag = QLabel()
+        drag.setFixedHeight(4)
+        drag.setStyleSheet(f"background:{theme.BORDER_DIM};")
+        drag.mousePressEvent = self._drag_press
+        drag.mouseMoveEvent  = self._drag_move
+        layout.addWidget(drag)
+
+    # ── Module management ────────────────────────────────────────────────────
+
+    def _toggle_module(self, module_cls):
+        name = module_cls.name
+        if name in self._open_windows and self._open_windows[name].isVisible():
+            self._open_windows[name].close()
+            return
+
+        module      = module_cls()
+        config_sect = getattr(self.config.data, module_cls.config_key, None)
+        window      = module.create_window(
+            config         = config_sect,
+            save_fn        = self.config.save,
+            window_manager = self.wm,
+            parent_overlay = self,
+        )
+        self._open_windows[name] = window
+        window.show()
+
+        if self.wm.get_game_hwnd():
+            self.wm.attach_child(int(window.winId()))
+
+        self.add_log(f"{name} opened")
+        if name in self._module_buttons:
+            self._module_buttons[name].set_active(True)
+
+    def on_module_closed(self, module_name: str):
+        self._open_windows.pop(module_name, None)
+        if module_name in self._module_buttons:
+            self._module_buttons[module_name].set_active(False)
+        self.add_log(f"{module_name} closed")
+
+    def add_log(self, message: str, level: str = "info"):
+        self.log_panel.add_log(message, level)
+
+    def restore_favorite_windows(self):
+        for module_cls in MODULES:
+            config_sect = getattr(self.config.data, module_cls.config_key, None)
+            if config_sect and getattr(config_sect, "favorite", False):
+                self._toggle_module(module_cls)
+
+    # ── Drag ────────────────────────────────────────────────────────────────
+
+    def _drag_press(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = (
+                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
+
+    def _drag_move(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        pos = event.globalPosition().toPoint() - self._drag_pos
+        self.wm.move_window(int(self.winId()), pos.x(), pos.y(), self.WIDTH, self.HEIGHT)
+        self.config.data.overlay.x = pos.x()
+        self.config.data.overlay.y = pos.y()
+        self.config.save()
+
+    # ── Close ────────────────────────────────────────────────────────────────
+
+    def closeEvent(self, event):
+        for w in list(self._open_windows.values()):
+            if w.isVisible():
+                w.close()
+        QApplication.quit()
+        event.accept()
