@@ -39,8 +39,8 @@ class Overlay(QWidget):
         # ── Header ──────────────────────────────────────────────────────────
         header = QHBoxLayout()
         title = QLabel("AVATARIA HELPER")
-        title.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
-        title.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
+        title.setFont(theme.get_display_font(theme.FONT_SIZE_S))
+        title.setStyleSheet(f"color:{theme.TEXT_PRIMARY}; background:transparent;")
         title.setCursor(Qt.SizeAllCursor)
         title.mousePressEvent = self._drag_press
         title.mouseMoveEvent  = self._drag_move
@@ -70,9 +70,9 @@ class Overlay(QWidget):
         layout.addSpacing(8)
 
         # ── Log section ─────────────────────────────────────────────────────
-        log_label = QLabel("LOG")
-        log_label.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
-        log_label.setStyleSheet(f"color:{theme.TEXT_DIM}; background:transparent;")
+        log_label = QLabel("⊞ LOG")
+        log_label.setFont(theme.get_serif_font(theme.FONT_SIZE_S, bold=True))
+        log_label.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
         layout.addWidget(log_label)
 
         self.log_panel = LogPanel()

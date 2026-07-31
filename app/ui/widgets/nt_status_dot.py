@@ -4,32 +4,42 @@ from PySide6.QtGui import QPainter, QColor
 from PySide6.QtCore import Qt
 from app.ui import theme
 
-_OFFLINE = theme.TEXT_DIM
-_RUNNING = theme.ACCENT_GREEN
-_ERROR   = theme.ACCENT_RED
-
 
 class NtStatusDot(QWidget):
-    """8x8 colored status indicator dot."""
+    """16×16 status dot with glow halo for running/error states."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._color = _OFFLINE
-        self.setFixedSize(8, 8)
+        self._color = theme.TEXT_DIM
+        self._glow  = None  # None → no halo (offline)
+        self.setFixedSize(16, 16)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
-    def set_offline(self): self._set(_OFFLINE)
-    def set_running(self): self._set(_RUNNING)
-    def set_error(self):   self._set(_ERROR)
+    def set_offline(self): self._set(theme.TEXT_DIM,    None)
+    def set_running(self): self._set(theme.ACCENT_GREEN, theme.ACCENT_GREEN)
+    def set_error(self):   self._set(theme.ACCENT_RED,   theme.ACCENT_RED)
 
-    def _set(self, color: str):
+    def _set(self, color: str, glow):
         self._color = color
+        self._glow  = glow
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
+        cx, cy = 8, 8
+
+        # Glow halos
+        if self._glow:
+            for i in range(5, 0, -1):
+                c = QColor(self._glow)
+                c.setAlpha(i * 18)
+                r = 4 + i * 2
+                painter.setBrush(c)
+                painter.drawEllipse(cx - r, cy - r, r * 2, r * 2)
+
+        # Core dot
         painter.setBrush(QColor(self._color))
-        painter.drawEllipse(0, 0, 8, 8)
+        painter.drawEllipse(cx - 4, cy - 4, 8, 8)
         painter.end()

@@ -40,8 +40,8 @@ class AvaDancersWindow(ModuleWindow):
         # Header
         header = QHBoxLayout()
         self._status_dot = NtStatusDot()
-        title = QLabel("AVADANCERS")
-        title.setFont(theme.get_mono_font(theme.FONT_SIZE_M, bold=True))
+        title = QLabel("AVA DANCERS")
+        title.setFont(theme.get_display_font(theme.FONT_SIZE_M))
         title.setStyleSheet(f"color:{theme.TEXT_PRIMARY}; background:transparent;")
         title.setCursor(Qt.SizeAllCursor)
         title.mousePressEvent = self.start_drag
@@ -83,8 +83,8 @@ class AvaDancersWindow(ModuleWindow):
             col = QVBoxLayout()
             dot = NtStatusDot()
             lbl = QLabel(label)
-            lbl.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
-            lbl.setStyleSheet(f"color:{theme.TEXT_DIM}; background:transparent;")
+            lbl.setFont(theme.get_display_font(theme.FONT_SIZE_S))
+            lbl.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
             lbl.setAlignment(Qt.AlignCenter)
             col.addWidget(dot, 0, Qt.AlignCenter)
             col.addWidget(lbl, 0, Qt.AlignCenter)
