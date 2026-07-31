@@ -20,6 +20,10 @@ ACCENT_RED   = "#ff3b3b"
 ACCENT_WHITE = "#ffffff"
 ACCENT_GREEN = "#39ff84"
 
+# --- Button states ---
+BG_BUTTON_ACTIVE = "#180000"   # active/running button background (dark red tint)
+BG_BUTTON_HOVER  = "#242424"   # hover button background
+
 # --- Dot grid ---
 DOT_COLOR   = "#1a1a1a"
 DOT_SPACING = 8

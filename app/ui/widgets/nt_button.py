@@ -28,9 +28,9 @@ class NtButton(QPushButton):
 
         # Background
         if self._active:
-            bg = QColor("#180000")
+            bg = QColor(theme.BG_BUTTON_ACTIVE)
         elif self.underMouse():
-            bg = QColor("#242424")
+            bg = QColor(theme.BG_BUTTON_HOVER)
         else:
             bg = QColor(theme.BG_ELEVATED)
         painter.fillRect(rect, bg)

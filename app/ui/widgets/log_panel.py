@@ -17,7 +17,7 @@ class LogPanel(QTextEdit):
                 color: {theme.TEXT_SECONDARY};
                 border: 1px solid {theme.BORDER};
                 padding: 6px;
-                selection-background-color: #2a2a2a;
+                selection-background-color: {theme.TEXT_DIM};
             }}
             QScrollBar:vertical {{
                 background: {theme.BG_BASE};
