@@ -3,8 +3,9 @@
 #   1. Create modules/<name>/ with __init__.py exporting a ModuleBase subclass
 #   2. Import it here and add to MODULES list
 
-# from modules.ava_dancers import AvaDancersModule   # uncomment after Task 7
+from modules.ava_dancers import AvaDancersModule
 
 MODULES = [
-    # AvaDancersModule,   # uncomment after Task 7
+    AvaDancersModule,
+    # Add new modules here — one line each
 ]
