@@ -1,7 +1,7 @@
 # app/ui/overlay.py
 from __future__ import annotations
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QTimer
 
 from app.ui import theme
 from app.ui.widgets.nt_button import NtButton
@@ -20,6 +20,7 @@ class Overlay(QWidget):
         self.wm = window_manager
         self._drag_pos = QPoint()
         self._open_windows: dict[str, QWidget] = {}
+        self._startup_shown = False
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -118,7 +119,7 @@ class Overlay(QWidget):
         if self.wm.get_game_hwnd():
             self.wm.attach_child(int(window.winId()))
 
-        self.add_log(f"{name} opened")
+        self.add_log(f"Запуск мода {name}")
         if name in self._module_buttons:
             self._module_buttons[name].set_active(True)
 
@@ -126,7 +127,7 @@ class Overlay(QWidget):
         self._open_windows.pop(module_name, None)
         if module_name in self._module_buttons:
             self._module_buttons[module_name].set_active(False)
-        self.add_log(f"{module_name} closed")
+        self.add_log(f"Закрытие мода {module_name}")
 
     def add_log(self, message: str, level: str = "info"):
         self.log_panel.add_log(message, level)
@@ -156,6 +157,32 @@ class Overlay(QWidget):
         self.config.data.overlay.x = pos.x()
         self.config.data.overlay.y = pos.y()
         self.config.save()
+
+    # ── Startup sequence ────────────────────────────────────────────────────
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._startup_shown:
+            self._startup_shown = True
+            QTimer.singleShot(200, self._startup_sequence)
+
+    def _startup_sequence(self):
+        from app.ui.widgets.log_panel import CLAUDE_ORANGE
+
+        def step2():
+            self.log_panel.animate_log(
+                segments=[("made by Deatser", CLAUDE_ORANGE)],
+                include_ts=False,
+                delay_ms=120,
+            )
+
+        self.log_panel.animate_log(
+            segments=[
+                ("Запуск Avataria Helper — ", theme.TEXT_SECONDARY),
+                ("Успешно", theme.ACCENT_GREEN),
+            ],
+            on_done=step2,
+        )
 
     # ── Close ────────────────────────────────────────────────────────────────
 

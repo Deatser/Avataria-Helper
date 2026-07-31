@@ -20,7 +20,7 @@ _KEY_LABELS = ["A", "S", "W", "D"]
 class AvaDancersWindow(ModuleWindow):
 
     def __init__(self, config, save_fn, window_manager, parent_overlay=None):
-        super().__init__("AvaDancers", config, save_fn, parent_overlay)
+        super().__init__("Ava Dancers", config, save_fn, parent_overlay)
         self._wm  = window_manager
         self._bot: AvaBot | None = None
         self.resize(WIDTH, HEIGHT)
@@ -67,12 +67,12 @@ class AvaDancersWindow(ModuleWindow):
         layout.addSpacing(4)
 
         # Start / stop
-        self._start_btn = NtButton("▶  START BOT")
+        self._start_btn = NtButton("▶  СТАРТ")
         self._start_btn.clicked.connect(self._toggle_bot)
         layout.addWidget(self._start_btn)
 
         # Test detection
-        test_btn = NtButton("◎  TEST DETECTION")
+        test_btn = NtButton("◎  ТЕСТ ДЕТЕКЦИИ")
         test_btn.clicked.connect(self._test_detection)
         layout.addWidget(test_btn)
 
@@ -121,21 +121,21 @@ class AvaDancersWindow(ModuleWindow):
     def _start_bot(self):
         hwnd = self._wm.get_game_hwnd()
         if not hwnd:
-            self._log.add_log("game window not found", level="error")
+            self._log.add_log("Игровое окно не найдено", level="error")
             return
 
         self._bot = AvaBot(hwnd, self.config.min_active)
-        self._bot.key_pressed.connect(lambda k: self._log.add_log(f"pressed {k.upper()}"))
+        self._bot.key_pressed.connect(lambda k: self._log.add_log(f"▶ {k.upper()}"))
         self._bot.tile_detected.connect(self._on_tile_detected)
         self._bot.error.connect(lambda e: self._log.add_log(e, level="error"))
         self._bot.start()
 
         self._start_btn.set_active(True)
-        self._start_btn.setText("■  STOP BOT")
+        self._start_btn.setText("■  СТОП")
         self._status_dot.set_running()
-        self._log.add_log("bot started", level="success")
+        self._log.add_log("Бот запущен", level="success")
         if self.parent_overlay:
-            self.parent_overlay.add_log("AvaDancers: bot started")
+            self.parent_overlay.add_log("Ava Dancers: бот запущен")
 
     def _stop_bot(self):
         if self._bot:
@@ -145,13 +145,13 @@ class AvaDancersWindow(ModuleWindow):
             self._bot = None
 
         self._start_btn.set_active(False)
-        self._start_btn.setText("▶  START BOT")
+        self._start_btn.setText("▶  СТАРТ")
         self._status_dot.set_offline()
         for dot in self._tile_dots:
             dot.set_offline()
-        self._log.add_log("bot stopped")
+        self._log.add_log("Бот остановлен")
         if self.parent_overlay:
-            self.parent_overlay.add_log("AvaDancers: bot stopped")
+            self.parent_overlay.add_log("Ava Dancers: бот остановлен")
 
     def _on_tile_detected(self, tile_id: int, key: str):
         if 0 <= tile_id < 4:
@@ -168,8 +168,9 @@ class AvaDancersWindow(ModuleWindow):
             tiles = split_tiles(img)
             for i, tile in enumerate(tiles):
                 white, active = detect_tile(tile, self.config.min_active)
-                state = "ACTIVE" if active else "empty"
-                self._log.add_log(f"{_KEY_LABELS[i]}: {white}px — {state}")
+                state = "АКТИВНА" if active else "пусто"
+                level = "success" if active else "info"
+                self._log.add_log(f"{_KEY_LABELS[i]}: {white}px — {state}", level)
         except Exception as e:
             self._log.add_log(str(e), level="error")
 

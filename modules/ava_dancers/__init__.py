@@ -3,8 +3,8 @@ from modules.base import ModuleBase
 
 
 class AvaDancersModule(ModuleBase):
-    name        = "AvaDancers"
-    description = "Dance mini-game automation"
+    name        = "Ava Dancers"
+    description = "Автоматизация мини-игры с танцами"
     icon        = "◈"
     config_key  = "ava_dancers"   # matches AppConfig.ava_dancers field
 
