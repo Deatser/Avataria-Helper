@@ -1,1 +1,18 @@
-﻿{"overlay":{"x":10,"y":10,"width":220,"height":420,"opacity":220},"ava_dancers":{"favorite":false,"position_saved":false,"x":250,"y":10,"min_active":3500}}
+{
+    "overlay": {
+        "x": 10,
+        "y": 10,
+        "width": 330,
+        "height": 420,
+        "opacity": 220
+    },
+    "ava_dancers": {
+        "favorite": false,
+        "position_saved": false,
+        "x": 370,
+        "y": 10,
+        "width": 420,
+        "height": 330,
+        "min_active": 3500
+    }
+}

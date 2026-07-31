@@ -11,8 +11,8 @@ from app.ui.widgets.log_panel import LogPanel
 from app.ui import theme
 from modules.ava_dancers.bot import AvaBot, split_tiles, detect_tile, TILE_REGION
 
-WIDTH  = 280
-HEIGHT = 330
+_DEFAULT_W = 420
+_DEFAULT_H = 330
 
 _KEY_LABELS = ["A", "S", "W", "D"]
 
@@ -23,17 +23,20 @@ class AvaDancersWindow(ModuleWindow):
         super().__init__("Ava Dancers", config, save_fn, parent_overlay)
         self._wm  = window_manager
         self._bot: AvaBot | None = None
-        self.resize(WIDTH, HEIGHT)
+        w = getattr(config, "width",  _DEFAULT_W)
+        h = getattr(config, "height", _DEFAULT_H)
+        self.resize(w, h)
         self._build_ui()
         self.restore_position()
 
     # ── UI construction ──────────────────────────────────────────────────────
 
     def _build_ui(self):
-        panel = NtPanel(self)
-        panel.setGeometry(0, 0, WIDTH, HEIGHT)
+        self._panel = NtPanel(self)
+        self._panel.setGeometry(0, 0, self.width(), self.height())
+        self._panel.setMouseTracking(True)
 
-        layout = QVBoxLayout(panel)
+        layout = QVBoxLayout(self._panel)
         layout.setContentsMargins(theme.PADDING, theme.PADDING, theme.PADDING, theme.PADDING)
         layout.setSpacing(theme.SPACING)
 
@@ -92,12 +95,10 @@ class AvaDancersWindow(ModuleWindow):
             tiles_row.addLayout(col)
         layout.addLayout(tiles_row)
 
-        layout.addStretch()
-
-        # Log
+        # Log (stretchy)
         self._log = LogPanel()
-        self._log.setFixedHeight(80)
-        layout.addWidget(self._log)
+        self._log.setMinimumHeight(60)
+        layout.addWidget(self._log, stretch=1)
 
         # Drag bar
         drag = QLabel("⠿  ⠿  ⠿")

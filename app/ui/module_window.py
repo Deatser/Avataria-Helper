@@ -3,11 +3,11 @@ from __future__ import annotations
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QPoint
 
+from app.ui.resize_mixin import ResizeMixin
 
-class ModuleWindow(QWidget):
-    """Base class for all module windows.
-    Subclasses get: drag behavior, position persistence, close notification.
-    """
+
+class ModuleWindow(ResizeMixin, QWidget):
+    """Base for all module windows: drag, position/size persistence, resize."""
 
     def __init__(self, module_name: str, config, save_fn, parent_overlay=None):
         super().__init__()
@@ -16,12 +16,15 @@ class ModuleWindow(QWidget):
         self.save_fn        = save_fn
         self.parent_overlay = parent_overlay
         self._drag_pos      = QPoint()
+        self._panel         = None   # subclass assigns in _build_ui
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self._init_resize()
+
+    # ── Position / size ──────────────────────────────────────────────────────
 
     def restore_position(self):
-        """Move window to saved position if available."""
         if getattr(self.config, "position_saved", False):
             self.move(self.config.x, self.config.y)
 
@@ -30,6 +33,8 @@ class ModuleWindow(QWidget):
         self.config.y = y
         self.config.position_saved = True
         self.save_fn()
+
+    # ── Drag ────────────────────────────────────────────────────────────────
 
     def start_drag(self, event):
         if event.button() == Qt.LeftButton:
@@ -43,10 +48,25 @@ class ModuleWindow(QWidget):
         new_pos = event.globalPosition().toPoint() - self._drag_pos
         x, y = new_pos.x(), new_pos.y()
         if window_manager and window_manager.get_game_hwnd():
-            window_manager.move_window(int(self.winId()), x, y, self.width(), self.height())
+            window_manager.move_window(int(self.winId()), x, y,
+                                       self.width(), self.height())
         else:
             self.move(x, y)
         self.save_position(x, y)
+
+    # ── ResizeMixin hooks ────────────────────────────────────────────────────
+
+    def _on_resize_panel(self):
+        if self._panel is not None:
+            self._panel.setGeometry(0, 0, self.width(), self.height())
+
+    def _on_resize_done(self):
+        if hasattr(self.config, "width"):
+            self.config.width  = self.width()
+            self.config.height = self.height()
+            self.save_fn()
+
+    # ── Close ────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
         if self.parent_overlay:

@@ -8,7 +8,7 @@ def test_defaults_when_no_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = ConfigManager()
     assert cfg.data.overlay.x == 10
-    assert cfg.data.overlay.width == 220
+    assert cfg.data.overlay.width == 330
     assert cfg.data.ava_dancers.min_active == 3500
     assert cfg.data.ava_dancers.favorite is False
 
@@ -21,7 +21,7 @@ def test_load_partial_config(tmp_path, monkeypatch):
     cfg = ConfigManager()
     assert cfg.data.overlay.x == 50
     assert cfg.data.overlay.y == 100
-    assert cfg.data.overlay.width == 220   # missing key → default
+    assert cfg.data.overlay.width == 330   # missing key → default
 
 
 def test_corrupted_config_falls_back_to_defaults(tmp_path, monkeypatch):

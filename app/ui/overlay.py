@@ -4,15 +4,16 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplic
 from PySide6.QtCore import Qt, QPoint, QTimer
 
 from app.ui import theme
+from app.ui.resize_mixin import ResizeMixin
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_panel import NtPanel
 from app.ui.widgets.log_panel import LogPanel
 from app.module_registry import MODULES
 
 
-class Overlay(QWidget):
-    WIDTH  = 220
-    HEIGHT = 420
+class Overlay(ResizeMixin, QWidget):
+    _RESIZE_MIN_W = 240
+    _RESIZE_MIN_H = 300
 
     def __init__(self, config, window_manager, parent=None):
         super().__init__(parent)
@@ -21,18 +22,21 @@ class Overlay(QWidget):
         self._drag_pos = QPoint()
         self._open_windows: dict[str, QWidget] = {}
         self._startup_shown = False
+        self._panel: NtPanel | None = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(self.WIDTH, self.HEIGHT)
+        self.resize(config.data.overlay.width, config.data.overlay.height)
         self._build_ui()
         self.move(config.data.overlay.x, config.data.overlay.y)
+        self._init_resize()
 
     def _build_ui(self):
-        panel = NtPanel(self)
-        panel.setGeometry(0, 0, self.WIDTH, self.HEIGHT)
+        self._panel = NtPanel(self)
+        self._panel.setGeometry(0, 0, self.width(), self.height())
+        self._panel.setMouseTracking(True)
 
-        layout = QVBoxLayout(panel)
+        layout = QVBoxLayout(self._panel)
         layout.setContentsMargins(theme.PADDING, theme.PADDING, theme.PADDING, theme.PADDING)
         layout.setSpacing(theme.SPACING)
 
@@ -76,15 +80,13 @@ class Overlay(QWidget):
         layout.addWidget(log_label)
 
         self.log_panel = LogPanel()
-        self.log_panel.setFixedHeight(110)
-        layout.addWidget(self.log_panel)
+        self.log_panel.setMinimumHeight(80)
+        layout.addWidget(self.log_panel, stretch=1)
 
         clear_btn = NtButton("CLEAR")
         clear_btn.setMinimumHeight(26)
         clear_btn.clicked.connect(self.log_panel.clear_logs)
         layout.addWidget(clear_btn)
-
-        layout.addStretch()
 
         # ── Drag bar ────────────────────────────────────────────────────────
         drag = QLabel("⠿  ⠿  ⠿")
@@ -96,6 +98,17 @@ class Overlay(QWidget):
         drag.mousePressEvent = self._drag_press
         drag.mouseMoveEvent  = self._drag_move
         layout.addWidget(drag)
+
+    # ── ResizeMixin hooks ────────────────────────────────────────────────────
+
+    def _on_resize_panel(self):
+        if self._panel is not None:
+            self._panel.setGeometry(0, 0, self.width(), self.height())
+
+    def _on_resize_done(self):
+        self.config.data.overlay.width  = self.width()
+        self.config.data.overlay.height = self.height()
+        self.config.save()
 
     # ── Module management ────────────────────────────────────────────────────
 
@@ -151,7 +164,8 @@ class Overlay(QWidget):
             return
         pos = event.globalPosition().toPoint() - self._drag_pos
         if self.wm.get_game_hwnd():
-            self.wm.move_window(int(self.winId()), pos.x(), pos.y(), self.WIDTH, self.HEIGHT)
+            self.wm.move_window(int(self.winId()), pos.x(), pos.y(),
+                                self.width(), self.height())
         else:
             self.move(pos.x(), pos.y())
         self.config.data.overlay.x = pos.x()

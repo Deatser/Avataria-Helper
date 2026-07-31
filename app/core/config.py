@@ -9,7 +9,7 @@ from pathlib import Path
 class OverlayConfig:
     x: int = 10
     y: int = 10
-    width: int = 220
+    width: int = 330
     height: int = 420
     opacity: int = 220
 
@@ -18,8 +18,10 @@ class OverlayConfig:
 class AvaDancersConfig:
     favorite: bool = False
     position_saved: bool = False
-    x: int = 250
+    x: int = 370
     y: int = 10
+    width: int = 420
+    height: int = 330
     min_active: int = 3500
 
 

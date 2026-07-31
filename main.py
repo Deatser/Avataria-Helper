@@ -46,8 +46,8 @@ def main():
             int(overlay.winId()),
             config.data.overlay.x,
             config.data.overlay.y,
-            Overlay.WIDTH,
-            Overlay.HEIGHT,
+            config.data.overlay.width,
+            config.data.overlay.height,
         )
         overlay.restore_favorite_windows()
     else:
