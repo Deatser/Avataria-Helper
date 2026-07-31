@@ -1,5 +1,6 @@
 # app/ui/widgets/log_panel.py
 from datetime import datetime
+from html import escape
 from PySide6.QtWidgets import QTextEdit
 from app.ui import theme
 
@@ -43,7 +44,7 @@ class LogPanel(QTextEdit):
             msg_color = theme.TEXT_SECONDARY
         html = (
             f'<span style="color:{theme.TEXT_DIM}">[{ts}]</span> '
-            f'<span style="color:{msg_color}">{message}</span>'
+            f'<span style="color:{msg_color}">{escape(message)}</span>'
         )
         self.append(html)
         sb = self.verticalScrollBar()

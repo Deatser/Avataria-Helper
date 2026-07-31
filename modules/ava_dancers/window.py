@@ -134,7 +134,8 @@ class AvaDancersWindow(ModuleWindow):
     def _stop_bot(self):
         if self._bot:
             self._bot.stop_bot()
-            self._bot.wait(600)
+            if not self._bot.wait(600):
+                self._bot.terminate()
             self._bot = None
 
         self._start_btn.set_active(False)
@@ -178,5 +179,6 @@ class AvaDancersWindow(ModuleWindow):
     def closeEvent(self, event):
         if self._bot and self._bot.isRunning():
             self._bot.stop_bot()
-            self._bot.wait(600)
+            if not self._bot.wait(600):
+                self._bot.terminate()
         super().closeEvent(event)

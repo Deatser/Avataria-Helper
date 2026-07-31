@@ -1,5 +1,6 @@
 from __future__ import annotations
 import time
+import threading
 import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
@@ -72,7 +73,7 @@ class AvaBot(QThread):
         super().__init__()
         self._hwnd       = game_hwnd
         self._min_active = min_active
-        self._running    = False
+        self._stop_event = threading.Event()
         self._prev_tiles: set[int]        = set()
         self._last_time:  dict[int, float] = {}
         self._cooldown   = 0.15
@@ -81,14 +82,14 @@ class AvaBot(QThread):
         self._min_active = min_active
 
     def stop_bot(self):
-        self._running = False
+        self._stop_event.set()
 
     def run(self):
-        self._running = True
+        self._stop_event.clear()
         self._prev_tiles.clear()
         capture = ScreenCapture.get()
 
-        while self._running:
+        while not self._stop_event.is_set():
             try:
                 img    = capture.grab(TILE_REGION)
                 tiles  = split_tiles(img)
@@ -100,8 +101,6 @@ class AvaBot(QThread):
                     stats[i] = white
                     if is_active:
                         active.append(i)
-
-                self.stats_updated.emit(stats)
 
                 for tile_id in set(active) - self._prev_tiles:
                     self._try_press(tile_id)
