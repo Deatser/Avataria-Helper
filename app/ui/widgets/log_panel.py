@@ -46,7 +46,7 @@ class LogPanel(QTextEdit):
         ts = datetime.now().strftime("%H:%M:%S")
         color = self._level_color(level)
         html = (
-            f'<span style="color:{theme.TEXT_DIM}">[{ts}]</span> '
+            f'<span style="color:{theme.LOG_TS_COLOR}">[{ts}]</span> '
             f'<span style="color:{color}">{escape(message)}</span>'
         )
         self.append(html)
@@ -120,7 +120,7 @@ class LogPanel(QTextEdit):
 
         fmt = QTextCharFormat()
         if ts:
-            fmt.setForeground(QColor(theme.TEXT_DIM))
+            fmt.setForeground(QColor(theme.LOG_TS_COLOR))
             cursor.setCharFormat(fmt)
             cursor.insertText(f"[{ts}] ")
 

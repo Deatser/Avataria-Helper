@@ -5,19 +5,24 @@ from PySide6.QtCore import Qt, QTimer
 
 from app.ui.module_window import ModuleWindow
 from app.ui.widgets.nt_button import NtButton
-from app.ui.widgets.nt_panel import NtPanel
+from app.ui.widgets.vw_panel import VwPanel
 from app.ui.widgets.nt_status_dot import NtStatusDot
+from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.log_panel import LogPanel
 from app.ui import theme
 from modules.ava_dancers.bot import AvaBot, split_tiles, detect_tile, TILE_REGION
 
 _DEFAULT_W = 420
 _DEFAULT_H = 330
+_MIN_W     = 300
+_MIN_H     = 280
 
 _KEY_LABELS = ["A", "S", "W", "D"]
 
 
 class AvaDancersWindow(ModuleWindow):
+    _RESIZE_MIN_W = _MIN_W
+    _RESIZE_MIN_H = _MIN_H
 
     def __init__(self, config, save_fn, window_manager, parent_overlay=None):
         super().__init__("Ava Dancers", config, save_fn, parent_overlay)
@@ -25,14 +30,15 @@ class AvaDancersWindow(ModuleWindow):
         self._bot: AvaBot | None = None
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
-        self.resize(w, h)
+        self.resize(max(w, _MIN_W), max(h, _MIN_H))
+        self.setMinimumSize(_MIN_W, _MIN_H)
         self._build_ui()
         self.restore_position()
 
     # ── UI construction ──────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._panel = NtPanel(self)
+        self._panel = VwPanel(self)
         self._panel.setGeometry(0, 0, self.width(), self.height())
         self._panel.setMouseTracking(True)
 
@@ -40,21 +46,25 @@ class AvaDancersWindow(ModuleWindow):
         layout.setContentsMargins(theme.PADDING, theme.PADDING, theme.PADDING, theme.PADDING)
         layout.setSpacing(theme.SPACING)
 
-        # Header
+        # ── Header ───────────────────────────────────────────────────────────
         header = QHBoxLayout()
         self._status_dot = NtStatusDot()
         title = QLabel("AVA DANCERS")
         title.setFont(theme.get_display_font(theme.FONT_SIZE_M))
-        title.setStyleSheet(f"color:{theme.TEXT_PRIMARY}; background:transparent;")
+        title.setStyleSheet(f"color:{theme.VW_CYAN}; background:transparent;")
         title.setCursor(Qt.SizeAllCursor)
         title.mousePressEvent = self.start_drag
         title.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
-        self._fav_btn = NtButton("★" if self.config.favorite else "☆")
+
+        self._fav_btn = NtButton("★" if self.config.favorite else "☆",
+                                 accent=theme.VW_MAGENTA)
         self._fav_btn.setFixedSize(24, 24)
         self._fav_btn.clicked.connect(self._toggle_favorite)
-        close_btn = NtButton("×")
+
+        close_btn = NtButton("×", accent=theme.VW_MAGENTA)
         close_btn.setFixedSize(24, 24)
         close_btn.clicked.connect(self.close)
+
         header.addWidget(self._status_dot)
         header.addSpacing(6)
         header.addWidget(title)
@@ -65,21 +75,20 @@ class AvaDancersWindow(ModuleWindow):
 
         sep = QLabel()
         sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background:{theme.BORDER};")
+        sep.setStyleSheet(f"background:{theme.VW_BORDER};")
         layout.addWidget(sep)
         layout.addSpacing(4)
 
-        # Start / stop
-        self._start_btn = NtButton("▶  СТАРТ")
+        # ── Controls ─────────────────────────────────────────────────────────
+        self._start_btn = NtButton("▶  СТАРТ", accent=theme.VW_CYAN)
         self._start_btn.clicked.connect(self._toggle_bot)
         layout.addWidget(self._start_btn)
 
-        # Test detection
-        test_btn = NtButton("◎  ТЕСТ ДЕТЕКЦИИ")
+        test_btn = NtButton("◎  ТЕСТ ДЕТЕКЦИИ", accent=theme.VW_PURPLE)
         test_btn.clicked.connect(self._test_detection)
         layout.addWidget(test_btn)
 
-        # Tile status row
+        # ── Tile status row ───────────────────────────────────────────────────
         tiles_row = QHBoxLayout()
         self._tile_dots: list[NtStatusDot] = []
         for label in _KEY_LABELS:
@@ -87,7 +96,7 @@ class AvaDancersWindow(ModuleWindow):
             dot = NtStatusDot()
             lbl = QLabel(label)
             lbl.setFont(theme.get_display_font(theme.FONT_SIZE_S))
-            lbl.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
+            lbl.setStyleSheet(f"color:{theme.VW_PURPLE}; background:transparent;")
             lbl.setAlignment(Qt.AlignCenter)
             col.addWidget(dot, 0, Qt.AlignCenter)
             col.addWidget(lbl, 0, Qt.AlignCenter)
@@ -95,21 +104,22 @@ class AvaDancersWindow(ModuleWindow):
             tiles_row.addLayout(col)
         layout.addLayout(tiles_row)
 
-        # Log (stretchy)
+        # ── Log (stretchy) ───────────────────────────────────────────────────
         self._log = LogPanel()
         self._log.setMinimumHeight(60)
         layout.addWidget(self._log, stretch=1)
 
-        # Drag bar
-        drag = QLabel("⠿  ⠿  ⠿")
-        drag.setAlignment(Qt.AlignCenter)
-        drag.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
-        drag.setFixedHeight(16)
-        drag.setStyleSheet(f"color:{theme.TEXT_DIM}; background:transparent;")
-        drag.setCursor(Qt.SizeAllCursor)
+        # ── Drag handle ──────────────────────────────────────────────────────
+        drag = NtDragHandle(dot_color=theme.VW_BORDER)
         drag.mousePressEvent = self.start_drag
         drag.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
         layout.addWidget(drag)
+
+    # ── showEvent: force repaint to fix visual freeze on first show ──────────
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(30, self.repaint)
 
     # ── Bot control ──────────────────────────────────────────────────────────
 
@@ -160,7 +170,7 @@ class AvaDancersWindow(ModuleWindow):
             dot.set_running()
             QTimer.singleShot(180, dot.set_offline)
 
-    # ── Test detection ───────────────────────────────────────────────────────
+    # ── Test detection ────────────────────────────────────────────────────────
 
     def _test_detection(self):
         from app.core.capture import ScreenCapture
@@ -170,8 +180,8 @@ class AvaDancersWindow(ModuleWindow):
             for i, tile in enumerate(tiles):
                 white, active = detect_tile(tile, self.config.min_active)
                 state = "АКТИВНА" if active else "пусто"
-                level = "success" if active else "info"
-                self._log.add_log(f"{_KEY_LABELS[i]}: {white}px — {state}", level)
+                self._log.add_log(f"{_KEY_LABELS[i]}: {white}px — {state}",
+                                  "success" if active else "info")
         except Exception as e:
             self._log.add_log(str(e), level="error")
 
@@ -182,7 +192,7 @@ class AvaDancersWindow(ModuleWindow):
         self._fav_btn.setText("★" if self.config.favorite else "☆")
         self.save_fn()
 
-    # ── Close ─────────────────────────────────────────────────────────────────
+    # ── Close ────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
         if self._bot and self._bot.isRunning():

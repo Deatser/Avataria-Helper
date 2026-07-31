@@ -7,6 +7,7 @@ from app.ui import theme
 from app.ui.resize_mixin import ResizeMixin
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_panel import NtPanel
+from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.log_panel import LogPanel
 from app.module_registry import MODULES
 
@@ -66,7 +67,8 @@ class Overlay(ResizeMixin, QWidget):
         # ── Module buttons ──────────────────────────────────────────────────
         self._module_buttons: dict[str, NtButton] = {}
         for module_cls in MODULES:
-            btn = NtButton(f"{module_cls.icon}  {module_cls.name}")
+            accent = getattr(module_cls, "color", None)
+            btn = NtButton(f"{module_cls.icon}  {module_cls.name}", accent=accent)
             btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
             self._module_buttons[module_cls.name] = btn
             layout.addWidget(btn)
@@ -88,13 +90,8 @@ class Overlay(ResizeMixin, QWidget):
         clear_btn.clicked.connect(self.log_panel.clear_logs)
         layout.addWidget(clear_btn)
 
-        # ── Drag bar ────────────────────────────────────────────────────────
-        drag = QLabel("⠿  ⠿  ⠿")
-        drag.setAlignment(Qt.AlignCenter)
-        drag.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
-        drag.setFixedHeight(16)
-        drag.setStyleSheet(f"color:{theme.TEXT_DIM}; background:transparent;")
-        drag.setCursor(Qt.SizeAllCursor)
+        # ── Drag handle ──────────────────────────────────────────────────────
+        drag = NtDragHandle()
         drag.mousePressEvent = self._drag_press
         drag.mouseMoveEvent  = self._drag_move
         layout.addWidget(drag)
