@@ -42,7 +42,7 @@ class ModuleWindow(QWidget):
             return
         new_pos = event.globalPosition().toPoint() - self._drag_pos
         x, y = new_pos.x(), new_pos.y()
-        if window_manager:
+        if window_manager and window_manager.get_game_hwnd():
             window_manager.move_window(int(self.winId()), x, y, self.width(), self.height())
         else:
             self.move(x, y)

@@ -25,6 +25,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(self.WIDTH, self.HEIGHT)
         self._build_ui()
+        self.move(config.data.overlay.x, config.data.overlay.y)
 
     def _build_ui(self):
         panel = NtPanel(self)
@@ -39,6 +40,9 @@ class Overlay(QWidget):
         title = QLabel("AVATARIA HELPER")
         title.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
         title.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
+        title.setCursor(Qt.SizeAllCursor)
+        title.mousePressEvent = self._drag_press
+        title.mouseMoveEvent  = self._drag_move
         close_btn = NtButton("×")
         close_btn.setFixedSize(24, 24)
         close_btn.clicked.connect(self.close)
@@ -82,9 +86,12 @@ class Overlay(QWidget):
         layout.addStretch()
 
         # ── Drag bar ────────────────────────────────────────────────────────
-        drag = QLabel()
-        drag.setFixedHeight(4)
-        drag.setStyleSheet(f"background:{theme.BORDER_DIM};")
+        drag = QLabel("⠿  ⠿  ⠿")
+        drag.setAlignment(Qt.AlignCenter)
+        drag.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
+        drag.setFixedHeight(16)
+        drag.setStyleSheet(f"color:{theme.TEXT_DIM}; background:transparent;")
+        drag.setCursor(Qt.SizeAllCursor)
         drag.mousePressEvent = self._drag_press
         drag.mouseMoveEvent  = self._drag_move
         layout.addWidget(drag)
@@ -142,7 +149,10 @@ class Overlay(QWidget):
         if not (event.buttons() & Qt.LeftButton):
             return
         pos = event.globalPosition().toPoint() - self._drag_pos
-        self.wm.move_window(int(self.winId()), pos.x(), pos.y(), self.WIDTH, self.HEIGHT)
+        if self.wm.get_game_hwnd():
+            self.wm.move_window(int(self.winId()), pos.x(), pos.y(), self.WIDTH, self.HEIGHT)
+        else:
+            self.move(pos.x(), pos.y())
         self.config.data.overlay.x = pos.x()
         self.config.data.overlay.y = pos.y()
         self.config.save()

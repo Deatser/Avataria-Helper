@@ -43,6 +43,9 @@ class AvaDancersWindow(ModuleWindow):
         title = QLabel("AVADANCERS")
         title.setFont(theme.get_mono_font(theme.FONT_SIZE_M, bold=True))
         title.setStyleSheet(f"color:{theme.TEXT_PRIMARY}; background:transparent;")
+        title.setCursor(Qt.SizeAllCursor)
+        title.mousePressEvent = self.start_drag
+        title.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
         self._fav_btn = NtButton("★" if self.config.favorite else "☆")
         self._fav_btn.setFixedSize(24, 24)
         self._fav_btn.clicked.connect(self._toggle_favorite)
@@ -97,9 +100,12 @@ class AvaDancersWindow(ModuleWindow):
         layout.addWidget(self._log)
 
         # Drag bar
-        drag = QLabel()
-        drag.setFixedHeight(4)
-        drag.setStyleSheet(f"background:{theme.BORDER_DIM};")
+        drag = QLabel("⠿  ⠿  ⠿")
+        drag.setAlignment(Qt.AlignCenter)
+        drag.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
+        drag.setFixedHeight(16)
+        drag.setStyleSheet(f"color:{theme.TEXT_DIM}; background:transparent;")
+        drag.setCursor(Qt.SizeAllCursor)
         drag.mousePressEvent = self.start_drag
         drag.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
         layout.addWidget(drag)
