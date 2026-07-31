@@ -4,7 +4,7 @@ from PySide6.QtGui import QPainter, QColor
 from PySide6.QtCore import Qt
 from app.ui import theme
 
-_OFFLINE = "#2a2a2a"
+_OFFLINE = theme.TEXT_DIM
 _RUNNING = theme.ACCENT_GREEN
 _ERROR   = theme.ACCENT_RED
 
