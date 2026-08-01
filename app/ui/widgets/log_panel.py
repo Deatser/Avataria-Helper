@@ -1,10 +1,10 @@
 # app/ui/widgets/log_panel.py
 import random
 from datetime import datetime
-from html import escape
 from PySide6.QtWidgets import QTextEdit
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QTextCursor, QTextCharFormat, QColor
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import (QTextCursor, QTextCharFormat, QTextBlockFormat,
+                           QColor)
 from app.ui import theme
 
 CLAUDE_ORANGE = "#E8712A"
@@ -18,49 +18,56 @@ class LogPanel(QTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
-        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet(f"""
             QTextEdit {{
-                background-color: rgba(3, 3, 8, 150);
+                background-color: rgba(5, 4, 10, 160);
                 color: {theme.TEXT_SECONDARY};
-                border: 1px solid {theme.BORDER};
-                padding: 6px 14px;
+                border: 1px solid {theme.BORDER_DIM};
+                border-radius: {theme.RADIUS}px;
+                padding: 10px 16px;
                 selection-background-color: {theme.TEXT_DIM};
             }}
             QScrollBar:vertical {{
                 background: transparent;
-                width: 4px;
+                width: 6px;
                 border: none;
-                margin: 0;
+                margin: 6px 2px 6px 0;
             }}
             QScrollBar::handle:vertical {{
-                background: {theme.BORDER};
-                min-height: 16px;
+                background: {theme.BORDER_BRIGHT};
+                border-radius: 3px;
+                min-height: 24px;
             }}
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {{ height: 0px; }}
         """)
-        self.viewport().setAutoFillBackground(False)
+        # Translucent dark fill: panel traces stay visible, but dimmed
+        self.viewport().setAutoFillBackground(True)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def add_log(self, message: str, level: str = "info"):
         """Append a log line with scramble animation and status suffix."""
-        color = self._level_color(level)
-        if level == "success":
-            segs = [
-                (escape(message) + " — ", theme.TEXT_SECONDARY),
-                ("Успешно", theme.ACCENT_GREEN),
-            ]
-        elif level == "error":
-            segs = [
-                (escape(message) + " — ", theme.TEXT_SECONDARY),
-                ("Ошибка", theme.ACCENT_RED),
-            ]
-        else:
-            segs = [(escape(message), color)]
+        self.add_log_segments([(message, theme.TEXT_SECONDARY)], level)
+
+    def add_log_segments(self, segments: list, level: str = "info"):
+        """Same, but the message is built from pre-coloured (text, colour) parts.
+
+        level="plain" prints the line as-is — for readings and events that are
+        not the outcome of an action and need no status word.
+        """
+        segs = list(segments)
+        if level != "plain":
+            status = (("Ошибка", theme.ACCENT_RED) if level == "error"
+                      else ("Успешно", theme.ACCENT_GREEN))
+            segs += [(" — ", theme.TEXT_SECONDARY), status]
         # Fast scramble for regular logs (interval 22ms, min 10 frames)
         self.animate_log(segs, include_ts=True, interval_ms=22, min_frames=10)
+
+    def blank_line(self):
+        """Spacer so groups of related lines don't run together."""
+        self.append("")
+        self._scroll_end()
 
     # ── Scramble animation ────────────────────────────────────────────────────
 
@@ -86,6 +93,7 @@ class LogPanel(QTextEdit):
 
         self.append("")
         block_num = self.document().blockCount() - 1
+        self._set_line_height(block_num)
         self._write_block(block_num, self._build_frame(segments, 0), ts)
 
         def tick(f):
@@ -122,6 +130,15 @@ class LogPanel(QTextEdit):
                 result.append((buf, cur_color))
         return result
 
+    def _set_line_height(self, block_num: int):
+        """Airy leading — log lines should not sit on top of each other."""
+        block = self.document().findBlockByNumber(block_num)
+        if not block.isValid():
+            return
+        fmt = QTextBlockFormat()
+        fmt.setLineHeight(145, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        QTextCursor(block).setBlockFormat(fmt)
+
     def _write_block(self, block_num: int, char_segs: list, ts: str = None):
         block = self.document().findBlockByNumber(block_num)
         if not block.isValid():
@@ -144,13 +161,6 @@ class LogPanel(QTextEdit):
             cursor.insertText(text)
 
         self._scroll_end()
-
-    def _level_color(self, level: str) -> str:
-        return {
-            "error":   theme.ACCENT_RED,
-            "success": theme.ACCENT_GREEN,
-            "orange":  CLAUDE_ORANGE,
-        }.get(level, theme.TEXT_SECONDARY)
 
     def _scroll_end(self):
         sb = self.verticalScrollBar()

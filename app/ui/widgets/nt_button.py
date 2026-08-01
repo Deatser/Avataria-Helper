@@ -1,29 +1,48 @@
 # app/ui/widgets/nt_button.py
 from PySide6.QtWidgets import QPushButton
-from PySide6.QtGui import QPainter, QColor, QPen, QLinearGradient, QBrush, QPolygon, QRegion
-from PySide6.QtCore import Qt, QRect, QPoint, QTimer
+from PySide6.QtGui import (QPainter, QColor, QPen, QLinearGradient, QBrush,
+                           QPainterPath)
+from PySide6.QtCore import Qt, QRectF, QTimer
 from app.ui import theme
 
-_SMALL_W = 40   # below this: center text, no chamfer, no sweep
-_CUT     = 7    # chamfer size in pixels
+_SMALL_W = 40   # below this: centered text, no accent bar, no sweep
+_RADIUS  = 8    # corner rounding
+_BAR_W   = 3    # left accent bar width
+_BAR_X   = 7    # bar inset from the left edge
+_BAR_PAD = 8    # bar inset from top/bottom edge
+
+
+def _blend(base: QColor, tint: QColor, t: float) -> QColor:
+    """Mix `tint` into `base` by factor t (0..1)."""
+    return QColor(
+        int(base.red()   + (tint.red()   - base.red())   * t),
+        int(base.green() + (tint.green() - base.green()) * t),
+        int(base.blue()  + (tint.blue()  - base.blue())  * t),
+    )
 
 
 class NtButton(QPushButton):
     """
     Nothing-styled button with:
-    - chamfered (angled) corners
-    - sweep animation on hover
-    - accent= custom active/hover colour
+    - solid rounded body (no corner cut-outs)
+    - vertical gradient tinted by the accent on hover/active
+    - left accent bar + sweep animation on hover
+    - accent= custom accent colour
     - upper=False to disable text uppercasing
+    - outline=True keeps an accent-coloured border at rest
+    - filled=True keeps the accent wash at rest
     """
 
     def __init__(self, text: str = "", parent=None,
-                 accent: str = None, upper: bool = True):
+                 accent: str = None, upper: bool = True,
+                 outline: bool = False, filled: bool = False):
         super().__init__(text, parent)
         self._active  = False
         self._hovered = False
-        self._accent  = accent or theme.ACCENT_RED
+        self._accent  = accent or theme.ACCENT
         self._upper   = upper
+        self._outline = outline
+        self._filled  = filled
 
         # Hover sweep
         self._sweep_x     = -60.0
@@ -36,14 +55,25 @@ class NtButton(QPushButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(34)
         self.setFont(theme.get_mono_font(theme.FONT_SIZE_M))
-        # Always fill own bg → no parent erase artefacts on transparent windows
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def set_active(self, active: bool):
         self._active = active
-        self.repaint()
+        self._force_repaint()
+
+    def setText(self, text: str):
+        # repaint(), not update(): label changes must land even when the window
+        # sits inside a foreign parent whose deferred flushes are unreliable.
+        super().setText(text)
+        self._force_repaint()
+
+    def _force_repaint(self):
+        # ...but never on a hidden or dying widget, that warns and can recurse
+        if self.isVisible():
+            self.repaint()
+        else:
+            self.update()
 
     def set_accent(self, accent: str):
         self._accent = accent
@@ -74,98 +104,96 @@ class NtButton(QPushButton):
             self._sweep_dir = 0
         self.update()
 
-    # ── Geometry helpers ──────────────────────────────────────────────────────
-
-    @staticmethod
-    def _chamfer(w: int, h: int, c: int) -> QPolygon:
-        return QPolygon([
-            QPoint(c,     0),     QPoint(w-1-c, 0),
-            QPoint(w-1,   c),     QPoint(w-1,   h-1-c),
-            QPoint(w-1-c, h-1),   QPoint(c,     h-1),
-            QPoint(0,     h-1-c), QPoint(0,     c),
-        ])
-
     # ── Paint ─────────────────────────────────────────────────────────────────
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = self.rect()
-        w, h = rect.width(), rect.height()
-        small = w < _SMALL_W
-        cut = 0 if small else _CUT
+        w, h   = self.width(), self.height()
+        small  = w < _SMALL_W
+        accent = QColor(self._accent)
 
-        poly = self._chamfer(w, h, cut)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), _RADIUS, _RADIUS)
 
-        # ── Clip all fills to chamfer shape ───────────────────────────────────
-        painter.setClipRegion(QRegion(poly))
-        painter.setRenderHint(QPainter.Antialiasing, False)
-
-        # Background
+        # ── Body: flat surface, lifted a step on hover / active ───────────────
+        base = QColor(theme.BG_BUTTON_HOVER if self._hovered else theme.BG_BUTTON)
         if self._active:
-            bg = QColor(theme.BG_BUTTON_ACTIVE)
+            base = _blend(QColor(theme.BG_BUTTON_HOVER), accent, 0.14)
+        elif self._filled:
+            base = _blend(base, accent, 0.09)
+        painter.fillPath(path, QBrush(base))
+
+        # ── Inner decorations, clipped to the body ────────────────────────────
+        painter.save()
+        painter.setClipPath(path)
+
+        if not small:
+            # Accent wash: smooth alpha falloff from the left edge (no banding)
+            if self._active or self._hovered or self._filled:
+                peak = 62 if self._active else 34 if self._hovered else 28
+                wash = QLinearGradient(0, 0, w * 0.6, 0)
+                c0 = QColor(accent); c0.setAlpha(peak)
+                c1 = QColor(accent); c1.setAlpha(0)
+                wash.setColorAt(0.0, c0)
+                wash.setColorAt(1.0, c1)
+                painter.fillPath(path, QBrush(wash))
+
+            # Left accent bar — inset pill, the state indicator
+            bar = QColor(accent)
+            bar.setAlpha(255 if self._active else 190 if self._hovered else 110)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(bar)
+            painter.drawRoundedRect(
+                QRectF(_BAR_X, _BAR_PAD, _BAR_W, h - _BAR_PAD * 2),
+                _BAR_W / 2, _BAR_W / 2,
+            )
+
+            # Sweep stripe
+            if self._sweep_dir and self._sweep_x > -60:
+                sx = int(self._sweep_x)
+                sweep = QLinearGradient(sx - 70, 0, sx + 70, 0)
+                sweep.setColorAt(0.0, QColor(255, 255, 255, 0))
+                sweep.setColorAt(0.5, QColor(255, 255, 255, 20))
+                sweep.setColorAt(1.0, QColor(255, 255, 255, 0))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(sweep))
+                painter.drawRect(max(0, sx - 70), 0, 140, h)
+
+        painter.restore()
+
+        # ── Text ──────────────────────────────────────────────────────────────
+        if self._active:
+            text_c = QColor(theme.ACCENT_WHITE)
         elif self._hovered:
-            bg = QColor(theme.BG_BUTTON_HOVER)
+            text_c = QColor(theme.ACCENT_WHITE)
         else:
-            bg = QColor(theme.BG_ELEVATED)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(bg)
-        painter.drawPolygon(poly)
-
-        # Left accent
-        if self._active and not small:
-            for i in range(10, 0, -2):
-                glow = QColor(self._accent)
-                glow.setAlpha(i * 6)
-                painter.fillRect(QRect(0, 0, i * 4, h), glow)
-            painter.fillRect(QRect(0, 0, 3, h), QColor(self._accent))
-        elif self._hovered and not small:
-            c = QColor(self._accent)
-            c.setAlpha(60)
-            painter.fillRect(QRect(0, 0, 2, h), c)
-
-        # Sweep stripe
-        if not small and self._sweep_dir and self._sweep_x > -60:
-            sx = int(self._sweep_x)
-            grad = QLinearGradient(sx - 60, 0, sx + 60, 0)
-            grad.setColorAt(0.0, QColor(255, 255, 255, 0))
-            grad.setColorAt(0.5, QColor(255, 255, 255, 28))
-            grad.setColorAt(1.0, QColor(255, 255, 255, 0))
-            painter.setBrush(QBrush(grad))
-            painter.drawRect(max(0, sx - 60), 0, 120, h)
-
-        # Text
-        if self._active:
-            text_c = QColor(self._accent)
-        elif self._hovered:
             text_c = QColor(theme.TEXT_PRIMARY)
-        else:
-            text_c = QColor(theme.TEXT_SECONDARY)
         painter.setPen(text_c)
         painter.setFont(self.font())
 
         if small:
-            painter.drawText(rect, Qt.AlignCenter, self.text())
+            painter.drawText(self.rect(), Qt.AlignCenter, self.text())
         else:
             display = self.text().upper() if self._upper else self.text()
-            indent  = 14 if self._active else 10
             painter.drawText(
-                rect.adjusted(indent, 0, -8, 0),
+                self.rect().adjusted(_BAR_X + _BAR_W + 11, 0, -12, 0),
                 Qt.AlignVCenter | Qt.AlignLeft,
                 display,
             )
 
-        # ── Border on chamfer outline (no clip) ───────────────────────────────
-        painter.setClipping(False)
+        # ── Border ────────────────────────────────────────────────────────────
         painter.setRenderHint(QPainter.Antialiasing, True)
         if self._active:
-            bc = QColor(self._accent); bc.setAlpha(80)
+            bc = QColor(accent); bc.setAlpha(140)
         elif self._hovered:
-            bc = QColor(theme.BORDER_BRIGHT)
+            bc = QColor(accent); bc.setAlpha(80)
+        elif self._outline:
+            bc = QColor(accent); bc.setAlpha(120)
         else:
-            bc = QColor(theme.BORDER)
+            bc = QColor(theme.BORDER_BRIGHT)
         painter.setPen(QPen(bc, 1))
         painter.setBrush(Qt.NoBrush)
-        painter.drawPolygon(poly)
+        painter.drawPath(path)
 
         painter.end()

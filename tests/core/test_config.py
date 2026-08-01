@@ -9,7 +9,7 @@ def test_defaults_when_no_file(tmp_path, monkeypatch):
     cfg = ConfigManager()
     assert cfg.data.overlay.x == 10
     assert cfg.data.overlay.width == 330
-    assert cfg.data.ava_dancers.min_active == 3500
+    assert cfg.data.ava_dancers.red_share == 0.03
     assert cfg.data.ava_dancers.favorite is False
 
 
@@ -36,11 +36,11 @@ def test_save_roundtrip(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = ConfigManager()
     cfg.data.overlay.x = 99
-    cfg.data.ava_dancers.min_active = 4000
+    cfg.data.ava_dancers.red_share = 0.07
     cfg.save()
     raw = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert raw["overlay"]["x"] == 99
-    assert raw["ava_dancers"]["min_active"] == 4000
+    assert raw["ava_dancers"]["red_share"] == 0.07
 
 
 def test_type_coercion_on_load(tmp_path, monkeypatch):

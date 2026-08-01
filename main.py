@@ -2,7 +2,11 @@ import os
 import sys
 import signal
 
-os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
+# qt.multimedia.* also gates the FFmpeg backend, which dumps the full stream
+# layout of every video it opens
+os.environ["QT_LOGGING_RULES"] = (
+    "*.debug=false;qt.qpa.*=false;qt.multimedia.*=false"
+)
 
 from PySide6.QtCore import QTimer, qInstallMessageHandler, QtMsgType
 from PySide6.QtWidgets import QApplication

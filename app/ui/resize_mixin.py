@@ -46,7 +46,7 @@ class ResizeMixin:
     # ── Mouse events ─────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and not getattr(self, "_collapsed", False):
             d = self._edge_dir(event.position().toPoint())
             if d:
                 self._rsz_dir  = d

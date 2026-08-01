@@ -1,6 +1,9 @@
 # app/core/input_sender.py
+import threading
 import win32api
 import win32con
+
+_HOLD_S = 0.02   # WM_KEYDOWN to WM_KEYUP gap
 
 VK_MAP: dict[str, int] = {
     "a": 0x41, "b": 0x42, "c": 0x43, "d": 0x44, "e": 0x45,
@@ -17,10 +20,20 @@ VK_MAP: dict[str, int] = {
 
 
 def press_key(hwnd: int, key: str) -> bool:
-    """Send WM_KEYDOWN + WM_KEYUP to hwnd. No window focus required."""
+    """Send WM_KEYDOWN, then WM_KEYUP after a short hold, to hwnd.
+
+    Posting KEYUP in the same instant as KEYDOWN is a classic way for a game
+    to silently drop the input: many engines only read key state once per
+    render frame, and a down+up pair that lands between two of the game's own
+    message-pump drains can toggle to true then back to false before the
+    game's frame ever samples it — worse under load, exactly when the bot's
+    own poll rate is highest. The KEYUP fires on a timer so this doesn't block
+    the caller (the bot's detection loop).
+    """
     vk = VK_MAP.get(key.lower())
     if not vk or not hwnd:
         return False
     win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
-    win32api.PostMessage(hwnd, win32con.WM_KEYUP,   vk, 0)
+    threading.Timer(_HOLD_S, win32api.PostMessage,
+                     args=(hwnd, win32con.WM_KEYUP, vk, 0)).start()
     return True

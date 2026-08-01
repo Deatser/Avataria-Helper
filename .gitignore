@@ -20,3 +20,9 @@ desktop.ini
 
 # Runtime logs
 *.log
+
+# HSV dumps from the "Тест детекции" button (labelled copies live in tests/fixtures/)
+/hsv_*.png
+
+# Raw frame dumps from the "Сохранить последние кадры" button
+/debug_frames/

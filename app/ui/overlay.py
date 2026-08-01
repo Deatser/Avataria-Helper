@@ -1,24 +1,24 @@
 # app/ui/overlay.py
 from __future__ import annotations
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+                               QApplication, QDialog)
 from PySide6.QtCore import Qt, QPoint, QTimer
 
 from app.ui import theme
 from app.ui.resize_mixin import ResizeMixin
+from app.ui.collapse_mixin import CollapseMixin
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_panel import NtPanel
 from app.ui.widgets.nt_drag_handle import NtDragHandle
+from app.ui.widgets.nt_status_dot import NtStatusDot
 from app.ui.widgets.log_panel import LogPanel
+from app.ui.widgets.nt_confirm_dialog import NtConfirmDialog
 from app.module_registry import MODULES
 
-# Toggle icons shown after the module button label
-_TOGGLE_OFF = "  ○"
-_TOGGLE_ON  = "  ●"
 
-
-class Overlay(ResizeMixin, QWidget):
+class Overlay(CollapseMixin, ResizeMixin, QWidget):
     _RESIZE_MIN_W = 240
-    _RESIZE_MIN_H = 300
+    _RESIZE_MIN_H = 430   # header + 3 module buttons + log + 2 actions
 
     def __init__(self, config, window_manager, parent=None):
         super().__init__(parent)
@@ -27,6 +27,9 @@ class Overlay(ResizeMixin, QWidget):
         self._drag_pos = QPoint()
         self._open_windows: dict[str, QWidget] = {}
         self._startup_shown = False
+        self._startup_done  = False
+        self._game_ok       = None   # tri-state: unknown until first check
+        self._pending_logs: list[tuple[list, str]] = []
         self._panel: NtPanel | None = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
@@ -35,6 +38,13 @@ class Overlay(ResizeMixin, QWidget):
         self._build_ui()
         self.move(config.data.overlay.x, config.data.overlay.y)
         self._init_resize()
+        self._init_collapse(self._panel, self.wm)
+
+        # Keep the header dot honest if the game window disappears
+        self._game_watch = QTimer(self)
+        self._game_watch.setInterval(2000)
+        self._game_watch.timeout.connect(self.refresh_game_status)
+        self._game_watch.start()
 
     def _build_ui(self):
         self._panel = NtPanel(self)
@@ -47,47 +57,61 @@ class Overlay(ResizeMixin, QWidget):
 
         # ── Header ──────────────────────────────────────────────────────────
         header = QHBoxLayout()
+        self._status_dot = NtStatusDot()
+        self._status_dot.set_stopped()   # red until the game window is found
         title = QLabel("AVATARIA HELPER")
         title.setFont(theme.get_display_font(theme.FONT_SIZE_S))
         title.setStyleSheet(f"color:{theme.TEXT_PRIMARY}; background:transparent;")
         title.setCursor(Qt.SizeAllCursor)
         title.mousePressEvent = self._drag_press
         title.mouseMoveEvent  = self._drag_move
-        close_btn = NtButton("×")
-        close_btn.setFixedSize(24, 24)
+        self._collapse_btn = NtButton("▲", accent=theme.ACCENT)
+        self._collapse_btn.setFixedSize(26, 26)
+        self._collapse_btn.clicked.connect(self._toggle_collapse)
+        close_btn = NtButton("×", accent=theme.ACCENT_RED)
+        close_btn.setFixedSize(26, 26)
         close_btn.clicked.connect(self.close)
+        header.addWidget(self._status_dot)
+        header.addSpacing(6)
         header.addWidget(title)
         header.addStretch()
+        header.addWidget(self._collapse_btn)
         header.addWidget(close_btn)
         layout.addLayout(header)
 
         # ── Separator ───────────────────────────────────────────────────────
         sep = QLabel()
         sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background:{theme.BORDER};")
+        sep.setStyleSheet(f"background:{theme.BORDER_DIM};")
         layout.addWidget(sep)
-        layout.addSpacing(4)
+        layout.addSpacing(2)
 
         # ── Module buttons ──────────────────────────────────────────────────
-        self._module_buttons:    dict[str, NtButton] = {}
-        self._module_base_texts: dict[str, str]      = {}
+        self._module_buttons: dict[str, NtButton] = {}
 
         for module_cls in MODULES:
-            accent    = getattr(module_cls, "color", None)
-            base_text = f"{module_cls.icon}  Мод {module_cls.name}"
-            btn       = NtButton(f"{base_text}{_TOGGLE_OFF}", accent=accent, upper=False)
+            accent = getattr(module_cls, "color", None)
+            btn    = NtButton(self._module_label(module_cls.name, False),
+                              accent=accent, upper=False)
             btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
-            self._module_buttons[module_cls.name]    = btn
-            self._module_base_texts[module_cls.name] = base_text
+            self._module_buttons[module_cls.name] = btn
             layout.addWidget(btn)
 
-        layout.addSpacing(8)
+        # Placeholders for modules that are not implemented yet
+        hockey = NtButton("Включить мод Хоккей", accent=theme.ACCENT_ICE,
+                          upper=False, outline=True)
+        snowboard = NtButton("Включить мод Сноуборд", accent=theme.ACCENT_STEEL,
+                             upper=False)
+        layout.addWidget(hockey)
+        layout.addWidget(snowboard)
+
+        layout.addSpacing(6)
 
         # ── Log section ─────────────────────────────────────────────────────
-        log_label = QLabel("⊞  L O G")
-        log_label.setFont(theme.get_display_font(theme.FONT_SIZE_M, bold=True))
+        log_label = QLabel("LOG")
+        log_label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         log_label.setStyleSheet(
-            f"color:{theme.ACCENT_GREEN}; background:transparent;"
+            f"color:{theme.TEXT_PRIMARY}; background:transparent;"
         )
         layout.addWidget(log_label)
 
@@ -95,10 +119,17 @@ class Overlay(ResizeMixin, QWidget):
         self.log_panel.setMinimumHeight(80)
         layout.addWidget(self.log_panel, stretch=1)
 
-        clear_btn = NtButton("Очистить Логи", upper=False)
-        clear_btn.setMinimumHeight(26)
+        # Secondary action — neutral accent keeps the module button dominant
+        clear_btn = NtButton("Очистить логи", upper=False,
+                             accent=theme.BORDER_BRIGHT)
+        clear_btn.setMinimumHeight(30)
         clear_btn.clicked.connect(self.log_panel.clear_logs)
         layout.addWidget(clear_btn)
+
+        settings_btn = NtButton("Настройки", accent=theme.ACCENT,
+                                upper=False, filled=True)
+        settings_btn.setMinimumHeight(30)
+        layout.addWidget(settings_btn)
 
         # ── Drag handle ──────────────────────────────────────────────────────
         drag = NtDragHandle()
@@ -134,10 +165,14 @@ class Overlay(ResizeMixin, QWidget):
             parent_overlay = self,
         )
         self._open_windows[name] = window
-        window.show()
 
+        # Attach BEFORE the first show. Re-parenting an already-shown window
+        # leaves Qt's deferred update() path dead: repaint() still draws, but
+        # update() never flushes — hover sweeps and text changes freeze.
+        # main.py attaches the overlay the same way, which is why it stays live.
         if self.wm.get_game_hwnd():
             self.wm.attach_child(int(window.winId()))
+        window.show()
 
         self.add_log(f"Запуск мода {name}")
         self._set_module_active(name, True)
@@ -147,16 +182,27 @@ class Overlay(ResizeMixin, QWidget):
         self._set_module_active(module_name, False)
         self.add_log(f"Закрытие мода {module_name}")
 
+    @staticmethod
+    def _module_label(name: str, active: bool) -> str:
+        return f"{'Выключить' if active else 'Включить'} мод {name}"
+
     def _set_module_active(self, name: str, active: bool):
         btn = self._module_buttons.get(name)
         if not btn:
             return
-        base = self._module_base_texts.get(name, name)
-        btn.setText(f"{base}{_TOGGLE_ON if active else _TOGGLE_OFF}")
+        btn.setText(self._module_label(name, active))
         btn.set_active(active)
 
     def add_log(self, message: str, level: str = "info"):
-        self.log_panel.add_log(message, level)
+        self.add_log_segments([(message, theme.TEXT_SECONDARY)], level)
+
+    def add_log_segments(self, segments: list, level: str = "info"):
+        # Hold logs until the startup banner is written, so "made by Deatser"
+        # always stays the very first line (favorite windows restore early).
+        if not self._startup_done:
+            self._pending_logs.append((segments, level))
+            return
+        self.log_panel.add_log_segments(segments, level)
 
     def restore_favorite_windows(self):
         for module_cls in MODULES:
@@ -187,8 +233,23 @@ class Overlay(ResizeMixin, QWidget):
 
     # ── Startup sequence ────────────────────────────────────────────────────
 
+    def refresh_game_status(self):
+        """Green while the game window is alive, red otherwise."""
+        alive = self.wm.is_game_alive()
+        if alive == self._game_ok:
+            return
+        self._game_ok = alive
+        if alive:
+            self._status_dot.set_running()
+        else:
+            self._status_dot.set_stopped()
+        self._status_dot.setToolTip(
+            "Игровое окно найдено" if alive else "Игровое окно не найдено"
+        )
+
     def showEvent(self, event):
         super().showEvent(event)
+        self.refresh_game_status()
         if not self._startup_shown:
             self._startup_shown = True
             QTimer.singleShot(200, self._startup_sequence)
@@ -197,25 +258,74 @@ class Overlay(ResizeMixin, QWidget):
         from app.ui.widgets.log_panel import CLAUDE_ORANGE
 
         def step2():
+            # Blank spacer line between the signature and the real log
+            self.log_panel.append("")
             self.log_panel.animate_log(
-                segments=[("made by Deatser", CLAUDE_ORANGE)],
-                include_ts=False,
+                segments=[
+                    ("Запуск Avataria Helper — ", theme.TEXT_SECONDARY),
+                    ("Успешно", theme.ACCENT_GREEN),
+                ],
                 delay_ms=120,
+                on_done=self._flush_pending_logs,
             )
 
         self.log_panel.animate_log(
-            segments=[
-                ("Запуск Avataria Helper — ", theme.TEXT_SECONDARY),
-                ("Успешно", theme.ACCENT_GREEN),
-            ],
+            segments=[("made by Deatser", CLAUDE_ORANGE)],
+            include_ts=False,
             on_done=step2,
         )
+
+    def _flush_pending_logs(self):
+        self._startup_done = True
+        pending, self._pending_logs = self._pending_logs, []
+        for segments, level in pending:
+            self.log_panel.add_log_segments(segments, level)
 
     # ── Close ────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        if not self.config.data.overlay.skip_close_confirm and not self._confirm_close():
+            event.ignore()
+            return
+
         for w in list(self._open_windows.values()):
             if w.isVisible():
                 w.close()
         QApplication.quit()
         event.accept()
+
+    def _confirm_close(self) -> bool:
+        dialog = NtConfirmDialog(
+            title         = "Закрыть помощник",
+            message       = "Вы уверены, что хотите закрыть помощник "
+                            "и все включённые моды?",
+            confirm_text  = "Закрыть",
+            remember_text = "Не спрашивать снова",
+            parent        = self,
+        )
+        if self.wm.get_game_hwnd():
+            # Same rule as module windows: attach before the first show, or the
+            # dialog's hover and checkbox repaints never reach the screen.
+            self.wm.attach_child(int(dialog.winId()))
+            self._center_dialog_in_game(dialog)
+            # And again once the modal loop runs — Qt re-applies its own
+            # screen-space geometry over ours when it shows the window.
+            QTimer.singleShot(0, lambda: self._center_dialog_in_game(dialog))
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        if dialog.remembered:
+            self.config.data.overlay.skip_close_confirm = True
+            self.config.save()
+        return True
+
+    def _center_dialog_in_game(self, dialog):
+        """Attached windows use game-client coordinates, not screen ones."""
+        ov = self.config.data.overlay
+        self.wm.move_window(
+            int(dialog.winId()),
+            ov.x + (ov.width  - dialog.width())  // 2,
+            ov.y + (ov.height - dialog.height()) // 2,
+            dialog.width(), dialog.height(),
+        )

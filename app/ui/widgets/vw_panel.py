@@ -1,12 +1,19 @@
 # app/ui/widgets/vw_panel.py
 """Vaporwave-aesthetic panel for the Ava Dancers module window."""
 import math
+from pathlib import Path
+
 from PySide6.QtWidgets import QWidget
-from PySide6.QtGui import QPainter, QColor, QPen, QLinearGradient, QBrush
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import (QPainter, QColor, QPen, QLinearGradient, QBrush,
+                           QPainterPath, QPolygonF, QMovie, QPixmap, QImage)
+from PySide6.QtCore import (Qt, QRectF, QPointF, QTimer, QUrl, Signal,
+                            QVariantAnimation, QEasingCurve)
+from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
 from app.ui import theme
 
-# Fixed star field: (x%, y_in_top_44%, radius_px)
+VIDEO_SUFFIXES = (".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".wmv")
+
+# Fixed star field: (x%, y_in_sky%, radius_px)
 _STARS = [
     (0.08, 0.06, 1), (0.15, 0.18, 1), (0.22, 0.04, 2), (0.30, 0.12, 1),
     (0.38, 0.22, 1), (0.45, 0.03, 1), (0.52, 0.14, 2), (0.60, 0.08, 1),
@@ -16,108 +23,336 @@ _STARS = [
     (0.58, 0.42, 1), (0.72, 0.08, 1), (0.42, 0.26, 1),
 ]
 
-_GRID_N_VERT  = 10
-_GRID_N_HORIZ = 9
+# Mountain ridge silhouette as (x%, peak height as % of the sky) pairs
+_RIDGE = [
+    (0.00, 0.00), (0.06, 0.16), (0.13, 0.05), (0.21, 0.26), (0.28, 0.10),
+    (0.36, 0.22), (0.44, 0.34), (0.50, 0.20), (0.57, 0.31), (0.64, 0.14),
+    (0.71, 0.28), (0.79, 0.09), (0.86, 0.21), (0.93, 0.07), (1.00, 0.15),
+]
+
+_HORIZON     = 0.46   # horizon line, share of panel height
+_GRID_N_VERT = 26     # vertical lines across three screen widths
+_GRID_N_DEEP = 11     # scrolling depth lines
+_SUN_R       = 0.17   # sun radius, share of the smaller panel side
+_VEIL_ALPHA  = 95     # darkening over the scene so controls stay readable
+_FADE_MS     = 320    # cross-fade when the backdrop is swapped
 
 
 class VwPanel(QWidget):
-    """Vaporwave panel: dark purple bg, scrolling perspective grid, star field."""
+    """Vaporwave panel: sunset grid scene, or a user-supplied video/GIF/image."""
+
+    background_failed = Signal(str)   # playback died after it had started
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._phase = 0.0
+        self._phase  = 0.0
+        self._movie  = None    # animated GIF background, if configured
+        self._pixmap = None    # static image background, if configured
+        self._player = None    # video background, if configured
+        self._sink   = None
+        self._frame  = None    # latest decoded video frame
+
+        self._fade        = 0.0    # opacity of the outgoing backdrop
+        self._fade_pixmap = None
+        self._fade_anim = QVariantAnimation(self)
+        self._fade_anim.setDuration(_FADE_MS)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._fade_anim.valueChanged.connect(self._on_fade)
+
         self._timer = QTimer(self)
         self._timer.setInterval(30)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
 
+    # ── Custom background ────────────────────────────────────────────────────
+
+    def set_background(self, path: str, fade: bool = False) -> bool:
+        """Use a video, GIF or image from disk instead of the drawn scene.
+
+        Returns False if the file is missing or unreadable — the caller can
+        report that; the panel just keeps drawing its own scene. Video decodes
+        asynchronously, so a later failure arrives on `background_failed`.
+        """
+        file = Path(path) if path else None
+        if file is not None and not file.is_file():
+            return False
+        if fade:
+            self._start_fade()   # snapshot before the old source is dropped
+
+        self.stop_background()
+        if file is None:
+            return True
+
+        suffix = file.suffix.lower()
+        if suffix in VIDEO_SUFFIXES:
+            if not self._start_video(file):
+                return False
+        elif suffix == ".gif":
+            movie = QMovie(str(file))
+            if not movie.isValid():
+                return False
+            movie.frameChanged.connect(self.update)
+            movie.start()
+            self._movie = movie
+        else:
+            pixmap = QPixmap(str(file))
+            if pixmap.isNull():
+                return False
+            self._pixmap = pixmap
+
+        self._timer.stop()   # nothing procedural left to animate
+        self.update()
+        return True
+
+    def _start_video(self, file: Path) -> bool:
+        """Decode into a sink and paint the frames ourselves — a video widget
+        would sit on top of the panel and break the rounded clip."""
+        sink   = QVideoSink(self)
+        player = QMediaPlayer(self)
+        player.setVideoSink(sink)
+        player.setLoops(QMediaPlayer.Loops.Infinite)   # silent, no audio output
+        sink.videoFrameChanged.connect(self._on_video_frame)
+        player.errorOccurred.connect(self._on_video_error)
+        player.setSource(QUrl.fromLocalFile(str(file.resolve())))
+        player.play()
+        self._player = player
+        self._sink   = sink
+        return True
+
+    def _on_video_frame(self, frame):
+        image = frame.toImage()
+        if image.isNull():
+            return
+        self._frame = QImage(image)   # detach: the frame buffer is reused
+        self.update()
+
+    def _on_video_error(self, error, message: str = ""):
+        if error == QMediaPlayer.Error.NoError:
+            return
+        self.stop_background()
+        self.background_failed.emit(f"Видео-фон не воспроизводится: {message}")
+
+    def stop_background(self):
+        """Release the decoder. Call it when the window closes — a running
+        player keeps decoding and pushing frames at a dying widget."""
+        if self._player is not None:
+            self._player.stop()
+            self._player.deleteLater()
+            self._player = None
+            self._sink   = None
+        if self._movie is not None:
+            self._movie.stop()
+            self._movie = None
+        self._frame  = None
+        self._pixmap = None
+        if not self._timer.isActive():
+            self._timer.start()
+
     def _tick(self):
         self._phase = (self._phase + 0.003) % 1.0
         self.update()
 
+    # ── Paint ────────────────────────────────────────────────────────────────
+
     def paintEvent(self, event):
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
         w, h = self.width(), self.height()
 
-        # 1. Background gradient
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        grad = QLinearGradient(0, 0, 0, h)
-        grad.setColorAt(0.0, QColor("#0f0a28"))
-        grad.setColorAt(1.0, QColor(theme.VW_BG))
-        painter.fillRect(self.rect(), QBrush(grad))
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1),
+                            theme.PANEL_RADIUS, theme.PANEL_RADIUS)
 
-        # 2. Star field (twinkling)
+        painter.save()
+        painter.setClipPath(body)
+        self._paint_backdrop(painter, w, h)
+        # Cross-fade: the previous backdrop lingers on top, fading out
+        if self._fade_pixmap is not None and self._fade > 0:
+            painter.setOpacity(self._fade)
+            painter.drawPixmap(0, 0, self._fade_pixmap)
+            painter.setOpacity(1.0)
+        painter.restore()
+
+        # Hairline edge + magenta highlight along the top
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        sky_h = int(h * 0.44)
-        for i, (xr, yr, sz) in enumerate(_STARS):
-            a = int(80 + 90 * (0.5 + 0.5 * math.sin(
-                2 * math.pi * (self._phase * 2.5 + i * 0.41)
-            )))
-            painter.setBrush(QColor(210, 200, 255, a))
-            painter.drawEllipse(int(xr * w) - sz, int(yr * sky_h) - sz, sz * 2, sz * 2)
-
-        # 3. Perspective grid
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        self._draw_grid(painter, w, h)
-
-        # 4. Corner brackets (magenta glow)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        self._draw_corner(painter, 2,     2,     False, False)
-        self._draw_corner(painter, w - 2, 2,     True,  False)
-        self._draw_corner(painter, 2,     h - 2, False, True)
-        self._draw_corner(painter, w - 2, h - 2, True,  True)
-
-        # 5. Neon borders
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        bc = QColor(theme.VW_MAGENTA); bc.setAlpha(120)
-        painter.setPen(QPen(bc, 1))
         painter.setBrush(Qt.NoBrush)
-        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        bc = QColor(theme.VW_BORDER); bc.setAlpha(200)
+        painter.setPen(QPen(bc, 1))
+        painter.drawPath(body)
 
-        ic = QColor(theme.VW_CYAN); ic.setAlpha(40)
-        painter.setPen(QPen(ic, 1))
-        painter.drawRect(self.rect().adjusted(3, 3, -4, -4))
+        edge = QLinearGradient(0, 0, w, 0)
+        m0 = QColor(theme.VW_MAGENTA); m0.setAlpha(0)
+        m1 = QColor(theme.VW_MAGENTA); m1.setAlpha(120)
+        edge.setColorAt(0.0, m0)
+        edge.setColorAt(0.35, m1)
+        edge.setColorAt(1.0, m0)
+        painter.setPen(QPen(QBrush(edge), 1))
+        painter.drawLine(theme.PANEL_RADIUS, 1, w - theme.PANEL_RADIUS, 1)
 
         painter.end()
 
-    def _draw_grid(self, painter, w, h):
-        vp_x = w * 0.5
-        vp_y = h * 0.38
+    def _paint_backdrop(self, painter, w, h):
+        if not self._draw_media(painter, w, h):
+            self._draw_scene(painter, w, h)
 
-        # Vertical lines (static, fan out from VP)
+    # ── Cross-fade between backdrops ─────────────────────────────────────────
+
+    def _snapshot_backdrop(self):
+        """Freeze what is on screen now so the new backdrop can fade in."""
+        if self.width() <= 0 or self.height() <= 0:
+            return None
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        self._paint_backdrop(painter, self.width(), self.height())
+        painter.end()
+        return pixmap
+
+    def _start_fade(self):
+        self._fade_anim.stop()
+        self._fade_pixmap = self._snapshot_backdrop()
+        if self._fade_pixmap is None:
+            return
+        self._fade = 1.0
+        self._fade_anim.setStartValue(1.0)
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.start()
+
+    def _on_fade(self, value):
+        self._fade = float(value)
+        if self._fade <= 0:
+            self._fade_pixmap = None
+        self.update()
+
+    def _draw_media(self, painter, w, h) -> bool:
+        """Cover the panel with the configured media, cropping the overflow.
+        False when nothing is configured yet — the scene gets drawn instead."""
+        if self._frame is not None:
+            source = QPixmap.fromImage(self._frame)
+        elif self._movie is not None:
+            source = self._movie.currentPixmap()
+        elif self._pixmap is not None:
+            source = self._pixmap
+        else:
+            return False
+        if source.isNull():
+            return False   # first frame not decoded yet — show the scene
+
+        scaled = source.scaled(w, h, Qt.KeepAspectRatioByExpanding,
+                               Qt.SmoothTransformation)
+        painter.drawPixmap((w - scaled.width()) // 2,
+                           (h - scaled.height()) // 2, scaled)
+        painter.fillRect(QRectF(0, 0, w, h), QColor(6, 2, 20, _VEIL_ALPHA))
+        return True
+
+    def _draw_scene(self, painter, w, h):
+        horizon = h * _HORIZON
+
+        # 1. Sky and floor
+        sky = QLinearGradient(0, 0, 0, horizon)
+        sky.setColorAt(0.0, QColor("#150a35"))
+        sky.setColorAt(1.0, QColor("#3d1063"))
+        painter.fillRect(QRectF(0, 0, w, horizon), QBrush(sky))
+
+        floor = QLinearGradient(0, horizon, 0, h)
+        floor.setColorAt(0.0, QColor("#1a0740"))
+        floor.setColorAt(1.0, QColor(theme.VW_BG))
+        painter.fillRect(QRectF(0, horizon, w, h - horizon), QBrush(floor))
+
+        # 2. Stars
+        painter.setPen(Qt.NoPen)
+        for i, (xr, yr, size) in enumerate(_STARS):
+            alpha = int(80 + 90 * (0.5 + 0.5 * math.sin(
+                2 * math.pi * (self._phase * 2.5 + i * 0.41)
+            )))
+            painter.setBrush(QColor(210, 200, 255, alpha))
+            painter.drawEllipse(QPointF(xr * w, yr * horizon), size, size)
+
+        self._draw_sun(painter, w, h, horizon)
+        self._draw_ridge(painter, w, horizon)
+        self._draw_horizon(painter, w, horizon)
+        self._draw_grid(painter, w, h, horizon)
+
+        # Veil: the scene is a backdrop, the controls on top must stay legible
+        painter.fillRect(QRectF(0, 0, w, h), QColor(6, 2, 20, _VEIL_ALPHA))
+
+    def _draw_sun(self, painter, w, h, horizon):
+        radius = min(w, h) * _SUN_R
+        centre = QPointF(w / 2, horizon - radius * 0.42)
+
+        # The horizon cuts the sun off — nothing of it spills onto the floor
+        painter.save()
+        painter.setClipRect(QRectF(0, 0, w, horizon))
+
+        grad = QLinearGradient(0, centre.y() - radius, 0, centre.y() + radius)
+        grad.setColorAt(0.0, QColor("#ffd166"))
+        grad.setColorAt(0.45, QColor("#ff3d8b"))
+        grad.setColorAt(1.0, QColor("#a4198a"))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(grad))
+        painter.drawEllipse(centre, radius, radius)
+
+        # Cut the classic horizontal slots out of the lower half
+        painter.setBrush(QColor("#150a35"))
+        for i in range(5):
+            band_y = centre.y() + radius * (0.18 + i * 0.17)
+            band_h = radius * (0.035 + i * 0.022)
+            painter.drawRect(QRectF(centre.x() - radius, band_y,
+                                    radius * 2, band_h))
+        painter.restore()
+
+    def _draw_ridge(self, painter, w, horizon):
+        points = [QPointF(0, horizon)]
+        points += [QPointF(xr * w, horizon - hr * horizon * 0.55)
+                   for xr, hr in _RIDGE]
+        points.append(QPointF(w, horizon))
+
+        grad = QLinearGradient(0, horizon * 0.55, 0, horizon)
+        grad.setColorAt(0.0, QColor("#ff4d9d"))
+        grad.setColorAt(1.0, QColor("#5a1160"))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(grad))
+        painter.drawPolygon(QPolygonF(points))
+
+    def _draw_horizon(self, painter, w, horizon):
+        for i in range(6, 0, -1):
+            glow = QColor(theme.VW_MAGENTA)
+            glow.setAlpha(9 * (7 - i))
+            painter.setPen(QPen(glow, i * 2))
+            painter.drawLine(QPointF(0, horizon), QPointF(w, horizon))
+        painter.setPen(QPen(QColor("#ffd6f2"), 1.6))
+        painter.drawLine(QPointF(0, horizon), QPointF(w, horizon))
+
+    def _draw_grid(self, painter, w, h, horizon):
+        """Perspective floor: full-width depth lines, verticals running off
+        the sides instead of pinching into a triangle."""
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        depth = h - horizon
+        if depth <= 0:
+            return
+        vanish = QPointF(w / 2, horizon)
+
+        # Verticals: sampled across three screen widths so the visible band
+        # stays dense and reaches both edges.
         for i in range(_GRID_N_VERT + 1):
-            x_bot = w * i / _GRID_N_VERT
-            t = abs(i - _GRID_N_VERT / 2) / (_GRID_N_VERT / 2)
-            c = QColor(int(40 * t), int(80 - 60 * t), int(200 + 55 * t), 80)
-            painter.setPen(QPen(c, 1))
-            painter.drawLine(int(vp_x), int(vp_y), int(x_bot), h)
+            x_bottom = -w + 3 * w * i / _GRID_N_VERT
+            fade = 1.0 - min(1.0, abs(x_bottom - w / 2) / (1.6 * w))
+            colour = QColor(theme.VW_MAGENTA)
+            colour.setAlpha(int(40 + 90 * fade))
+            painter.setPen(QPen(colour, 1))
+            painter.drawLine(vanish, QPointF(x_bottom, h))
 
-        # Horizontal lines (scrolling)
-        for j in range(_GRID_N_HORIZ + 2):
-            z = ((j / _GRID_N_HORIZ) + self._phase) % 1.0
-            if z < 0.02:
+        # Depth lines: span the full width, spacing compressed towards the
+        # horizon, scrolling towards the viewer.
+        for j in range(_GRID_N_DEEP + 2):
+            z = ((j / _GRID_N_DEEP) + self._phase) % 1.0
+            if z < 0.015:
                 continue
-            y = int(vp_y + (h - vp_y) * (z ** 1.7))
+            y = horizon + depth * (z ** 1.9)
             if y > h:
                 continue
-            alpha = int(30 + 100 * (z ** 0.8))
-            t = z
-            c2 = QColor(int(255 * t), int(160 - 140 * t), int(255 - 100 * t), alpha)
-            painter.setPen(QPen(c2, 1))
-            t_y = (y - vp_y) / (h - vp_y) if h > vp_y else 0
-            x_left  = int(vp_x + (0 - vp_x) * t_y)
-            x_right = int(vp_x + (w - vp_x) * t_y)
-            painter.drawLine(x_left, y, x_right, y)
-
-    def _draw_corner(self, painter, x, y, flip_x, flip_y, size=14):
-        dx = -1 if flip_x else 1
-        dy = -1 if flip_y else 1
-        for i in range(5, 0, -1):
-            c = QColor(theme.VW_MAGENTA); c.setAlpha(10 * i)
-            painter.setPen(QPen(c, i + 1))
-            painter.drawLine(x, y, x + dx * (size + i), y)
-            painter.drawLine(x, y, x, y + dy * (size + i))
-        painter.setPen(QPen(QColor(theme.VW_MAGENTA), 1))
-        painter.drawLine(x, y, x + dx * size, y)
-        painter.drawLine(x, y, x, y + dy * size)
+            colour = QColor(theme.VW_MAGENTA)
+            colour.setAlpha(int(35 + 150 * z))
+            painter.setPen(QPen(colour, 1 + z))
+            painter.drawLine(QPointF(0, y), QPointF(w, y))

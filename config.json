@@ -1,18 +1,23 @@
 {
     "overlay": {
-        "x": 34,
-        "y": 72,
-        "width": 425,
-        "height": 706,
-        "opacity": 220
+        "x": 36,
+        "y": 710,
+        "width": 487,
+        "height": 623,
+        "opacity": 220,
+        "skip_close_confirm": true
     },
     "ava_dancers": {
-        "favorite": false,
+        "favorite": true,
         "position_saved": true,
-        "x": 529,
-        "y": 86,
-        "width": 705,
-        "height": 356,
-        "min_active": 3500
+        "x": 24,
+        "y": 131,
+        "width": 455,
+        "height": 529,
+        "lit_share": 0.04,
+        "red_share": 0.03,
+        "hue_share": 0.15,
+        "background": "",
+        "video_background": true
     }
 }

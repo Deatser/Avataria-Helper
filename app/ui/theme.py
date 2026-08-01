@@ -1,39 +1,44 @@
 # app/ui/theme.py
 from PySide6.QtGui import QColor, QFont, QFontDatabase
 
-# ── Backgrounds ──────────────────────────────────────────────────────────────
-BG_BASE     = "#000000"
-BG_SURFACE  = "#030308"
-BG_ELEVATED = "#0b0b14"
+# ── Backgrounds — neutral near-black with a faint violet cast ────────────────
+BG_BASE     = "#08070d"
+BG_SURFACE  = "#100e18"
+BG_ELEVATED = "#191622"
 
-# ── Borders ──────────────────────────────────────────────────────────────────
-BORDER        = "#1c1c2a"
-BORDER_DIM    = "#111118"
-BORDER_BRIGHT = "#2a2a3a"
+# ── Hairlines (low-contrast separation, never saturated) ─────────────────────
+BORDER        = "#232030"
+BORDER_DIM    = "#17151f"
+BORDER_BRIGHT = "#332f45"
 
 # ── Text ─────────────────────────────────────────────────────────────────────
-TEXT_PRIMARY   = "#f0f0f0"
-TEXT_SECONDARY = "#8080a0"
-TEXT_DIM       = "#303042"
-LOG_TS_COLOR   = "#7878a0"   # log timestamps — clearly visible
+TEXT_PRIMARY   = "#ecebf3"
+TEXT_SECONDARY = "#a5a2ba"
+TEXT_DIM       = "#4a4760"
+LOG_TS_COLOR   = "#6f6c8a"   # log timestamps — readable, not shouting
 
-# ── Accents ──────────────────────────────────────────────────────────────────
-ACCENT_RED   = "#ff0040"
-ACCENT_GREEN = "#00ff88"
-ACCENT_CYAN  = "#00ccff"
-ACCENT_AMBER = "#ffaa22"
+# ── Accents — one violet chrome accent + muted semantic colours ──────────────
+ACCENT       = "#a06bff"   # chrome accent (default for buttons, panel edge)
+ACCENT_SOFT  = "#c9a6ff"
+ACCENT_RED   = "#ff5c78"
+ACCENT_GREEN = "#4bdb96"
+ACCENT_CYAN  = "#4cc9f0"
+ACCENT_ICE   = "#67d3f5"   # Хоккей — light, icy blue
+ACCENT_STEEL = "#6d84c0"   # Сноуборд — deeper, muted steel blue
+ACCENT_AMBER = "#f5b544"
 ACCENT_WHITE = "#ffffff"
 
-# ── Button states ────────────────────────────────────────────────────────────
-BG_BUTTON_ACTIVE = "#160008"
-BG_BUTTON_HOVER  = "#10101c"
+# ── Button body ──────────────────────────────────────────────────────────────
+BG_BUTTON        = "#191622"
+BG_BUTTON_HOVER  = "#221e2e"
 
-# ── Circuit traces (NtPanel animation) ───────────────────────────────────────
-CIRCUIT_DIM  = "#0c2010"   # dark base color
-CIRCUIT_GLOW = "#00cc44"   # bright neon green peak
-DOT_COLOR    = "#0e0e1a"
-DOT_SPACING  = 8
+# ── Ambient circuit traces (NtPanel) — same violet family, low contrast ──────
+CIRCUIT_DIM  = "#1b1630"
+CIRCUIT_GLOW = "#6f4bd8"
+DOT_COLOR    = "#181524"
+DOT_SPACING  = 10
 DOT_RADIUS   = 1
+PANEL_RADIUS = 12
 
 # ── Vaporwave (Ava Dancers module) ───────────────────────────────────────────
 VW_BG           = "#050312"
@@ -50,9 +55,9 @@ VW_BTN_ACTIVE   = "#0a0030"
 VW_BTN_HOVER    = "#150040"
 
 # ── Geometry ─────────────────────────────────────────────────────────────────
-RADIUS  = 0
-PADDING = 12
-SPACING = 6
+RADIUS  = 8
+PADDING = 14
+SPACING = 8
 
 # ── Typography ───────────────────────────────────────────────────────────────
 FONT_MONO          = "JetBrains Mono"

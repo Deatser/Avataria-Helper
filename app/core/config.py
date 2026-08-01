@@ -10,8 +10,9 @@ class OverlayConfig:
     x: int = 10
     y: int = 10
     width: int = 330
-    height: int = 420
+    height: int = 1050
     opacity: int = 220
+    skip_close_confirm: bool = False   # "Не спрашивать снова" on the close dialog
 
 
 @dataclass
@@ -22,7 +23,12 @@ class AvaDancersConfig:
     y: int = 10
     width: int = 420
     height: int = 330
-    min_active: int = 3500
+    # Detection thresholds — see modules.ava_dancers.bot.Thresholds
+    lit_share: float = 0.04
+    red_share: float = 0.03
+    hue_share: float = 0.15
+    background: str = ""        # explicit backdrop path; empty → auto-pick
+    video_background: bool = True   # off → still image instead of the video
 
 
 @dataclass

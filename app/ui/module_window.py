@@ -4,9 +4,10 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QPoint
 
 from app.ui.resize_mixin import ResizeMixin
+from app.ui.collapse_mixin import CollapseMixin
 
 
-class ModuleWindow(ResizeMixin, QWidget):
+class ModuleWindow(CollapseMixin, ResizeMixin, QWidget):
     """Base for all module windows: drag, position/size persistence, resize."""
 
     def __init__(self, module_name: str, config, save_fn, parent_overlay=None):
