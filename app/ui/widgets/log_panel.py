@@ -3,7 +3,7 @@ import random
 from datetime import datetime
 from html import escape
 from PySide6.QtWidgets import QTextEdit
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QTextCursor, QTextCharFormat, QColor
 from app.ui import theme
 
@@ -12,22 +12,23 @@ _SCRAMBLE = "!@#$%^&*<>?/|[]{}~+=_-"
 
 
 class LogPanel(QTextEdit):
-    """Scrolling log area in Nothing style."""
+    """Scrolling log area — every message animates with scramble effect."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet(f"""
             QTextEdit {{
-                background: {theme.BG_BASE};
+                background-color: rgba(3, 3, 8, 150);
                 color: {theme.TEXT_SECONDARY};
                 border: 1px solid {theme.BORDER};
-                padding: 6px;
+                padding: 6px 14px;
                 selection-background-color: {theme.TEXT_DIM};
             }}
             QScrollBar:vertical {{
-                background: {theme.BG_BASE};
+                background: transparent;
                 width: 4px;
                 border: none;
                 margin: 0;
@@ -39,35 +40,49 @@ class LogPanel(QTextEdit):
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {{ height: 0px; }}
         """)
+        self.viewport().setAutoFillBackground(False)
 
-    # ── Normal log ───────────────────────────────────────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def add_log(self, message: str, level: str = "info"):
-        ts = datetime.now().strftime("%H:%M:%S")
+        """Append a log line with scramble animation and status suffix."""
         color = self._level_color(level)
-        html = (
-            f'<span style="color:{theme.LOG_TS_COLOR}">[{ts}]</span> '
-            f'<span style="color:{color}">{escape(message)}</span>'
-        )
-        self.append(html)
-        self._scroll_end()
+        if level == "success":
+            segs = [
+                (escape(message) + " — ", theme.TEXT_SECONDARY),
+                ("Успешно", theme.ACCENT_GREEN),
+            ]
+        elif level == "error":
+            segs = [
+                (escape(message) + " — ", theme.TEXT_SECONDARY),
+                ("Ошибка", theme.ACCENT_RED),
+            ]
+        else:
+            segs = [(escape(message), color)]
+        # Fast scramble for regular logs (interval 22ms, min 10 frames)
+        self.animate_log(segs, include_ts=True, interval_ms=22, min_frames=10)
 
-    # ── Scramble animation ───────────────────────────────────────────────────
+    # ── Scramble animation ────────────────────────────────────────────────────
 
     def animate_log(self, segments: list, include_ts: bool = True,
-                    delay_ms: int = 0, on_done=None):
-        """Reveal text left-to-right with a scramble effect.
+                    delay_ms: int = 0, on_done=None,
+                    interval_ms: int = 38, min_frames: int = 18):
+        """Reveal text left-to-right with scramble effect.
 
-        segments — list of (text, color) pairs that form one log line.
+        segments — list of (text, color) pairs forming one log line.
+        interval_ms / min_frames control animation speed.
         """
         if delay_ms > 0:
-            QTimer.singleShot(delay_ms,
-                              lambda: self.animate_log(segments, include_ts, 0, on_done))
+            QTimer.singleShot(
+                delay_ms,
+                lambda: self.animate_log(segments, include_ts, 0, on_done,
+                                         interval_ms, min_frames),
+            )
             return
 
         ts = datetime.now().strftime("%H:%M:%S") if include_ts else None
-        full_len = sum(len(t) for t, _ in segments)
-        total_frames = max(18, full_len)
+        full_len    = sum(len(t) for t, _ in segments)
+        total_frames = max(min_frames, full_len)
 
         self.append("")
         block_num = self.document().blockCount() - 1
@@ -77,16 +92,15 @@ class LogPanel(QTextEdit):
             revealed = int((f / total_frames) * full_len)
             self._write_block(block_num, self._build_frame(segments, revealed), ts)
             if f < total_frames:
-                QTimer.singleShot(38, lambda: tick(f + 1))
+                QTimer.singleShot(interval_ms, lambda: tick(f + 1))
             elif on_done:
                 on_done()
 
-        QTimer.singleShot(38, lambda: tick(1))
+        QTimer.singleShot(interval_ms, lambda: tick(1))
 
-    # ── Internals ────────────────────────────────────────────────────────────
+    # ── Internals ─────────────────────────────────────────────────────────────
 
     def _build_frame(self, segments: list, revealed: int) -> list:
-        """Return [(text, color)] for current animation frame."""
         result, char_idx = [], 0
         for text, target_color in segments:
             buf, cur_color = "", None

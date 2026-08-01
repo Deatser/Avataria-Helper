@@ -15,7 +15,7 @@ BORDER_BRIGHT = "#2a2a3a"
 TEXT_PRIMARY   = "#f0f0f0"
 TEXT_SECONDARY = "#8080a0"
 TEXT_DIM       = "#303042"
-LOG_TS_COLOR   = "#505068"   # log timestamps — brighter than TEXT_DIM
+LOG_TS_COLOR   = "#7878a0"   # log timestamps — clearly visible
 
 # ── Accents ──────────────────────────────────────────────────────────────────
 ACCENT_RED   = "#ff0040"

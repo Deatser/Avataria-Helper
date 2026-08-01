@@ -11,6 +11,10 @@ from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.log_panel import LogPanel
 from app.module_registry import MODULES
 
+# Toggle icons shown after the module button label
+_TOGGLE_OFF = "  ○"
+_TOGGLE_ON  = "  ●"
+
 
 class Overlay(ResizeMixin, QWidget):
     _RESIZE_MIN_W = 240
@@ -65,27 +69,33 @@ class Overlay(ResizeMixin, QWidget):
         layout.addSpacing(4)
 
         # ── Module buttons ──────────────────────────────────────────────────
-        self._module_buttons: dict[str, NtButton] = {}
+        self._module_buttons:    dict[str, NtButton] = {}
+        self._module_base_texts: dict[str, str]      = {}
+
         for module_cls in MODULES:
-            accent = getattr(module_cls, "color", None)
-            btn = NtButton(f"{module_cls.icon}  {module_cls.name}", accent=accent)
+            accent    = getattr(module_cls, "color", None)
+            base_text = f"{module_cls.icon}  Мод {module_cls.name}"
+            btn       = NtButton(f"{base_text}{_TOGGLE_OFF}", accent=accent, upper=False)
             btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
-            self._module_buttons[module_cls.name] = btn
+            self._module_buttons[module_cls.name]    = btn
+            self._module_base_texts[module_cls.name] = base_text
             layout.addWidget(btn)
 
         layout.addSpacing(8)
 
         # ── Log section ─────────────────────────────────────────────────────
-        log_label = QLabel("⊞ LOG")
-        log_label.setFont(theme.get_serif_font(theme.FONT_SIZE_S, bold=True))
-        log_label.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
+        log_label = QLabel("⊞  L O G")
+        log_label.setFont(theme.get_display_font(theme.FONT_SIZE_M, bold=True))
+        log_label.setStyleSheet(
+            f"color:{theme.ACCENT_GREEN}; background:transparent;"
+        )
         layout.addWidget(log_label)
 
         self.log_panel = LogPanel()
         self.log_panel.setMinimumHeight(80)
         layout.addWidget(self.log_panel, stretch=1)
 
-        clear_btn = NtButton("CLEAR")
+        clear_btn = NtButton("Очистить Логи", upper=False)
         clear_btn.setMinimumHeight(26)
         clear_btn.clicked.connect(self.log_panel.clear_logs)
         layout.addWidget(clear_btn)
@@ -130,14 +140,20 @@ class Overlay(ResizeMixin, QWidget):
             self.wm.attach_child(int(window.winId()))
 
         self.add_log(f"Запуск мода {name}")
-        if name in self._module_buttons:
-            self._module_buttons[name].set_active(True)
+        self._set_module_active(name, True)
 
     def on_module_closed(self, module_name: str):
         self._open_windows.pop(module_name, None)
-        if module_name in self._module_buttons:
-            self._module_buttons[module_name].set_active(False)
+        self._set_module_active(module_name, False)
         self.add_log(f"Закрытие мода {module_name}")
+
+    def _set_module_active(self, name: str, active: bool):
+        btn = self._module_buttons.get(name)
+        if not btn:
+            return
+        base = self._module_base_texts.get(name, name)
+        btn.setText(f"{base}{_TOGGLE_ON if active else _TOGGLE_OFF}")
+        btn.set_active(active)
 
     def add_log(self, message: str, level: str = "info"):
         self.log_panel.add_log(message, level)
