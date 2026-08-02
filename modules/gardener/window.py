@@ -6,6 +6,10 @@ from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, QTimer
 
+import cv2
+
+from app.core.capture import ScreenCapture
+from app.core.template_match import primary_monitor_region
 from app.ui import theme
 from app.ui.marker_overlay import Marker, MarkerOverlay
 from app.ui.module_window import ModuleWindow
@@ -17,9 +21,10 @@ from app.ui.widgets.nt_status_dot import NtStatusDot
 from app.ui.widgets.progress_board import ProgressBoard
 from modules.gardener.cleaning import (COOLDOWN_MINUTES, CleaningRun, Job,
                                        format_duration)
+from modules.gardener.garden_area import GARDEN_TEMPLATE, locate
 from modules.gardener.settings_panel import GardenerSettingsPanel
-from modules.gardener.trash import (TRASH_KINDS, count_by_kind, count_kind,
-                                    scan)
+from modules.gardener.trash import (TRASH_KINDS, count_by_kind, scan,
+                                    still_there)
 
 _DEFAULT_W = 380
 _DEFAULT_H = 800
@@ -50,6 +55,26 @@ def _brace(row: int, total: int) -> str:
     if row == total - 1:
         return "⎩"
     return "⎨" if row == total // 2 else "⎪"
+
+
+# How much screen to grab around the outermost marks when checking them.
+# Wide enough that a box around a mark on the edge is whole.
+_WATCH_PAD = 60
+
+
+def _box_around(jobs: list) -> dict:
+    """The patch of screen the marks live on, clipped to the monitor."""
+    screen = primary_monitor_region()
+    left   = min(job.x for job in jobs) - _WATCH_PAD
+    top    = min(job.y for job in jobs) - _WATCH_PAD
+    right  = max(job.x for job in jobs) + _WATCH_PAD
+    bottom = max(job.y for job in jobs) + _WATCH_PAD
+    left   = max(screen["left"], left)
+    top    = max(screen["top"], top)
+    right  = min(screen["left"] + screen["width"], right)
+    bottom = min(screen["top"] + screen["height"], bottom)
+    return {"left": left, "top": top,
+            "width": max(1, right - left), "height": max(1, bottom - top)}
 
 
 _START_TEXT = "▶  Запустить бота по уборке"
@@ -122,6 +147,11 @@ class GardenerWindow(ModuleWindow):
                             upper=False)
         scan_btn.clicked.connect(self._scan_trash)
         layout.addWidget(scan_btn)
+
+        area_btn = NtButton("▭  Определить экран", accent=theme.GD_MOSS,
+                            upper=False)
+        area_btn.clicked.connect(self._find_area)
+        layout.addWidget(area_btn)
 
         self._board = ProgressBoard(self._panel)
         layout.addWidget(self._board)
@@ -253,7 +283,7 @@ class GardenerWindow(ModuleWindow):
         self._start_btn.set_active(True)
         self._status_dot.set_running()
 
-        self._run = CleaningRun(hwnd, jobs, self._recount, self._rescan, self)
+        self._run = CleaningRun(hwnd, jobs, self._gone, self._rescan, self)
         self._run.cleaned.connect(self._board.advance)
         self._run.marking.connect(self._on_marking)
         self._run.kind_done.connect(self._on_kind_done)
@@ -275,9 +305,22 @@ class GardenerWindow(ModuleWindow):
             [Marker(item.x, item.y, item.kind.colour, True)
              for item in found if item.accepted])
 
-    def _recount(self, key: str) -> int:
-        """How many of that kind are still on screen — the run's own evidence."""
-        return count_kind(self._kind(key))
+    def _gone(self, jobs: list) -> list:
+        """Which of these marks have nothing under them any more.
+
+        One grab of the patch of screen the marks live on, then a small box
+        around each of them — a few milliseconds for the lot, against the
+        200 ms a single kind used to cost over the whole screen. Cheap enough
+        to run four times a second, which is what makes the bars follow the
+        gardener instead of guessing at him.
+        """
+        region = _box_around(jobs)
+        gray   = cv2.cvtColor(ScreenCapture.get().grab(region),
+                              cv2.COLOR_BGR2GRAY)
+        origin = (region["left"], region["top"])
+        return [job for job in jobs
+                if not still_there(self._kind(job.key), gray,
+                                   job.x, job.y, origin)]
 
     def _rescan(self) -> list:
         """A fresh look, for marking again whatever is still standing there."""
@@ -397,6 +440,36 @@ class GardenerWindow(ModuleWindow):
 
         self._log_counts(count_by_kind(found))
         self._show_dots(found)      # the same dots a run would walk
+
+    def _find_area(self):
+        """Where the garden view itself is, so scanning can be pointed at it."""
+        QTimer.singleShot(0, self._run_find_area)
+
+    def _run_find_area(self):
+        try:
+            area = locate()
+        except Exception as exc:
+            self._log.add_log(str(exc), level="error")
+            return
+        if area is None:
+            self._log.add_log(f"Не найден шаблон: {GARDEN_TEMPLATE}",
+                              level="error")
+            return
+
+        x, y = area.centre
+        self._log.add_log_segments(
+            [("Экран сада — ", theme.GD_TEXT),
+             (f"{100 * area.score:.1f}%", theme.GD_OLIVE)],
+            level="plain")
+        self._log.add_log_segments(
+            [("   центр ", theme.TEXT_DIM),
+             (f"({x}, {y})", theme.GD_OLIVE_SOFT),
+             ("  угол ", theme.TEXT_DIM),
+             (f"({area.left}, {area.top})", theme.GD_OLIVE_SOFT),
+             ("  размер ", theme.TEXT_DIM),
+             (f"{area.width}×{area.height}", theme.GD_OLIVE_SOFT)],
+            level="plain")
+        self._log.blank_line()
 
     def _log_counts(self, counts: dict):
         """The summary block: the whole haul, then a braced line per kind.

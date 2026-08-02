@@ -124,33 +124,48 @@ def scan(screen_gray=None, threshold: float | None = None,
     return found
 
 
-def count_kind(kind: TrashKind, screen_gray=None) -> int:
-    """How many of one kind are on screen right now.
+# How far around a mark to look when checking whether it is still there.
+# The character walks past and over the litter, and the game shifts a bush a
+# pixel or two as it animates, so the box has to be a little wider than the
+# picture — but only a little: a wide box catches the *next* bush along and
+# reports the cleared one as still standing.
+CHECK_PAD = 10
 
-    One kind rather than all six: this is called after every click during a
-    run, and the answer only has to be about the thing that was clicked.
 
-    A run measures its own progress with this instead of assuming that a
-    click worked — a click that lands on nothing, or on a bush the game is
-    still animating away, leaves the count where it was, and a bar that had
-    counted it would be telling a story about work that has not been done.
+def score_at(kind: TrashKind, gray, x: int, y: int,
+             origin: tuple[int, int] = (0, 0)) -> float:
+    """How well that kind matches in a small box around one point.
+
+    This is what a running job checks, several times a second, instead of
+    searching the whole screen: the run already knows where every piece of
+    litter is — it put a mark on each of them — so the only question left is
+    whether each mark still has something under it. A box costs a fraction of
+    a millisecond where the screen costs 200.
+
+    `origin` is the top-left of `gray` in screen coordinates, so the point
+    can be given the way the scan reported it.
     """
-    if screen_gray is None:
-        screen_gray = cv2.cvtColor(
-            ScreenCapture.get().grab(primary_monitor_region()),
-            cv2.COLOR_BGR2GRAY)
-
-    hits = []
+    best = 0.0
     for filename in kind.filenames:
         template = load_template(filename)
         if template is None:
             continue
         h, w = template.shape[:2]
-        hits += [(score, x + w // 2, y + h // 2, max(w, h))
-                 for score, x, y in find_all(screen_gray, template,
-                                             kind.threshold,
-                                             limit=MAX_PER_KIND)]
-    return len(_merge_variants(hits))
+        left = int(x - origin[0] - w / 2 - CHECK_PAD)
+        top  = int(y - origin[1] - h / 2 - CHECK_PAD)
+        box  = gray[max(0, top):top + h + 2 * CHECK_PAD,
+                    max(0, left):left + w + 2 * CHECK_PAD]
+        if box.shape[0] < h or box.shape[1] < w:
+            continue
+        best = max(best, float(cv2.matchTemplate(
+            box, template, cv2.TM_CCOEFF_NORMED).max()))
+    return best
+
+
+def still_there(kind: TrashKind, gray, x: int, y: int,
+                origin: tuple[int, int] = (0, 0)) -> bool:
+    """Is that piece of litter still where the scan found it?"""
+    return score_at(kind, gray, x, y, origin) >= kind.threshold
 
 
 def _merge_variants(hits: list) -> list[tuple[float, int, int]]:

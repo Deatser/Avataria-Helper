@@ -42,9 +42,9 @@ def _stub_garden(monkeypatch, window, kinds):
     monkeypatch.setattr(cleaning, "click_at", lambda *a: True)
     monkeypatch.setattr(window._wm, "get_game_hwnd", lambda: 4242,
                         raising=False)
-    # No screen to look at here, so nothing is ever seen to go: whatever the
-    # bars end up showing came from the counting, not from the clicking.
-    monkeypatch.setattr(window, "_recount", lambda key: 99)
+    # No screen to look at here, so no mark is ever seen to go: whatever the
+    # bars end up showing came from the watching, not from the clicking.
+    monkeypatch.setattr(window, "_gone", lambda jobs: [])
     return found
 
 
@@ -77,6 +77,7 @@ def test_the_window_has_its_controls_and_a_log(tmp_path, monkeypatch, app):
                       "▶  Запустить бота по уборке",
                       "⚙  Настройки",
                       "◎  Определить мусор",
+                      "▭  Определить экран",
                       "⌫"]                              # clears the log
     assert window._log is not None
     window.close()

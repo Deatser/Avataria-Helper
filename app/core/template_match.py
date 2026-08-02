@@ -1,6 +1,7 @@
 # app/core/template_match.py
 from __future__ import annotations
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -49,8 +50,15 @@ class Match:
         return self.score >= MATCH_THRESHOLD
 
 
+@lru_cache(maxsize=128)
 def load_template(filename: str) -> np.ndarray | None:
-    """Read a template from templates/ as grayscale, None if missing."""
+    """Read a template from templates/ as grayscale, None if missing.
+
+    Cached: a cleaning run checks its marks several times a second, and each
+    check would otherwise re-read the same handful of files off disk and
+    decode them again. Callers only ever match against these — none of them
+    writes into the array — so one copy is enough for everybody.
+    """
     return cv2.imread(str(TEMPLATES_DIR / filename), cv2.IMREAD_GRAYSCALE)
 
 

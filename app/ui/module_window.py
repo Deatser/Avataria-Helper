@@ -12,6 +12,7 @@ from app.ui.crt_power_mixin import CrtPowerMixin
 from app.ui.drag_mixin import BackgroundDragMixin
 from app.ui.resize_mixin import ResizeMixin
 from app.ui.collapse_mixin import CollapseMixin
+from app.ui.no_capture import exclude_from_capture
 
 
 class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
@@ -32,6 +33,13 @@ class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._init_resize()
         self._init_background_drag()
         self._init_crt_power()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Our own windows are not part of the game, and the matcher reads the
+        # game off the screen: anything of ours lying over it would be read as
+        # if it were the garden.
+        exclude_from_capture(self)
 
     # ── Position / size ──────────────────────────────────────────────────────
 

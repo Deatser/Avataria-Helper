@@ -5,7 +5,7 @@ import pytest
 
 from app.core.template_match import find_all, load_template
 from modules.gardener.trash import (MATCH_THRESHOLD, TRASH_KINDS,
-                                    accepted, count_by_kind, count_kind, scan)
+                                    accepted, count_by_kind, scan, still_there)
 
 
 # ── Finding every copy, not just the best one ───────────────────────────────
@@ -195,29 +195,53 @@ def test_counts_cover_every_kind_even_at_zero():
     assert sum(counts.values()) == 0
 
 
-# ── Counting one kind, which is how a run checks its own work ───────────────
+# ── Checking one mark, which is how a run follows its own work ──────────────
 
-def test_one_kind_is_counted_on_its_own(app=None):
-    """The recount a cleaning run makes after each click."""
+def test_a_mark_with_its_litter_still_under_it_reads_as_there():
     kind = TRASH_KINDS[0]
     template = load_template(kind.filenames[0])
-    scene = _scene_with(template, [(100, 100), (600, 300)])
+    h, w = template.shape[:2]
+    scene = _scene_with(template, [(100, 100)])
 
-    assert count_kind(kind, screen_gray=scene) == 2
+    assert still_there(kind, scene, 100 + w // 2, 100 + h // 2) is True
 
 
-def test_the_count_drops_when_one_is_taken_away(app=None):
+def test_a_mark_over_bare_ground_reads_as_gone():
     kind = TRASH_KINDS[0]
     template = load_template(kind.filenames[0])
-    before = _scene_with(template, [(100, 100), (600, 300)])
-    after  = _scene_with(template, [(100, 100)])
+    h, w = template.shape[:2]
+    scene = _scene_with(template, [(100, 100)])
 
-    assert count_kind(kind, screen_gray=after) < count_kind(kind,
-                                                            screen_gray=before)
+    # 400 px away from the only bush in the picture
+    assert still_there(kind, scene, 500 + w // 2, 500 + h // 2) is False
 
 
-def test_an_empty_screen_counts_none():
+def test_the_check_is_made_where_the_scan_said_not_where_the_grab_starts():
+    """The run grabs a patch of screen, not the screen; the point it asks
+    about is still in screen coordinates."""
     kind = TRASH_KINDS[0]
-    blank = np.full((600, 800), 40, np.uint8)
+    template = load_template(kind.filenames[0])
+    h, w = template.shape[:2]
+    patch = _scene_with(template, [(40, 30)], size=(300, 300))
 
-    assert count_kind(kind, screen_gray=blank) == 0
+    # The patch was grabbed at (1000, 900), so the bush is at (1040+, 930+)
+    assert still_there(kind, patch, 1040 + w // 2, 930 + h // 2,
+                       origin=(1000, 900)) is True
+    assert still_there(kind, patch, 40 + w // 2, 30 + h // 2,
+                       origin=(1000, 900)) is False
+
+
+def test_a_check_costs_a_fraction_of_a_screen_search():
+    """The point of the box: it is what makes four looks a second possible."""
+    import time
+    kind = TRASH_KINDS[0]
+    template = load_template(kind.filenames[0])
+    scene = _scene_with(template, [(100, 100)], size=(900, 1400))
+    h, w = template.shape[:2]
+
+    start = time.perf_counter()
+    for _ in range(20):
+        still_there(kind, scene, 100 + w // 2, 100 + h // 2)
+    each = (time.perf_counter() - start) / 20
+
+    assert each < 0.005      # milliseconds, against ~200 ms for the screen

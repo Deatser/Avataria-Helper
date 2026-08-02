@@ -21,6 +21,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtWidgets import QWidget
 
+from app.ui.no_capture import exclude_from_capture
+
 
 class GameLayer(QWidget):
     """Base for overlays that live above the game window."""
@@ -36,6 +38,13 @@ class GameLayer(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Never in our own screenshots: these dots sit on top of the very
+        # things the matcher is looking for, and a bush behind one is a bush
+        # the run believes has already been cleared.
+        exclude_from_capture(self)
 
     # ── Ownership ────────────────────────────────────────────────────────────
 

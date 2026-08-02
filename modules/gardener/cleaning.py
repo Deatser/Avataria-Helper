@@ -1,20 +1,25 @@
 # modules/gardener/cleaning.py
-"""One cleaning run: mark every piece of litter, then let the gardener walk.
+"""One cleaning run: mark every piece of litter, then watch the marks go.
 
-A click does not remove anything. It puts a mark on that spot, and the
-character then walks over and deals with it in his own time. So a run is in
-two parts: everything is marked first, and then the screen is watched until
-the marks have been worked through.
+A click does not remove anything. It marks a spot, and the character then
+walks over and deals with it in his own time. So a run is in two parts:
+everything is marked first, and then the marks are watched until they have
+been worked through.
 
 The order the marks go down in is the order he walks them, and that order is
 purely geographic — left to right, as if a vertical line swept across the
 garden. Kind does not come into it. Marking all the dry bushes first and then
-all the blue ones sends him back across the whole map for every kind; sweeping
-by x means each step is to the next thing along.
+all the blue ones sends him back across the whole map for every kind.
 
-Nothing is counted because it was clicked. A bar moves when there is one
-fewer of that kind on screen than there was — that is the character having
-actually done it.
+Watching is done a mark at a time, several times a second: each one is looked
+for in a small box around its own coordinates, which is a fraction of a
+millisecond of work, and a mark is credited only once there is nothing under
+it. Counting whole kinds off the whole screen, which is what this used to do,
+cost 200 ms a look and could not tell *which* bush had gone.
+
+A mark has to come up empty twice running before it counts. The character
+walks over the litter constantly, and a bush behind him for one frame has not
+been cleared.
 """
 from __future__ import annotations
 
@@ -30,16 +35,15 @@ from app.core.input_sender import click_at
 # nothing is being waited for here.
 MARK_MS = 300
 
-# How often the screen is counted while the gardener works. He walks, so
-# there is nothing to see for seconds at a time, and counting one kind costs
-# up to 200 ms of the interface's own time.
-WATCH_MS = 1200
+# How often the marks are checked. Fast, because it can afford to be.
+WATCH_MS = 250
 
-# Counts in a row with nothing removed before the run decides he is stuck.
-# The kinds are counted in turn, so this is a good few passes over all of
-# them — long enough to cross the garden, short enough not to sit forever on
-# litter that cannot be reached.
-PATIENCE = 20
+# Looks in a row with nothing under a mark before it is believed gone.
+CONFIRM_LOOKS = 2
+
+# Looks in a row with no mark going anywhere before the run decides the
+# gardener is stuck. About twenty seconds.
+PATIENCE = 80
 
 # How many times the leftovers are marked again before the run gives up on
 # them. A mark can be lost: clicked while the character was mid-animation, or
@@ -65,7 +69,7 @@ def sweep_order(jobs: list[Job]) -> list[Job]:
 
 
 class CleaningRun(QObject):
-    """Marks the whole garden left to right, then waits for it to be cleared."""
+    """Marks the whole garden left to right, then watches the marks go."""
 
     marking   = Signal(int, int)        # how many marks, which round
     cleaned   = Signal(str, int, int)   # kind key, done for it, done overall
@@ -73,27 +77,25 @@ class CleaningRun(QObject):
     finished  = Signal(float)           # seconds the run took
 
     def __init__(self, hwnd: int, jobs: list[Job],
-                 recount: Callable[[str], int] | None = None,
+                 gone: Callable[[list], list] | None = None,
                  rescan: Callable[[], list] | None = None, parent=None):
         super().__init__(parent)
         self._hwnd    = hwnd
-        self._recount = recount
+        self._gone    = gone      # which of these marks have nothing under them
         self._rescan  = rescan
         self._started = 0.0
 
         self._jobs = sweep_order(jobs)
+        self._left = list(self._jobs)       # marks still standing
 
-        # How many of each kind there were to start with, in the order the
-        # scan found them — which is the order of the bars.
         self._initial: dict[str, int] = {}
         for job in jobs:
             self._initial[job.key] = self._initial.get(job.key, 0) + 1
         self._done: dict[str, int] = {}
-        self._kinds = list(self._initial)
+        self._misses: dict[int, int] = {}   # id(job) -> looks it came up empty
 
         self._mark_at = 0     # how far through putting the marks down
-        self._look_at = 0     # which kind is counted on this look
-        self._idle    = 0     # looks in a row with nothing removed
+        self._idle    = 0     # looks in a row with nothing credited
         self._round   = 0     # how many times the leftovers were marked again
         self._marking = True
 
@@ -116,8 +118,10 @@ class CleaningRun(QObject):
         return sum(self._done.values())
 
     def start(self):
-        self._mark_at = self._look_at = self._idle = self._round = 0
+        self._mark_at = self._idle = self._round = 0
         self._done    = {}
+        self._misses  = {}
+        self._left    = list(self._jobs)
         self._marking = True
         self._started = time.monotonic()
         if not self._jobs:
@@ -137,7 +141,7 @@ class CleaningRun(QObject):
             self._watch()
 
     def _mark_one(self):
-        """Put down the next mark, or start waiting once they are all down."""
+        """Put down the next mark, or start watching once they are all down."""
         if self._mark_at < len(self._jobs):
             job = self._jobs[self._mark_at]
             self._mark_at += 1
@@ -151,46 +155,40 @@ class CleaningRun(QObject):
         self._timer.start(WATCH_MS)
 
     def _watch(self):
-        """Count one kind — a different one each look — and credit what has gone.
-
-        One kind per look rather than all of them: a full count of every kind
-        is half a second of the interface's own time, and there is no hurry.
-        Each kind still comes round every few seconds.
-        """
-        if self._recount is None or not self._kinds:
+        """Look at every mark still standing and credit the ones now empty."""
+        if self._gone is None or not self._left:
             self._finish()
             return
 
-        key = self._kinds[self._look_at % len(self._kinds)]
-        self._look_at += 1
-
         try:
-            left = self._recount(key)
+            empty = self._gone(self._left)
         except Exception:
-            left = None         # a failed grab says nothing either way
+            empty = []          # a failed grab says nothing either way
 
-        if left is not None and self._credit(key, self._initial[key] - left):
-            self._idle = 0
-        else:
-            self._idle += 1
+        cleared = [job for job in empty if self._confirmed(job)]
+        for job in cleared:
+            self._left.remove(job)
+            self._credit(job.key)
+        self._idle = 0 if cleared else self._idle + 1
 
-        if self.done >= self.total:
+        if not self._left:
             self._finish()
         elif self._idle >= PATIENCE:
             self._stuck()
         else:
             self._timer.start(WATCH_MS)
 
-    def _credit(self, key: str, gone: int) -> bool:
-        """Move that kind's bar, if more of it has gone than last time."""
-        gone = max(0, min(gone, self._initial.get(key, 0)))
-        if gone <= self._done.get(key, 0):
-            return False
-        self._done[key] = gone
-        self.cleaned.emit(key, gone, self.done)
-        if gone >= self._initial[key]:
-            self.kind_done.emit(key, gone)
-        return True
+    def _confirmed(self, job: Job) -> bool:
+        """Empty once can be the gardener standing in front of it."""
+        self._misses[id(job)] = self._misses.get(id(job), 0) + 1
+        return self._misses[id(job)] >= CONFIRM_LOOKS
+
+    def _credit(self, key: str):
+        """One more of that kind gone — as seen, not as clicked."""
+        self._done[key] = self._done.get(key, 0) + 1
+        self.cleaned.emit(key, self._done[key], self.done)
+        if self._done[key] >= self._initial.get(key, 0):
+            self.kind_done.emit(key, self._done[key])
 
     def _stuck(self):
         """Nothing has moved for a while: mark what is left again, or stop."""
@@ -198,8 +196,13 @@ class CleaningRun(QObject):
             self._finish()
             return
 
-        self._round  += 1
-        self._jobs    = sweep_order(self._rescan()) if self._rescan else self._jobs
+        self._round += 1
+        if self._rescan is not None:
+            self._jobs = sweep_order(self._rescan())
+            self._left = list(self._jobs)
+            self._misses = {}
+        else:
+            self._jobs = list(self._left)
         if not self._jobs:
             self._finish()
             return
