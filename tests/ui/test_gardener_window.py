@@ -258,7 +258,10 @@ def test_the_end_of_a_run_is_timed_and_the_next_one_is_an_hour_off(
 
     assert _wait_for(app, window, "Уборка завершена за 3 мин 7 сек")
     assert window._running is False
-    assert window._board.bar("__total__").complete is True
+    # Nothing was seen to go, so nothing is claimed: the bar stays empty and
+    # the log says what was left standing.
+    assert window._board.bar("__total__").done == 0
+    assert _wait_for(app, window, "Не удалось убрать")
 
     ahead = window._next_run_at - datetime.now()
     assert timedelta(minutes=59) < ahead <= timedelta(minutes=60)

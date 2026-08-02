@@ -73,11 +73,6 @@ class ProgressBoard(QWidget):
         if TOTAL_KEY in self._bars:
             self._bars[TOTAL_KEY].set_done(total_done)
 
-    def finish(self):
-        """Top every bar up, so a run that ends early still reads as done."""
-        for bar in self._bars.values():
-            bar.set_done(bar._total)
-
     def bar(self, key: str) -> NeonBar | None:
         return self._bars.get(key)
 

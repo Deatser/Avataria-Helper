@@ -21,7 +21,8 @@ from modules.gardener.butterfly import ButterflyTracker, colour_for
 from modules.gardener.cleaning import (COOLDOWN_MINUTES, CleaningRun, Job,
                                        format_duration)
 from modules.gardener.settings_panel import GardenerSettingsPanel
-from modules.gardener.trash import TRASH_KINDS, count_by_kind, scan
+from modules.gardener.trash import (TRASH_KINDS, count_by_kind, count_kind,
+                                    scan)
 
 # TEMPORARY, alongside the per-find log lines: how many near misses are worth
 # listing per kind before the log turns into noise.
@@ -139,16 +140,6 @@ class GardenerWindow(ModuleWindow):
         layout.addWidget(scan_btn)
 
         layout.addLayout(self._build_highlight_grid())
-
-        # One line that is rewritten in place rather than a new log entry
-        # every tick — at fourteen ticks a second the log would be nothing
-        # else within a minute.
-        self._flutter_line = QLabel("")
-        self._flutter_line.setWordWrap(True)
-        self._flutter_line.setTextFormat(Qt.RichText)
-        self._flutter_line.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
-        self._flutter_line.setStyleSheet("background:transparent;")
-        layout.addWidget(self._flutter_line)
 
         self._board = ProgressBoard(self._panel)
         layout.addWidget(self._board)
@@ -318,13 +309,21 @@ class GardenerWindow(ModuleWindow):
         self._status_dot.set_running()
         self._start_tracking()
 
-        self._run = CleaningRun(hwnd, jobs, self)
+        self._run = CleaningRun(hwnd, jobs, self._recount, self)
         self._run.cleaned.connect(self._board.advance)
         self._run.finished.connect(self._on_cleaned)
         self._run.start()
 
+    def _recount(self, key: str) -> int:
+        """How many of that kind are still on screen — the run's own evidence."""
+        kind = next(k for k in TRASH_KINDS if k.key == key)
+        return count_kind(kind)
+
     def _on_cleaned(self, seconds: float):
-        self._board.finish()
+        # The bars are deliberately left where the counting put them: if
+        # something could not be cleared, the board should say so rather than
+        # round itself up to a tidy 100%.
+        left = self._run.total - self._run.done if self._run else 0
         self._next_run_at = datetime.now() + timedelta(minutes=COOLDOWN_MINUTES)
         self._log.add_log_segments(
             [("Уборка завершена за ", theme.TEXT_SECONDARY),
@@ -333,6 +332,11 @@ class GardenerWindow(ModuleWindow):
              (f"{COOLDOWN_MINUTES} мин", theme.GD_OLIVE_SOFT),
              (f" в {self._next_run_at:%H:%M:%S}", theme.TEXT_SECONDARY)],
             level="plain")
+        if left:
+            self._log.add_log_segments(
+                [("Не удалось убрать — ", theme.TEXT_SECONDARY),
+                 (str(left), theme.ACCENT_AMBER)],
+                level="plain")
         self._log.blank_line()
         self._stop_cleaning(None)
 
@@ -569,25 +573,17 @@ class GardenerWindow(ModuleWindow):
             self._tracker = None
 
     def _on_tracked(self, seen: list):
-        """Dots and the readout, both keyed by the butterfly's own number."""
-        self._flutter_line.setText(self._flutter_text(seen))
+        """Dots only — one per butterfly, in that butterfly's own colour.
+
+        The running readout of numbers and percentages that used to sit above
+        the bars is gone: it was there to judge the threshold by, and the dots
+        say the same thing without a wall of figures.
+        """
         if not self._flutter_shown:
             return
         self._flutter.show_markers(
             [Marker(x, y, colour_for(number), True)
              for number, x, y, _score in seen])
-
-    def _flutter_text(self, seen: list) -> str:
-        if not self._tracker:
-            return ""
-        if not seen:
-            return (f"<span style='color:{theme.TEXT_DIM}'>"
-                    f"Бабочки: ни одной не видно</span>")
-        parts = [f"<span style='color:{colour_for(number)}'>"
-                 f"№{number} {100 * score:.0f}%</span>"
-                 for number, _x, _y, score in seen]
-        head = f"<span style='color:{theme.TEXT_SECONDARY}'>Слежу:</span> "
-        return head + f"<span style='color:{theme.TEXT_DIM}'> · </span>".join(parts)
 
     def _refresh_highlight_buttons(self):
         butterfly = (self._butterfly_index(), True)

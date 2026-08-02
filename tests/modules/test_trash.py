@@ -5,7 +5,7 @@ import pytest
 
 from app.core.template_match import find_all, load_template
 from modules.gardener.trash import (MATCH_THRESHOLD, TRASH_KINDS,
-                                    accepted, count_by_kind, scan)
+                                    accepted, count_by_kind, count_kind, scan)
 
 
 # ── Finding every copy, not just the best one ───────────────────────────────
@@ -193,3 +193,31 @@ def test_counts_cover_every_kind_even_at_zero():
     counts = count_by_kind([])
     assert set(counts) == {k.key for k in TRASH_KINDS}
     assert sum(counts.values()) == 0
+
+
+# ── Counting one kind, which is how a run checks its own work ───────────────
+
+def test_one_kind_is_counted_on_its_own(app=None):
+    """The recount a cleaning run makes after each click."""
+    kind = TRASH_KINDS[0]
+    template = load_template(kind.filenames[0])
+    scene = _scene_with(template, [(100, 100), (600, 300)])
+
+    assert count_kind(kind, screen_gray=scene) == 2
+
+
+def test_the_count_drops_when_one_is_taken_away(app=None):
+    kind = TRASH_KINDS[0]
+    template = load_template(kind.filenames[0])
+    before = _scene_with(template, [(100, 100), (600, 300)])
+    after  = _scene_with(template, [(100, 100)])
+
+    assert count_kind(kind, screen_gray=after) < count_kind(kind,
+                                                            screen_gray=before)
+
+
+def test_an_empty_screen_counts_none():
+    kind = TRASH_KINDS[0]
+    blank = np.full((600, 800), 40, np.uint8)
+
+    assert count_kind(kind, screen_gray=blank) == 0

@@ -124,6 +124,35 @@ def scan(screen_gray=None, threshold: float | None = None,
     return found
 
 
+def count_kind(kind: TrashKind, screen_gray=None) -> int:
+    """How many of one kind are on screen right now.
+
+    One kind rather than all six: this is called after every click during a
+    run, and the answer only has to be about the thing that was clicked.
+
+    A run measures its own progress with this instead of assuming that a
+    click worked — a click that lands on nothing, or on a bush the game is
+    still animating away, leaves the count where it was, and a bar that had
+    counted it would be telling a story about work that has not been done.
+    """
+    if screen_gray is None:
+        screen_gray = cv2.cvtColor(
+            ScreenCapture.get().grab(primary_monitor_region()),
+            cv2.COLOR_BGR2GRAY)
+
+    hits = []
+    for filename in kind.filenames:
+        template = load_template(filename)
+        if template is None:
+            continue
+        h, w = template.shape[:2]
+        hits += [(score, x + w // 2, y + h // 2, max(w, h))
+                 for score, x, y in find_all(screen_gray, template,
+                                             kind.threshold,
+                                             limit=MAX_PER_KIND)]
+    return len(_merge_variants(hits))
+
+
 def _merge_variants(hits: list) -> list[tuple[float, int, int]]:
     """One object matched by two pictures of it is still one object.
 
