@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLabel)
+from datetime import datetime, timedelta
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 
@@ -14,7 +16,10 @@ from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.nt_status_dot import NtStatusDot
+from app.ui.widgets.progress_board import ProgressBoard
 from modules.gardener.butterfly import ButterflyTracker, colour_for
+from modules.gardener.cleaning import (COOLDOWN_MINUTES, CleaningRun, Job,
+                                       format_duration)
 from modules.gardener.settings_panel import GardenerSettingsPanel
 from modules.gardener.trash import TRASH_KINDS, count_by_kind, scan
 
@@ -30,7 +35,12 @@ _MIN_H     = 700   # tall enough that the log below still gets its full height
 # Three times what it was. Only a floor now, not a fixed size — the log is
 # the tallest thing in the window, so it is what should soak up the slack
 # when the window is made taller still.
-_LOG_H = 390
+_LOG_H = 200   # a floor; the log takes all the slack when the board is away
+
+_LOG_H_RUN = 110   # ...and what it may be squeezed to while the bars are up
+
+# Breathing room under the bars, added to the window along with them.
+_BOARD_GAP = 8
 
 # Five kinds means five rows of these; at the usual button height they would
 # cost the window another 90 px.
@@ -83,6 +93,9 @@ class GardenerWindow(ModuleWindow):
         self._last_found: list = []
         self._highlighted: tuple | None = None
         self._tracker: ButterflyTracker | None = None
+        self._run: CleaningRun | None = None
+        self._next_run_at: datetime | None = None
+        self._board_room = 0     # extra height lent to the bars, given back later
         self.resize(max(getattr(config, "width",  _DEFAULT_W), _MIN_W),
                     max(getattr(config, "height", _DEFAULT_H), _MIN_H))
         self.setMinimumSize(_MIN_W, _MIN_H)
@@ -136,6 +149,9 @@ class GardenerWindow(ModuleWindow):
         self._flutter_line.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
         self._flutter_line.setStyleSheet("background:transparent;")
         layout.addWidget(self._flutter_line)
+
+        self._board = ProgressBoard(self._panel)
+        layout.addWidget(self._board)
 
         layout.addLayout(self._build_log(), stretch=1)
 
@@ -243,22 +259,123 @@ class GardenerWindow(ModuleWindow):
         """The dots belong to the lines that named them, so they go together."""
         self._log.clear_logs()
         self._markers.clear()
+        if not self._running:
+            # The bars are the record of a run that is over: they go with it.
+            self._put_board_away()
 
     # ── Cleaning ─────────────────────────────────────────────────────────────
 
     def _toggle_cleaning(self):
-        self._running = not self._running
-        self._start_btn.setText(_STOP_TEXT if self._running else _START_TEXT)
-        self._start_btn.set_active(self._running)
         if self._running:
-            self._status_dot.set_running()
-            # Said plainly rather than pretending: the button and the state
-            # are real, the routine behind them is not written yet.
-            self._log.add_log("Бот включён — сама уборка ещё не написана",
-                              level="plain")
-        else:
-            self._status_dot.set_offline()
-            self._log.add_log("Бот выключен", level="plain")
+            self._stop_cleaning("Уборка остановлена")
+            return
+        if self._cooling_down():
+            return
+        QTimer.singleShot(0, self._begin_cleaning)
+
+    def _cooling_down(self) -> bool:
+        """The garden refills on its own schedule; hammering it does nothing."""
+        if self._next_run_at is None or datetime.now() >= self._next_run_at:
+            return False
+        left = self._next_run_at - datetime.now()
+        minutes = int(left.total_seconds() // 60) + 1
+        self._log.add_log_segments(
+            [("Цикл ещё не доступен — осталось ", theme.TEXT_SECONDARY),
+             (f"{minutes} мин", theme.ACCENT_AMBER),
+             (f", в {self._next_run_at:%H:%M:%S}", theme.TEXT_SECONDARY)],
+            level="plain")
+        return True
+
+    def _begin_cleaning(self):
+        """Find what is there, show the bars, then work through it."""
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd:
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+
+        try:
+            found = scan()
+        except Exception as exc:
+            self._log.add_log(str(exc), level="error")
+            return
+
+        self._last_found = found
+        counts = count_by_kind(found)
+        self._log_counts(counts)
+        self._log.add_log("Начинаем уборку", level="plain")
+
+        jobs = [Job(item.kind.key, item.x, item.y)
+                for item in found if item.accepted]
+        self._board.build(
+            len(jobs),
+            [(k.key, f"Найдено {k.plural}", counts.get(k.key, 0), k.colour)
+             for k in TRASH_KINDS])
+        self._make_room_for_board()
+
+        self._running = True
+        self._start_btn.setText(_STOP_TEXT)
+        self._start_btn.set_active(True)
+        self._status_dot.set_running()
+        self._start_tracking()
+
+        self._run = CleaningRun(hwnd, jobs, self)
+        self._run.cleaned.connect(self._board.advance)
+        self._run.finished.connect(self._on_cleaned)
+        self._run.start()
+
+    def _on_cleaned(self, seconds: float):
+        self._board.finish()
+        self._next_run_at = datetime.now() + timedelta(minutes=COOLDOWN_MINUTES)
+        self._log.add_log_segments(
+            [("Уборка завершена за ", theme.TEXT_SECONDARY),
+             (format_duration(seconds), theme.GD_OLIVE),
+             (", новый цикл будет доступен через ", theme.TEXT_SECONDARY),
+             (f"{COOLDOWN_MINUTES} мин", theme.GD_OLIVE_SOFT),
+             (f" в {self._next_run_at:%H:%M:%S}", theme.TEXT_SECONDARY)],
+            level="plain")
+        self._log.blank_line()
+        self._stop_cleaning(None)
+
+    def _stop_cleaning(self, message: str | None):
+        if self._run is not None:
+            self._run.stop()
+            self._run = None
+        self._running = False
+        self._start_btn.setText(_START_TEXT)
+        self._start_btn.set_active(False)
+        self._status_dot.set_offline()
+        if message:
+            self._log.add_log(message, level="plain")
+
+    # ── Room for the bars ────────────────────────────────────────────────────
+
+    def _make_room_for_board(self):
+        """Lend the board the height it needs by making the window taller.
+
+        The window has a minimum of its own, and an explicit minimum beats the
+        one the layout works out — so nothing grows on its own here. Left
+        alone, the layout has less room than its contents need and hands out
+        overlapping rows: the log climbs over the bottom bars.
+        """
+        wanted = self._board.wanted_height()
+        wanted += _BOARD_GAP if wanted else 0
+        delta = wanted - self._board_room
+        if not delta:
+            return
+        self._board_room = wanted
+
+        # While the bars are up the log gives up its floor: on a screen too
+        # short for both, the log is the one that can afford to be smaller.
+        self._log.setMinimumHeight(_LOG_H_RUN if wanted else _LOG_H)
+
+        room = self.screen().availableGeometry().height() if self.screen() else 0
+        height = max(_MIN_H, self.height() + delta)
+        self.resize(self.width(), min(height, room) if room else height)
+
+    def _put_board_away(self):
+        """Take the bars down and give the borrowed height back."""
+        self._board.clear()
+        self._make_room_for_board()
 
     def _toggle_settings(self):
         if self._settings is None:
@@ -285,21 +402,7 @@ class GardenerWindow(ModuleWindow):
             self._log.add_log(str(exc), level="error")
             return
 
-        counts = count_by_kind(found)
-        total  = sum(counts.values())
-        self._log.add_log_segments(
-            [("Найдено мусора — ", theme.GD_TEXT),
-             (str(total), theme.GD_OLIVE if total else theme.TEXT_DIM)],
-            level="plain")
-
-        for row, kind in enumerate(TRASH_KINDS):
-            number = counts.get(kind.key, 0)
-            self._log.add_log_segments(
-                [(f"   {_brace(row, len(TRASH_KINDS))} ", theme.TEXT_DIM),
-                 (f"Найдено {kind.plural} — ", theme.TEXT_SECONDARY),
-                 (str(number), kind.colour if number else theme.TEXT_DIM)],
-                level="plain")
-        self._log.blank_line()
+        self._log_counts(count_by_kind(found))
 
         # No dots of its own: a colour per find was too many colours to read.
         # The four buttons above put them up a group at a time instead.
@@ -311,6 +414,26 @@ class GardenerWindow(ModuleWindow):
         # than found: one that flies behind something and comes back out is
         # picked up again by itself.
         self._start_tracking()
+
+    def _log_counts(self, counts: dict):
+        """The summary block: the whole haul, then a braced line per kind.
+
+        Shared by the one-off scan and the start of a cleaning run — they
+        report the same thing and should not drift apart.
+        """
+        total = sum(counts.values())
+        self._log.add_log_segments(
+            [("Найдено мусора — ", theme.GD_TEXT),
+             (str(total), theme.GD_OLIVE if total else theme.TEXT_DIM)],
+            level="plain")
+        for row, kind in enumerate(TRASH_KINDS):
+            number = counts.get(kind.key, 0)
+            self._log.add_log_segments(
+                [(f"   {_brace(row, len(TRASH_KINDS))} ", theme.TEXT_DIM),
+                 (f"Найдено {kind.plural} — ", theme.TEXT_SECONDARY),
+                 (str(number), kind.colour if number else theme.TEXT_DIM)],
+                level="plain")
+        self._log.blank_line()
 
     # ── Highlighting ─────────────────────────────────────────────────────────
 
@@ -504,6 +627,9 @@ class GardenerWindow(ModuleWindow):
 
     def _teardown(self):
         """Nothing of ours should outlive the window — the dots included."""
+        if self._run is not None:
+            self._run.stop()
+            self._run = None
         self._stop_tracking()
         self._markers.clear()
         self._flutter.clear()

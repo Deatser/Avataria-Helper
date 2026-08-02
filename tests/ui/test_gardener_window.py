@@ -1,4 +1,7 @@
 # tests/ui/test_gardener_window.py
+import time
+from datetime import datetime, timedelta
+
 import pytest
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -6,7 +9,10 @@ from app.core.config import ConfigManager
 from app.module_registry import MODULES
 from app.ui import theme
 from modules.gardener import GardenerModule
+from modules.gardener.trash import TRASH_KINDS, TrashFind
 from modules.gardener.window import GardenerWindow
+import modules.gardener.cleaning as cleaning
+import modules.gardener.window as window_module
 
 
 @pytest.fixture(scope="module")
@@ -25,6 +31,28 @@ def _window(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = ConfigManager()
     return GardenerWindow(config.data.gardener, config.save, _WM()), config
+
+
+def _stub_garden(monkeypatch, window, kinds):
+    """A garden with exactly this litter in it, a game to click, no screen."""
+    found = [TrashFind(kind, 0.9, 10 + n * 5, 20, accepted=True)
+             for n, kind in enumerate(kinds)]
+    monkeypatch.setattr(window_module, "scan", lambda *a, **k: found)
+    monkeypatch.setattr(cleaning, "click_at", lambda *a: True)
+    monkeypatch.setattr(window._wm, "get_game_hwnd", lambda: 4242,
+                        raising=False)
+    monkeypatch.setattr(window, "_start_tracking", lambda: None)
+    return found
+
+
+def _wait_for(app, window, needle, seconds=4.0):
+    """Log lines arrive a character at a time; give one time to spell itself."""
+    end = time.time() + seconds
+    while time.time() < end:
+        app.processEvents()
+        if needle in window._log.toPlainText():
+            return True
+    return False
 
 
 def test_the_module_is_registered_below_the_placeholders():
@@ -159,14 +187,87 @@ def test_pressing_the_same_button_again_takes_the_dots_down(tmp_path,
 
 def test_the_start_button_flips_and_says_what_it_does(tmp_path, monkeypatch, app):
     window, _config = _window(tmp_path, monkeypatch)
+    _stub_garden(monkeypatch, window, [TRASH_KINDS[0]] * 3)
 
     window._toggle_cleaning()
+    app.processEvents()                 # the run starts a turn later
     assert window._running is True
     assert window._start_btn.text() == "■  Выключить бота по уборке"
 
     window._toggle_cleaning()
     assert window._running is False
     assert window._start_btn.text() == "▶  Запустить бота по уборке"
+    window.close()
+
+
+def test_nothing_starts_without_the_game(tmp_path, monkeypatch, app):
+    window, _config = _window(tmp_path, monkeypatch)   # _WM has no game window
+
+    window._toggle_cleaning()
+    app.processEvents()
+
+    assert window._running is False
+    assert _wait_for(app, window, "не найдено")
+    window.close()
+
+
+# ── The bars ────────────────────────────────────────────────────────────────
+
+def test_a_run_puts_up_a_bar_for_the_total_and_for_each_kind_present(
+        tmp_path, monkeypatch, app):
+    """Kinds that are not in the garden get no bar — 0/0 is nothing to watch."""
+    window, _config = _window(tmp_path, monkeypatch)
+    _stub_garden(monkeypatch, window,
+                 [TRASH_KINDS[0]] * 4 + [TRASH_KINDS[4]] * 2)
+
+    window._toggle_cleaning()
+    app.processEvents()
+
+    board = window._board
+    assert board.isHidden() is False    # the window itself is never shown here
+    assert set(board._bars) == {"__total__", TRASH_KINDS[0].key,
+                                TRASH_KINDS[4].key}
+    assert board.bar("__total__")._total == 6
+    assert board.bar(TRASH_KINDS[0].key)._total == 4
+    window._toggle_cleaning()
+    window.close()
+
+
+def test_the_bars_fill_as_the_litter_goes(tmp_path, monkeypatch, app):
+    window, _config = _window(tmp_path, monkeypatch)
+    _stub_garden(monkeypatch, window, [TRASH_KINDS[0]] * 3)
+
+    window._toggle_cleaning()
+    app.processEvents()
+    window._run.cleaned.emit(TRASH_KINDS[0].key, 2, 2)
+
+    assert window._board.bar(TRASH_KINDS[0].key).done == 2
+    assert window._board.bar("__total__").done == 2
+    window._toggle_cleaning()
+    window.close()
+
+
+def test_the_end_of_a_run_is_timed_and_the_next_one_is_an_hour_off(
+        tmp_path, monkeypatch, app):
+    window, _config = _window(tmp_path, monkeypatch)
+    _stub_garden(monkeypatch, window, [TRASH_KINDS[0]])
+
+    window._toggle_cleaning()
+    app.processEvents()
+    window._run.finished.emit(187)
+
+    assert _wait_for(app, window, "Уборка завершена за 3 мин 7 сек")
+    assert window._running is False
+    assert window._board.bar("__total__").complete is True
+
+    ahead = window._next_run_at - datetime.now()
+    assert timedelta(minutes=59) < ahead <= timedelta(minutes=60)
+
+    # And it will not go again until then
+    window._toggle_cleaning()
+    app.processEvents()
+    assert window._running is False
+    assert _wait_for(app, window, "Цикл ещё не доступен")
     window.close()
 
 
