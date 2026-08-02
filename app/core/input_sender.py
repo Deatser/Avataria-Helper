@@ -40,7 +40,17 @@ def press_key(hwnd: int, key: str) -> bool:
     return True
 
 
-def click_at(hwnd: int, screen_x: int, screen_y: int) -> bool:
+def _lparam(x: int, y: int) -> int:
+    """Pack a point the way a mouse message carries it.
+
+    Masked rather than passed to MAKELONG: a point outside the window is a
+    perfectly ordinary thing to report, and its coordinates are negative.
+    """
+    return ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+
+
+def click_at(hwnd: int, screen_x: int, screen_y: int,
+             give_back: bool = True) -> bool:
     """Post a left click at a screen point, in hwnd's own client coordinates.
 
     Posted, not synthesised with the real cursor, for the same reason keys
@@ -52,6 +62,12 @@ def click_at(hwnd: int, screen_x: int, screen_y: int) -> bool:
     A move is posted first: a button that only lights its hover state on
     WM_MOUSEMOVE can otherwise ignore a press that arrives on a spot the
     cursor was never over. Release goes out on a timer, like KEYUP.
+
+    That move is then taken back. The game draws its own pointer wherever it
+    was last told the mouse is, so a run that clicks dozens of places leaves
+    that pointer skidding around the garden and fighting whoever is holding
+    the real mouse. Posting one last move to where the mouse actually is puts
+    it back under their hand within a frame of the click.
     """
     if not hwnd:
         return False
@@ -59,9 +75,19 @@ def click_at(hwnd: int, screen_x: int, screen_y: int) -> bool:
         cx, cy = win32gui.ScreenToClient(hwnd, (int(screen_x), int(screen_y)))
     except win32gui.error:
         return False
-    pos = win32api.MAKELONG(cx, cy)
+    pos = _lparam(cx, cy)
     win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, pos)
     win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, pos)
-    threading.Timer(_HOLD_S, win32api.PostMessage,
-                     args=(hwnd, win32con.WM_LBUTTONUP, 0, pos)).start()
+    threading.Timer(_HOLD_S, _release, args=(hwnd, pos, give_back)).start()
     return True
+
+
+def _release(hwnd: int, pos: int, give_back: bool):
+    win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, pos)
+    if not give_back:
+        return
+    try:
+        x, y = win32gui.ScreenToClient(hwnd, win32api.GetCursorPos())
+    except Exception:
+        return          # no cursor to hand back to; the click still stands
+    win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, _lparam(x, y))
