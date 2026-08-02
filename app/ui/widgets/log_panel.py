@@ -10,12 +10,21 @@ from app.ui import theme
 CLAUDE_ORANGE = "#E8712A"
 _SCRAMBLE = "!@#$%^&*<>?/|[]{}~+=_-"
 
+# Clearing the log, split-flap style: the wave takes _FLIP_SPAN characters to
+# pass over a letter — long enough to read as flipping rather than blinking —
+# and each line starts _LINE_LAG frames after the one above it, so the board
+# empties from the top down instead of all at once.
+_FLIP_MS   = 16
+_FLIP_SPAN = 4
+_LINE_LAG  = 2
+
 
 class LogPanel(QTextEdit):
     """Scrolling log area — every message animates with scramble effect."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._wiping = False   # a second press should not race the first
         self.setReadOnly(True)
         self.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
         self.setStyleSheet(f"""
@@ -166,5 +175,71 @@ class LogPanel(QTextEdit):
         sb = self.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    # ── Clearing ──────────────────────────────────────────────────────────────
+    # A departure board emptying out: every character flips through a few
+    # glyphs and then is gone, the wave running along each line and the lines
+    # starting one after another from the top.
+
     def clear_logs(self):
-        self.clear()
+        if self._wiping or self.document().isEmpty():
+            self.clear()
+            return
+        lines = [self._block_segments(i)
+                 for i in range(self.document().blockCount())]
+        if not any(segs for segs in lines):
+            self.clear()
+            return
+
+        self._wiping = True
+        longest = max((sum(len(t) for t, _ in segs) for segs in lines),
+                      default=0)
+        frames = int(longest + _FLIP_SPAN + len(lines) * _LINE_LAG) + 1
+        self._wipe_frame(lines, 0, frames)
+
+    def _wipe_frame(self, lines: list, frame: int, frames: int):
+        if frame > frames:
+            self.clear()
+            self._wiping = False
+            return
+
+        for index, segments in enumerate(lines):
+            gone = frame - index * _LINE_LAG          # this line's own clock
+            self._write_block(index, self._flip_frame(segments, gone))
+
+        QTimer.singleShot(_FLIP_MS,
+                          lambda: self._wipe_frame(lines, frame + 1, frames))
+
+    def _flip_frame(self, segments: list, gone: float) -> list:
+        """One line mid-flip: settled, flipping and blank, in that order."""
+        result, index = [], 0
+        for text, colour in segments:
+            buf, current = "", None
+            for ch in text:
+                lead = gone - index      # how far the wave has passed this one
+                if lead <= 0:
+                    out, c = ch, colour              # not reached yet
+                elif lead < _FLIP_SPAN and ch != " ":
+                    out, c = random.choice(_SCRAMBLE), theme.TEXT_DIM
+                else:
+                    out, c = " ", colour             # flipped away
+                index += 1
+                if c == current:
+                    buf += out
+                else:
+                    if buf:
+                        result.append((buf, current))
+                    buf, current = out, c
+            if buf:
+                result.append((buf, current))
+        return result
+
+    def _block_segments(self, block_num: int) -> list:
+        """A block's text back out as (text, colour) runs, colours intact."""
+        block = self.document().findBlockByNumber(block_num)
+        if not block.isValid():
+            return []
+        text = block.text()
+        runs = [(text[r.start:r.start + r.length],
+                 r.format.foreground().color().name())
+                for r in block.textFormats() if r.length > 0]
+        return runs or ([(text, theme.TEXT_SECONDARY)] if text else [])

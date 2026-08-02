@@ -238,32 +238,34 @@ class AvaDancersWindow(ModuleWindow):
         layout.addLayout(tiles_row, stretch=1)
         self._scale_tiles()
 
-        # ── Log (stretchy) ───────────────────────────────────────────────────
+        # ── Log ──────────────────────────────────────────────────────────────
+        # Clearing lives on the heading row as a small button, the same as in
+        # the overlay and the garden: it is an action on the log itself, and
+        # the full-width slot below is worth more to the guide.
+        log_head = QHBoxLayout()
         log_label = QLabel("Ava Dance Log:")
         log_label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         log_label.setStyleSheet(
             f"color:{theme.TEXT_PRIMARY}; background:transparent;"
         )
-        layout.addWidget(log_label)
+        clear_btn = NtButton("⌫", accent=theme.BORDER_BRIGHT)
+        clear_btn.setFixedSize(22, 20)
+        clear_btn.setToolTip("Очистить логи")
+        log_head.addWidget(log_label)
+        log_head.addStretch()
+        log_head.addWidget(clear_btn)
+        layout.addLayout(log_head)
 
         self._log = LogPanel()
         self._log.setMinimumHeight(_LOG_H)
         self._log.setMaximumHeight(_LOG_H)
         layout.addWidget(self._log)
+        clear_btn.clicked.connect(lambda: self._log.clear_logs())
 
-        # ── Log actions ──────────────────────────────────────────────────────
-        actions = QHBoxLayout()
-        actions.setSpacing(theme.SPACING)
-        clear_btn = NtButton("Очистить логи", upper=False,
-                             accent=theme.BORDER_BRIGHT)
-        clear_btn.clicked.connect(self._log.clear_logs)
         guide_btn = NtButton("Гайд", upper=False,
                              accent=theme.VW_PURPLE, filled=True)
-        for btn in (clear_btn, guide_btn):
-            btn.setMinimumHeight(30)
-        actions.addWidget(clear_btn)
-        actions.addWidget(guide_btn)
-        layout.addLayout(actions)
+        guide_btn.setMinimumHeight(30)
+        layout.addWidget(guide_btn)
 
         self._video_switch = NtSwitch("Видеофон  ·  выключите на слабом ПК",
                                       accent=theme.VW_CYAN)

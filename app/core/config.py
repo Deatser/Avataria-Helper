@@ -45,7 +45,7 @@ class GardenerConfig:
     x: int = 420
     y: int = 500
     width: int = 380
-    height: int = 420
+    height: int = 800
 
 
 @dataclass

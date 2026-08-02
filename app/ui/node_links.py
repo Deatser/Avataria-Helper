@@ -24,6 +24,7 @@ from PySide6.QtGui import (QColor, QPainter, QPainterPath, QPen,
 from PySide6.QtWidgets import QWidget
 
 from app.ui import theme
+from app.ui.game_layer import GameLayer
 
 GROW_MS   = 380    # matches the window switch-on
 RETRACT_MS = 320
@@ -57,29 +58,13 @@ class _Link:
     anim: QVariantAnimation = field(default=None, repr=False)
 
 
-class NodeLinkCanvas(QWidget):
-    """The layer every wire is drawn on."""
+class NodeLinkCanvas(GameLayer):
+    """The layer every wire is drawn on. See GameLayer for the window itself."""
 
     def __init__(self, window_manager=None):
-        super().__init__()
-        self._wm       = window_manager
+        super().__init__(window_manager)
         self._links: list[_Link] = []
         self._rect     = QRect()
-
-        self._owner = 0
-
-        # A top-level window, deliberately not re-parented into the game the
-        # way the helper's other windows are: attaching it there put it among
-        # the game's own child windows, where it was painted over and never
-        # showed up. It is made an *owned* window of the game instead (see
-        # _adopt), which keeps it above the game and, just as importantly,
-        # takes it away whenever the game itself is not in front.
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool
-                            | Qt.WindowTransparentForInput
-                            | Qt.WindowDoesNotAcceptFocus)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
 
         self._geom: dict[int, QRect] = {}   # window id → last seen rectangle
         self._ticks = 0
@@ -156,19 +141,6 @@ class NodeLinkCanvas(QWidget):
         return [l for l in self._links
                 if l.parent.isVisible() and (l.child.isVisible() or l.dying)]
 
-    def _rect_of(self, window: QWidget) -> QRect:
-        """Window box in screen coordinates — the one space all of them share.
-
-        Asked of Windows rather than Qt: the helper's windows are re-parented
-        into the game, and Qt's idea of where they are stops being the truth
-        the moment that happens.
-        """
-        ask = getattr(self._wm, "window_rect_screen", None)
-        if ask is not None:
-            rect = ask(int(window.winId()))
-            if rect is not None:
-                return QRect(*rect)
-        return QRect(window.pos(), window.size())
 
     def _sync(self):
         """Re-read where the windows are; hide when the helper is not in view."""
@@ -208,7 +180,7 @@ class NodeLinkCanvas(QWidget):
         # away on its own, and at 240 Hz that would be pure noise.
         self._ticks += 1
         if self._ticks % _ADOPT_EVERY == 1:
-            self._adopt(links[0].parent)
+            self.adopt(links[0].parent)
 
         if moved:
             self.update()
@@ -221,37 +193,17 @@ class NodeLinkCanvas(QWidget):
         """
         geometry = {}
         for window in {w for link in links for w in (link.parent, link.child)}:
-            geometry[int(window.winId())] = self._rect_of(window)
+            geometry[int(window.winId())] = self.rect_of(window)
         moved = geometry != self._geom
         self._geom = geometry
         return moved
 
     def _cached_rect(self, window: QWidget) -> QRect:
         rect = self._geom.get(int(window.winId()))
-        return rect if rect is not None else self._rect_of(window)
+        return rect if rect is not None else self.rect_of(window)
         if not self._follow.isActive():
             self._follow.start()
         self.update()
-
-    def _adopt(self, parent_window: QWidget):
-        """Hand the canvas to whatever window the wires belong to.
-
-        The owner is the top-level the linked windows live in: the game once
-        they are attached to it, the helper's own window when running
-        standalone. Windows keeps an owned window above its owner and drops
-        it behind everything the moment the owner is not in front, which is
-        exactly the "only over Avataria" rule, enforced by the OS instead of
-        by watching the foreground window from a timer.
-        """
-        if self._wm is None or not hasattr(self._wm, "root_of"):
-            return
-        owner = self._wm.root_of(int(parent_window.winId()))
-        if not owner or owner == int(self.winId()):
-            return
-        if self._wm.owner_of(int(self.winId())) != owner:
-            self._owner = owner
-            self._wm.set_owner(int(self.winId()), owner)
-            self.raise_()
 
     def _canvas_area(self, links: list[_Link]) -> QRect:
         """The game's whole box, or just around the windows when standalone.

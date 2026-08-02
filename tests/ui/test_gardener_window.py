@@ -37,12 +37,153 @@ def test_it_wears_the_olive_accent():
     assert GardenerModule.color == theme.GD_OLIVE
 
 
-def test_the_shell_has_the_usual_window_buttons(tmp_path, monkeypatch, app):
+def test_the_window_has_its_controls_and_a_log(tmp_path, monkeypatch, app):
     window, _config = _window(tmp_path, monkeypatch)
 
     labels = [b.text() for b in window.findChildren(QPushButton)]
 
-    assert labels == ["▲", "☆", "×"]   # collapse, favourite, close — no more
+    from modules.gardener.trash import TRASH_KINDS
+
+    highlight = [f"{mark}  тип {n}"
+                 for n in range(1, len(TRASH_KINDS) + 1)
+                 for mark in ("✓", "✗")]
+    assert labels == ["▲", "☆", "×",                    # window chrome
+                      "▶  Запустить бота по уборке",
+                      "⚙  Настройки",
+                      "◎  Определить мусор",
+                      *highlight,                       # one pair per kind
+                      "⌫"]                              # clears the log
+    assert window._log is not None
+    window.close()
+
+
+def test_each_group_has_its_own_colour_and_only_one(tmp_path, monkeypatch, app):
+    """The complaint that started this: a colour per find was unreadable."""
+    window, _config = _window(tmp_path, monkeypatch)
+
+    from modules.gardener.trash import TRASH_KINDS
+
+    colours = {window._group_colour(kind, ok)
+               for kind in range(len(TRASH_KINDS)) for ok in (True, False)}
+
+    # One colour per kind, and passed and failed still tell apart by shade
+    assert len(colours) == 2 * len(TRASH_KINDS)
+    assert window._group_colour(0, True) != window._group_colour(0, False)
+    window.close()
+
+
+def test_highlighting_shows_just_that_group(tmp_path, monkeypatch, app):
+    from modules.gardener.trash import TRASH_KINDS, TrashFind
+
+    window, _config = _window(tmp_path, monkeypatch)
+    window._last_found = [
+        TrashFind(TRASH_KINDS[0], 0.9, 10, 10, accepted=True),
+        TrashFind(TRASH_KINDS[0], 0.6, 20, 20, accepted=False),
+        TrashFind(TRASH_KINDS[1], 0.9, 30, 30, accepted=True),
+    ]
+
+    before = len(window._log.toPlainText())
+    window._toggle_highlight(0, True)
+
+    assert [m.x for m in window._markers._markers] == [10]
+    assert len(window._log.toPlainText()) > before   # and says where they are
+    assert window._markers._markers[0].colour == window._group_colour(0, True)
+
+    window._toggle_highlight(0, False)
+    assert [m.x for m in window._markers._markers] == [20]
+    window.close()
+
+
+def test_highlighting_rejects_shows_only_as_many_as_the_log_listed(
+        tmp_path, monkeypatch, app):
+    """Below the bar there can be dozens of weak matches; a dot on every one
+    of them buries the screen instead of pointing at anything."""
+    from modules.gardener.trash import TRASH_KINDS, TrashFind
+    from modules.gardener.window import _NEAR_SHOWN
+
+    window, _config = _window(tmp_path, monkeypatch)
+    window._last_found = [
+        TrashFind(TRASH_KINDS[0], 0.6 - i / 100, i, i, accepted=False)
+        for i in range(30)
+    ]
+
+    window._toggle_highlight(0, False)
+
+    assert len(window._markers._markers) == _NEAR_SHOWN
+    window.close()
+
+
+def test_a_scan_starts_following_the_butterflies(tmp_path, monkeypatch, app):
+    """They move, so they are followed from the scan until the window
+    closes — one that hides behind scenery and comes back is picked up
+    again without anything being pressed."""
+    window, _config = _window(tmp_path, monkeypatch)
+    monkeypatch.setattr("modules.gardener.window.scan", lambda *a, **k: [])
+
+    window._run_scan()
+
+    assert window._tracker is not None and window._tracker.running
+    window.close()
+
+
+def test_highlighting_another_kind_does_not_stop_the_tracking(tmp_path,
+                                                              monkeypatch, app):
+    from modules.gardener.trash import TRASH_KINDS, TrashFind
+
+    window, _config = _window(tmp_path, monkeypatch)
+    monkeypatch.setattr("modules.gardener.window.scan", lambda *a, **k: [])
+    window._run_scan()
+    window._last_found = [TrashFind(TRASH_KINDS[0], 0.9, 10, 10, accepted=True)]
+
+    window._toggle_highlight(0, True)
+
+    assert window._tracker.running          # butterflies keep their dots…
+    assert window._markers._markers         # …on a layer of their own
+    window.close()
+
+
+def test_pressing_the_same_button_again_takes_the_dots_down(tmp_path,
+                                                            monkeypatch, app):
+    from modules.gardener.trash import TRASH_KINDS, TrashFind
+
+    window, _config = _window(tmp_path, monkeypatch)
+    window._last_found = [TrashFind(TRASH_KINDS[0], 0.9, 10, 10, accepted=True)]
+
+    window._toggle_highlight(0, True)
+    window._toggle_highlight(0, True)
+
+    assert window._markers._markers == []
+    assert window._highlighted is None
+    window.close()
+
+
+def test_the_start_button_flips_and_says_what_it_does(tmp_path, monkeypatch, app):
+    window, _config = _window(tmp_path, monkeypatch)
+
+    window._toggle_cleaning()
+    assert window._running is True
+    assert window._start_btn.text() == "■  Выключить бота по уборке"
+
+    window._toggle_cleaning()
+    assert window._running is False
+    assert window._start_btn.text() == "▶  Запустить бота по уборке"
+    window.close()
+
+
+def test_the_settings_sheet_opens_inside_the_window(tmp_path, monkeypatch, app):
+    window, _config = _window(tmp_path, monkeypatch)
+    window.resize(380, 480)
+    window.show()          # a child widget follows its parent on screen
+
+    window._toggle_settings()
+
+    sheet = window._settings
+    assert sheet.parentWidget() is window
+    assert sheet.isVisible()
+    assert sheet.width() <= window.width()
+
+    window._toggle_settings()
+    assert not sheet.isVisible()
     window.close()
 
 

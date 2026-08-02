@@ -113,6 +113,17 @@ class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         if self._panel is not None:
             self._panel.setGeometry(0, 0, self.width(), self.height())
 
+    def resizeEvent(self, event):
+        """Keep the backdrop the size of the window, however it got resized.
+
+        The resize mixin only calls the hook while an edge is being dragged,
+        so a window resized any other way — restored from config, set in
+        code — was left with a panel still at its old size and a strip of
+        nothing along the bottom.
+        """
+        super().resizeEvent(event)
+        self._on_resize_panel()
+
     def _on_resize_done(self):
         if hasattr(self.config, "width"):
             self.config.width  = self.width()

@@ -267,7 +267,7 @@ def test_positions_come_from_windows_not_from_qt(app):
 
     canvas.connect_windows(parent, child, "#ff00dd")
 
-    assert canvas._rect_of(parent) == QRect(1000, 1000, 300, 400)
+    assert canvas.rect_of(parent) == QRect(1000, 1000, 300, 400)
     assert canvas._rect.contains(QRect(1000, 1000, 300, 400))
     canvas.clear()
     parent.close(); child.close()
