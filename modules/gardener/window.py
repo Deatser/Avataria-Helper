@@ -250,13 +250,41 @@ class GardenerWindow(ModuleWindow):
 
         self._run = CleaningRun(hwnd, jobs, self._recount, self)
         self._run.cleaned.connect(self._board.advance)
+        self._run.marking.connect(self._on_marking)
+        self._run.kind_done.connect(self._on_kind_done)
         self._run.finished.connect(self._on_cleaned)
         self._run.start()
 
     def _recount(self, key: str) -> int:
         """How many of that kind are still on screen — the run's own evidence."""
-        kind = next(k for k in TRASH_KINDS if k.key == key)
-        return count_kind(kind)
+        return count_kind(self._kind(key))
+
+    def _kind(self, key: str):
+        return next(k for k in TRASH_KINDS if k.key == key)
+
+    def _on_marking(self, key: str, count: int, again: int):
+        """All of one kind are clicked at once; then the gardener is left to it."""
+        kind = self._kind(key)
+        head = "Отмечаю заново — " if again else "Отмечено — "
+        self._log.add_log_segments(
+            [(head, theme.TEXT_SECONDARY),
+             (f"{count} {kind.plural}", kind.colour),
+             (", жду садовника", theme.TEXT_SECONDARY)],
+            level="plain")
+
+    def _on_kind_done(self, key: str, done: int, total: int):
+        kind = self._kind(key)
+        if done >= total:
+            self._log.add_log_segments(
+                [("Убраны все — ", theme.TEXT_SECONDARY),
+                 (f"{done} {kind.plural}", kind.colour)],
+                level="plain")
+        else:
+            self._log.add_log_segments(
+                [(f"Осталось {kind.plural} — ", theme.TEXT_SECONDARY),
+                 (str(total - done), theme.ACCENT_AMBER),
+                 (", иду дальше", theme.TEXT_SECONDARY)],
+                level="plain")
 
     def _on_cleaned(self, seconds: float):
         # The bars are deliberately left where the counting put them: if
