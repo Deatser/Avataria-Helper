@@ -2,6 +2,7 @@
 import threading
 import win32api
 import win32con
+import win32gui
 
 _HOLD_S = 0.02   # WM_KEYDOWN to WM_KEYUP gap
 
@@ -36,4 +37,31 @@ def press_key(hwnd: int, key: str) -> bool:
     win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
     threading.Timer(_HOLD_S, win32api.PostMessage,
                      args=(hwnd, win32con.WM_KEYUP, vk, 0)).start()
+    return True
+
+
+def click_at(hwnd: int, screen_x: int, screen_y: int) -> bool:
+    """Post a left click at a screen point, in hwnd's own client coordinates.
+
+    Posted, not synthesised with the real cursor, for the same reason keys
+    are: the game does not have to be focused, the pointer never jumps out
+    from under the user, and — since the overlay sits on top of the game as a
+    child window — a click aimed at the game cannot be swallowed by our own
+    UI on the way.
+
+    A move is posted first: a button that only lights its hover state on
+    WM_MOUSEMOVE can otherwise ignore a press that arrives on a spot the
+    cursor was never over. Release goes out on a timer, like KEYUP.
+    """
+    if not hwnd:
+        return False
+    try:
+        cx, cy = win32gui.ScreenToClient(hwnd, (int(screen_x), int(screen_y)))
+    except win32gui.error:
+        return False
+    pos = win32api.MAKELONG(cx, cy)
+    win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, pos)
+    win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, pos)
+    threading.Timer(_HOLD_S, win32api.PostMessage,
+                     args=(hwnd, win32con.WM_LBUTTONUP, 0, pos)).start()
     return True

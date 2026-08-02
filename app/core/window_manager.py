@@ -1,8 +1,22 @@
 # app/core/window_manager.py
 from __future__ import annotations
 from dataclasses import dataclass
+import ctypes
 import win32gui
 import win32con
+
+GA_ROOT         = 2    # GetAncestor: the top-level window of a chain
+GW_OWNER        = 4    # GetWindow: the window that owns this one
+GWLP_HWNDPARENT = -8   # the owner slot, not the parent one
+
+# SetWindowLongPtrW where it exists (64-bit), SetWindowLongW otherwise. An
+# owner is a handle, so the pointer-sized call is the correct one and the
+# 32-bit version would truncate it.
+_user32 = ctypes.windll.user32
+_set_window_long_ptr = getattr(_user32, "SetWindowLongPtrW", None) or \
+                       _user32.SetWindowLongW
+_set_window_long_ptr.restype  = ctypes.c_void_p
+_set_window_long_ptr.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
 
 
 @dataclass
@@ -58,6 +72,110 @@ class WindowManager:
             child_hwnd, win32con.HWND_TOP, 0, 0, 0, 0,
             win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
         )
+
+    def raise_window(self, hwnd: int) -> bool:
+        """Put hwnd on top of its siblings without moving or focusing it.
+
+        NOACTIVATE matters: these windows are children of the game, and
+        taking activation would pull focus off the game itself — the input
+        goes there by PostMessage, but a focus change is still visible to
+        the player and can pause some games outright.
+        """
+        if not hwnd:
+            return False
+        try:
+            win32gui.SetWindowPos(
+                hwnd, win32con.HWND_TOP, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
+                | win32con.SWP_NOACTIVATE,
+            )
+            return True
+        except win32gui.error:
+            return False
+
+    def root_of(self, hwnd: int) -> int:
+        """The top-level window hwnd belongs to — the game, once attached."""
+        if not hwnd:
+            return 0
+        try:
+            return win32gui.GetAncestor(hwnd, GA_ROOT) or 0
+        except win32gui.error:
+            return 0
+
+    def owner_of(self, hwnd: int) -> int:
+        """Who currently owns hwnd — Qt resets this when it shows a window."""
+        if not hwnd:
+            return 0
+        try:
+            return win32gui.GetWindow(hwnd, GW_OWNER) or 0
+        except win32gui.error:
+            return 0
+
+    def set_owner(self, hwnd: int, owner_hwnd: int) -> bool:
+        """Make hwnd an owned window of owner_hwnd.
+
+        Windows then keeps it above its owner and takes it away with it —
+        minimised together, and covered together the moment another
+        application comes to the front. That is precisely the behaviour
+        wanted from anything drawn over the game, and it needs no polling of
+        who is in the foreground, which is what the previous attempt did and
+        what left the wires hidden whenever the game was not the active
+        window.
+        """
+        if not hwnd or not owner_hwnd:
+            return False
+        try:
+            _set_window_long_ptr(hwnd, GWLP_HWNDPARENT, owner_hwnd)
+            return True
+        except Exception:
+            return False
+
+    def window_rect_screen(self, hwnd: int) -> tuple[int, int, int, int] | None:
+        """Where hwnd is on the screen, whoever its parent happens to be.
+
+        window_origin answers in the space SetWindowPos wants, which for a
+        re-parented window is the game's client area. Anything drawing across
+        windows needs the one space they all share instead.
+        """
+        if not hwnd:
+            return None
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            return left, top, right - left, bottom - top
+        except win32gui.error:
+            return None
+
+    def make_click_through(self, hwnd: int) -> bool:
+        """Let the mouse pass straight through hwnd to whatever is under it.
+
+        WS_EX_TRANSPARENT on its own, not Qt's WindowTransparentForInput:
+        that flag also brings WS_EX_LAYERED, and a layered window re-parented
+        into the game's client area is exactly the combination that tends to
+        end up invisible. Hit-testing is all that is wanted here.
+        """
+        if not hwnd:
+            return False
+        try:
+            ex = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE,
+                                   ex | win32con.WS_EX_TRANSPARENT)
+            return True
+        except win32gui.error:
+            return False
+
+    def lower_window(self, hwnd: int) -> bool:
+        """Put hwnd behind its siblings — where the node wires belong."""
+        if not hwnd:
+            return False
+        try:
+            win32gui.SetWindowPos(
+                hwnd, win32con.HWND_BOTTOM, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
+                | win32con.SWP_NOACTIVATE,
+            )
+            return True
+        except win32gui.error:
+            return False
 
     def move_window(self, hwnd: int, x: int, y: int, w: int, h: int):
         """Move hwnd to (x, y) clamped to game client area."""

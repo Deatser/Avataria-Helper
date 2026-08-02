@@ -4,8 +4,14 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QApplication, QDialog)
 from PySide6.QtCore import Qt, QPoint, QTimer
 
+from app.core.stats import StatsManager
 from app.ui import theme
+from app.ui.crt_power_mixin import CrtPowerMixin
+from app.ui.module_window import _SAVE_DELAY_MS
+from app.ui.drag_mixin import BackgroundDragMixin
+from app.ui.node_links import NodeLinkCanvas
 from app.ui.resize_mixin import ResizeMixin
+from app.ui.stats_window import StatsWindow
 from app.ui.collapse_mixin import CollapseMixin
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_panel import NtPanel
@@ -16,15 +22,24 @@ from app.ui.widgets.nt_confirm_dialog import NtConfirmDialog
 from app.module_registry import MODULES
 
 
-class Overlay(CollapseMixin, ResizeMixin, QWidget):
+class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
+              ResizeMixin, QWidget):
     _RESIZE_MIN_W = 240
-    _RESIZE_MIN_H = 430   # header + 3 module buttons + log + 2 actions
+    _RESIZE_MIN_H = 466   # header + 4 module buttons + log + 2 actions
 
-    def __init__(self, config, window_manager, parent=None):
+    def __init__(self, config, window_manager, stats=None, parent=None):
         super().__init__(parent)
         self.config = config
         self.wm = window_manager
-        self._drag_pos = QPoint()
+        self.stats = stats if stats is not None else StatsManager()
+        self._stats_window: StatsWindow | None = None
+        self._links = NodeLinkCanvas(window_manager)
+        self._drag_origin = QPoint()
+        self._drag_from   = QPoint()
+        self._save_later  = QTimer(self)
+        self._save_later.setSingleShot(True)
+        self._save_later.setInterval(_SAVE_DELAY_MS)
+        self._save_later.timeout.connect(self.config.save)
         self._open_windows: dict[str, QWidget] = {}
         self._startup_shown = False
         self._startup_done  = False
@@ -38,6 +53,8 @@ class Overlay(CollapseMixin, ResizeMixin, QWidget):
         self._build_ui()
         self.move(config.data.overlay.x, config.data.overlay.y)
         self._init_resize()
+        self._init_background_drag()
+        self._init_crt_power()
         self._init_collapse(self._panel, self.wm)
 
         # Keep the header dot honest if the game window disappears
@@ -89,13 +106,18 @@ class Overlay(CollapseMixin, ResizeMixin, QWidget):
         # ── Module buttons ──────────────────────────────────────────────────
         self._module_buttons: dict[str, NtButton] = {}
 
-        for module_cls in MODULES:
-            accent = getattr(module_cls, "color", None)
-            btn    = NtButton(self._module_label(module_cls.name, False),
-                              accent=accent, upper=False)
-            btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
-            self._module_buttons[module_cls.name] = btn
-            layout.addWidget(btn)
+        def add_modules(slot: str):
+            for module_cls in MODULES:
+                if getattr(module_cls, "panel_slot", "top") != slot:
+                    continue
+                btn = NtButton(self._module_label(module_cls.name, False),
+                               accent=getattr(module_cls, "color", None),
+                               upper=False)
+                btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
+                self._module_buttons[module_cls.name] = btn
+                layout.addWidget(btn)
+
+        add_modules("top")
 
         # Placeholders for modules that are not implemented yet
         hockey = NtButton("Включить мод Хоккей", accent=theme.ACCENT_ICE,
@@ -105,26 +127,38 @@ class Overlay(CollapseMixin, ResizeMixin, QWidget):
         layout.addWidget(hockey)
         layout.addWidget(snowboard)
 
+        add_modules("bottom")
+
         layout.addSpacing(6)
 
         # ── Log section ─────────────────────────────────────────────────────
+        # Clearing moved up here as a small button on the heading row: it is
+        # an action on the log itself, and it frees the full-width slot below
+        # for something worth pressing often.
+        log_head = QHBoxLayout()
         log_label = QLabel("LOG")
         log_label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         log_label.setStyleSheet(
             f"color:{theme.TEXT_PRIMARY}; background:transparent;"
         )
-        layout.addWidget(log_label)
+        clear_btn = NtButton("⌫", accent=theme.BORDER_BRIGHT)
+        clear_btn.setFixedSize(22, 20)
+        clear_btn.setToolTip("Очистить логи")
+        clear_btn.clicked.connect(lambda: self.log_panel.clear_logs())
+        log_head.addWidget(log_label)
+        log_head.addStretch()
+        log_head.addWidget(clear_btn)
+        layout.addLayout(log_head)
 
         self.log_panel = LogPanel()
         self.log_panel.setMinimumHeight(80)
         layout.addWidget(self.log_panel, stretch=1)
 
-        # Secondary action — neutral accent keeps the module button dominant
-        clear_btn = NtButton("Очистить логи", upper=False,
-                             accent=theme.BORDER_BRIGHT)
-        clear_btn.setMinimumHeight(30)
-        clear_btn.clicked.connect(self.log_panel.clear_logs)
-        layout.addWidget(clear_btn)
+        stats_btn = NtButton("Статистика", upper=False,
+                             accent=theme.ACCENT_CYAN)
+        stats_btn.setMinimumHeight(30)
+        stats_btn.clicked.connect(self._toggle_stats)
+        layout.addWidget(stats_btn)
 
         settings_btn = NtButton("Настройки", accent=theme.ACCENT,
                                 upper=False, filled=True)
@@ -173,6 +207,8 @@ class Overlay(CollapseMixin, ResizeMixin, QWidget):
         if self.wm.get_game_hwnd():
             self.wm.attach_child(int(window.winId()))
         window.show()
+        self._links.connect_windows(self, window,
+                                    getattr(module_cls, "color", None))
 
         self.add_log(f"Запуск мода {name}")
         self._set_module_active(name, True)
@@ -204,32 +240,87 @@ class Overlay(CollapseMixin, ResizeMixin, QWidget):
             return
         self.log_panel.add_log_segments(segments, level)
 
+    # ── Statistics ───────────────────────────────────────────────────────────
+
+    def _toggle_stats(self):
+        if self._stats_window and self._stats_window.isVisible():
+            self._stats_window.close()
+            return
+
+        window = StatsWindow(
+            config         = self.config.data.stats_window,
+            save_fn        = self.config.save,
+            stats          = self.stats,
+            window_manager = self.wm,
+            overlay        = self,
+        )
+        window.closed.connect(self._on_stats_closed)
+        # Attach before the first show, same rule as the module windows —
+        # re-parenting an already-shown window kills its deferred repaints.
+        if self.wm.get_game_hwnd():
+            self.wm.attach_child(int(window.winId()))
+        window.show()
+        self._links.connect_windows(self, window, theme.ACCENT_CYAN)
+        self._stats_window = window
+        self.add_log("Открыта статистика")
+
+    def _on_stats_closed(self):
+        self._stats_window = None
+
+    # ── Node wires ───────────────────────────────────────────────────────────
+
+    def on_window_closing(self, window: QWidget):
+        """A window has begun switching off — reel its wire back in."""
+        self._links.disconnect_window(window)
+
     def restore_favorite_windows(self):
         for module_cls in MODULES:
             config_sect = getattr(self.config.data, module_cls.config_key, None)
             if config_sect and getattr(config_sect, "favorite", False):
                 self._toggle_module(module_cls)
+        # Not a module, but starred the same way and restored the same way
+        if getattr(self.config.data.stats_window, "favorite", False):
+            self._toggle_stats()
 
     # ── Drag ────────────────────────────────────────────────────────────────
+    # The title and the handle keep their own bindings; these two let the
+    # whole background do the same job. See BackgroundDragMixin.
+
+    def _drag_begin(self, event):
+        self._drag_press(event)
+
+    def _drag_to(self, event):
+        self._drag_move(event)
+
+    # Only the mouse's travel is used, and the window's own starting point is
+    # read in the space it is actually positioned in — see ModuleWindow for
+    # why measuring the grab against Qt's geometry made the window shake.
+
+    def _window_origin(self) -> QPoint:
+        if self.wm.get_game_hwnd():
+            origin = self.wm.window_origin(int(self.winId()))
+            if origin is not None:
+                return QPoint(*origin)
+        return self.pos()
 
     def _drag_press(self, event):
         if event.button() == Qt.LeftButton:
-            self._drag_pos = (
-                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            )
+            self._drag_origin = event.globalPosition().toPoint()
+            self._drag_from   = self._window_origin()
 
     def _drag_move(self, event):
         if not (event.buttons() & Qt.LeftButton):
             return
-        pos = event.globalPosition().toPoint() - self._drag_pos
+        target = self._drag_from + (event.globalPosition().toPoint()
+                                    - self._drag_origin)
         if self.wm.get_game_hwnd():
-            self.wm.move_window(int(self.winId()), pos.x(), pos.y(),
+            self.wm.move_window(int(self.winId()), target.x(), target.y(),
                                 self.width(), self.height())
         else:
-            self.move(pos.x(), pos.y())
-        self.config.data.overlay.x = pos.x()
-        self.config.data.overlay.y = pos.y()
-        self.config.save()
+            self.move(target.x(), target.y())
+        self.config.data.overlay.x = target.x()
+        self.config.data.overlay.y = target.y()
+        self._save_later.start()   # not once per mouse event — see the module window
 
     # ── Startup sequence ────────────────────────────────────────────────────
 
@@ -284,15 +375,26 @@ class Overlay(CollapseMixin, ResizeMixin, QWidget):
     # ── Close ────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        if getattr(self, "_crt_started", False):
+            QApplication.quit()   # the animation has played; really go now
+            event.accept()
+            return
+
         if not self.config.data.overlay.skip_close_confirm and not self._confirm_close():
             event.ignore()
             return
 
+        # Every window switches off at once, all on the same clock, so the
+        # helper goes dark like one screen rather than several.
         for w in list(self._open_windows.values()):
             if w.isVisible():
                 w.close()
-        QApplication.quit()
-        event.accept()
+        if self._stats_window:
+            self._stats_window.close()
+
+        self._links.clear()   # nothing left to connect to
+        self.crt_close_started()
+        event.ignore()
 
     def _confirm_close(self) -> bool:
         dialog = NtConfirmDialog(

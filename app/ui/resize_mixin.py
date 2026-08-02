@@ -81,7 +81,7 @@ class ResizeMixin:
 
         # Cursor hint when not dragging
         d = self._edge_dir(event.position().toPoint())
-        self.setCursor(_CURSORS.get(d, Qt.ArrowCursor))
+        self.setCursor(_CURSORS.get(d, self._idle_cursor()))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -93,6 +93,10 @@ class ResizeMixin:
         super().mouseReleaseEvent(event)
 
     # ── Subclass hooks ───────────────────────────────────────────────────────
+
+    def _idle_cursor(self):
+        """Cursor away from the resize edges. Override where it means more."""
+        return Qt.ArrowCursor
 
     def _on_resize_panel(self):
         """Resize background NtPanel to fill window. Override in subclass."""

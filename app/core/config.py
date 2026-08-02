@@ -1,8 +1,9 @@
 # app/core/config.py
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
-import json
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from app.core.json_store import load_dataclass, save_dataclass
 
 
 @dataclass
@@ -29,47 +30,48 @@ class AvaDancersConfig:
     hue_share: float = 0.15
     background: str = ""        # explicit backdrop path; empty → auto-pick
     video_background: bool = True   # off → still image instead of the video
+    # Which reward line ends the run — "gold" or "silver". Gold by default:
+    # it is the shorter farm, so ending on it is the safer surprise.
+    finish_on: str = "gold"
+    # After the exit is clicked, also click Повтор and Старт to open the
+    # next round. On by default — farming is the point of the module.
+    auto_restart: bool = True
+
+
+@dataclass
+class GardenerConfig:
+    favorite: bool = False
+    position_saved: bool = False
+    x: int = 420
+    y: int = 500
+    width: int = 380
+    height: int = 420
+
+
+@dataclass
+class StatsWindowConfig:
+    """Geometry and autostart — the numbers themselves live in stats.json."""
+    favorite: bool = False      # open together with the helper at startup
+    position_saved: bool = False
+    x: int = 420
+    y: int = 60
+    width: int = 460
+    height: int = 400
 
 
 @dataclass
 class AppConfig:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     ava_dancers: AvaDancersConfig = field(default_factory=AvaDancersConfig)
+    gardener: GardenerConfig = field(default_factory=GardenerConfig)
+    stats_window: StatsWindowConfig = field(default_factory=StatsWindowConfig)
 
 
 class ConfigManager:
     CONFIG_FILE = Path("config.json")
 
     def __init__(self):
-        self.data = self._load()
-
-    def _load(self) -> AppConfig:
-        if not self.CONFIG_FILE.exists():
-            return AppConfig()
-        try:
-            raw = json.loads(self.CONFIG_FILE.read_text(encoding="utf-8"))
-            default = AppConfig()
-            self._merge(default, raw)
-            return default
-        except Exception:
-            return AppConfig()
-
-    def _merge(self, instance, raw: dict):
-        """Recursively merge raw dict into dataclass, coercing types."""
-        for key, val in raw.items():
-            if not hasattr(instance, key):
-                continue
-            current = getattr(instance, key)
-            if hasattr(current, "__dataclass_fields__") and isinstance(val, dict):
-                self._merge(current, val)
-            else:
-                try:
-                    setattr(instance, key, type(current)(val))
-                except (TypeError, ValueError):
-                    pass  # keep default on type mismatch
+        self.data = load_dataclass(self.CONFIG_FILE, AppConfig)
 
     def save(self):
-        self.CONFIG_FILE.write_text(
-            json.dumps(asdict(self.data), indent=4, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        save_dataclass(self.CONFIG_FILE, self.data)

@@ -4,8 +4,10 @@
 #   2. Import it here and add to MODULES list
 
 from modules.ava_dancers import AvaDancersModule
+from modules.gardener import GardenerModule
 
 MODULES = [
     AvaDancersModule,
+    GardenerModule,
     # Add new modules here — one line each
 ]

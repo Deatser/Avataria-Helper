@@ -54,6 +54,17 @@ VW_BORDER_DIM   = "#180f44"
 VW_BTN_ACTIVE   = "#0a0030"
 VW_BTN_HOVER    = "#150040"
 
+# ── Olive (Садовник module) ──────────────────────────────────────────────────
+GD_BG          = "#0b0f07"
+GD_SURFACE     = "#141a0c"
+GD_ELEVATED    = "#1d2612"
+GD_OLIVE       = "#a8bd4f"   # the module accent — ripe olive, not lime
+GD_OLIVE_SOFT  = "#c8d98a"
+GD_MOSS        = "#5e7030"
+GD_TEXT        = "#e4ecc9"
+GD_BORDER      = "#2f3d1a"
+GD_BORDER_DIM  = "#1c2510"
+
 # ── Geometry ─────────────────────────────────────────────────────────────────
 RADIUS  = 8
 PADDING = 14

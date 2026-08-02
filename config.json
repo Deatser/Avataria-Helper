@@ -1,7 +1,7 @@
 {
     "overlay": {
-        "x": 133,
-        "y": 38,
+        "x": 192,
+        "y": 106,
         "width": 487,
         "height": 623,
         "opacity": 220,
@@ -10,14 +10,32 @@
     "ava_dancers": {
         "favorite": true,
         "position_saved": true,
-        "x": 132,
-        "y": 769,
-        "width": 438,
-        "height": 535,
+        "x": 120,
+        "y": 803,
+        "width": 607,
+        "height": 510,
         "lit_share": 0.008,
         "red_share": 0.03,
         "hue_share": 0.15,
         "background": "",
-        "video_background": true
+        "video_background": true,
+        "finish_on": "silver",
+        "auto_restart": true
+    },
+    "gardener": {
+        "favorite": false,
+        "position_saved": true,
+        "x": 880,
+        "y": 129,
+        "width": 380,
+        "height": 420
+    },
+    "stats_window": {
+        "favorite": false,
+        "position_saved": true,
+        "x": 953,
+        "y": 75,
+        "width": 531,
+        "height": 545
     }
 }

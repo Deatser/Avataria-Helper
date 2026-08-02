@@ -119,6 +119,20 @@ class VwPanel(QWidget):
         self._sink   = sink
         return True
 
+    @property
+    def backdrop_ready(self) -> bool:
+        """False only while a configured video has yet to decode a frame.
+
+        Anything else — the drawn sunset scene, a still, a GIF — can be
+        painted the instant it is asked for. A video cannot: for the first
+        moments after the window opens there is nothing decoded, and the
+        panel falls back to the scene. Whoever needs a true picture of this
+        window (the switch-on animation does) has to wait for this.
+        """
+        if self._player is None:
+            return True
+        return self._frame is not None
+
     def _on_video_frame(self, frame):
         image = frame.toImage()
         if image.isNull():

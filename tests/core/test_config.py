@@ -2,6 +2,7 @@
 import json
 import pytest
 from app.core.config import ConfigManager, AppConfig
+from app.core.template_match import FINISH_GOLD, FINISH_SILVER
 
 
 def test_defaults_when_no_file(tmp_path, monkeypatch):
@@ -11,6 +12,32 @@ def test_defaults_when_no_file(tmp_path, monkeypatch):
     assert cfg.data.overlay.width == 330
     assert cfg.data.ava_dancers.red_share == 0.03
     assert cfg.data.ava_dancers.favorite is False
+
+
+def test_finish_target_defaults_to_gold(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert ConfigManager().data.ava_dancers.finish_on == FINISH_GOLD
+
+
+def test_finish_target_survives_a_save_and_reload(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = ConfigManager()
+    cfg.data.ava_dancers.finish_on = FINISH_SILVER
+    cfg.save()
+    assert ConfigManager().data.ava_dancers.finish_on == FINISH_SILVER
+
+
+def test_auto_restart_defaults_to_on(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert ConfigManager().data.ava_dancers.auto_restart is True
+
+
+def test_auto_restart_survives_a_save_and_reload(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = ConfigManager()
+    cfg.data.ava_dancers.auto_restart = False
+    cfg.save()
+    assert ConfigManager().data.ava_dancers.auto_restart is False
 
 
 def test_load_partial_config(tmp_path, monkeypatch):

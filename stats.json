@@ -1,0 +1,12 @@
+{
+    "player": {
+        "player_id": "1",
+        "player_name": "Deatser",
+        "registration_date": "01.08.2026"
+    },
+    "ava_dancers": {
+        "games_played": 0,
+        "gold_won": 0,
+        "silver_won": 0
+    }
+}
