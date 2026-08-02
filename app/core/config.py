@@ -24,7 +24,7 @@ class AvaDancersConfig:
     width: int = 420
     height: int = 330
     # Detection thresholds — see modules.ava_dancers.bot.Thresholds
-    lit_share: float = 0.04
+    lit_share: float = 0.008
     red_share: float = 0.03
     hue_share: float = 0.15
     background: str = ""        # explicit backdrop path; empty → auto-pick

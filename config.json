@@ -1,7 +1,7 @@
 {
     "overlay": {
-        "x": 36,
-        "y": 710,
+        "x": 133,
+        "y": 38,
         "width": 487,
         "height": 623,
         "opacity": 220,
@@ -10,11 +10,11 @@
     "ava_dancers": {
         "favorite": true,
         "position_saved": true,
-        "x": 24,
-        "y": 131,
-        "width": 455,
-        "height": 529,
-        "lit_share": 0.04,
+        "x": 132,
+        "y": 769,
+        "width": 438,
+        "height": 535,
+        "lit_share": 0.008,
         "red_share": 0.03,
         "hue_share": 0.15,
         "background": "",

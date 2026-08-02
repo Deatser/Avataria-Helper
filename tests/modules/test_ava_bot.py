@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from modules.ava_dancers.bot import (split_tiles, classify_hsv, classify_tile,
-                                     EMPTY, NICE, BONUS, BAD, DISLIKE)
+                                     EMPTY, NICE, BONUS, BAD, DISLIKE, BOMB)
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -22,20 +22,30 @@ def load_hsv(name: str) -> np.ndarray:
 
 
 # ── split_tiles ─────────────────────────────────────────────────────────────
+# TILE_REGION is a 30px-tall strip now, not a 150px-tall square — split_tiles
+# only ever crops width, so a strip in, four narrower strips out.
 
 def test_split_tiles_returns_four():
-    img = np.zeros((150, 700, 3), dtype=np.uint8)
+    img = np.zeros((30, 700, 3), dtype=np.uint8)
     assert len(split_tiles(img)) == 4
 
 
-def test_split_tiles_each_is_square():
-    img = np.zeros((150, 700, 3), dtype=np.uint8)
+def test_split_tiles_keeps_strip_height():
+    img = np.zeros((30, 700, 3), dtype=np.uint8)
     for tile in split_tiles(img):
         h, w = tile.shape[:2]
-        assert h == w
+        assert h == 30
+        assert w == 150
 
 
 # ── classify: real captures ─────────────────────────────────────────────────
+# These fixtures predate the 150x30 strip (captured full-tile, 150x150) and
+# classify_hsv no longer crops internally — production now only ever hands it
+# a strip, cropped at capture time in bot.py. Passed whole here, they still
+# exercise the hue-band logic (does red mean BAD, does cyan mean NICE...) at
+# a healthy margin over the new thresholds, but they do NOT verify that the
+# strip's Y-position actually intersects a real glyph in the live game — only
+# a fresh debug dump (the "Сохранить последние кадры" button) can confirm that.
 
 @pytest.mark.parametrize("name,expected", [
     ("empty",   EMPTY),
@@ -43,6 +53,7 @@ def test_split_tiles_each_is_square():
     ("bonus",   BONUS),
     ("bad",     BAD),
     ("dislike", DISLIKE),
+    ("bomb",    BOMB),
 ])
 def test_classify_real_tile(name, expected):
     assert classify_hsv(load_hsv(name)).kind == expected
@@ -54,9 +65,20 @@ def test_classify_real_tile(name, expected):
     ("bonus",   True),
     ("bad",     False),
     ("dislike", False),
+    ("bomb",    True),
 ])
 def test_pressable_matches_kind(name, pressable):
     assert classify_hsv(load_hsv(name)).pressable is pressable
+
+
+def test_magenta_wins_over_cyan_for_bomb():
+    """The bomb's ring is the same cyan as a plain arrow — if a tile carries
+    both a strong cyan ring and a magenta fuse, it must read as BOMB, not
+    NICE. Guards the check order in classify_hsv, not just the fixture."""
+    hsv = np.zeros((30, 150, 3), dtype=np.uint8)
+    hsv[:20, :100]  = (90, 255, 255)    # cyan ring — would be NICE alone
+    hsv[:15, 100:130] = (140, 255, 255)  # magenta fuse curl
+    assert classify_hsv(hsv).kind == BOMB
 
 
 def test_only_bad_carries_red():
@@ -87,11 +109,12 @@ def test_classify_black_tile_is_empty():
     assert classify_tile(tile).kind == EMPTY
 
 
-def test_classify_skips_top_75px():
-    """Glyph confined to the top rows is UI chrome and must be ignored."""
-    hsv = np.zeros((150, 150, 3), dtype=np.uint8)
-    hsv[:75, :] = (90, 255, 255)   # saturated cyan, but above the cut line
-    assert classify_hsv(hsv).kind == EMPTY
+def test_classify_does_not_skip_any_rows():
+    """No more internal crop — bot.py now supplies exactly the strip to read,
+    so a glyph anywhere in the given array, including row 0, must count."""
+    hsv = np.zeros((30, 150, 3), dtype=np.uint8)
+    hsv[:5, :] = (90, 255, 255)   # saturated cyan, only in the very first rows
+    assert classify_hsv(hsv).kind == NICE
 
 
 def test_classify_empty_array_is_empty():

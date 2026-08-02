@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
                                QGraphicsDropShadowEffect)
 from PySide6.QtGui import QColor, QFontMetricsF
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread
 
 from app.ui.module_window import ModuleWindow
 from app.ui.widgets.nt_button import NtButton
@@ -17,12 +17,15 @@ from app.ui.widgets.log_panel import LogPanel
 from app.ui import theme
 from modules.ava_dancers.bot import (AvaBot, Thresholds, split_tiles,
                                      classify_tile, TILE_REGION,
-                                     NICE, BONUS, BAD, DISLIKE)
+                                     NICE, BONUS, BAD, DISLIKE, BOMB)
+from modules.ava_dancers.speedup_watch import SpeedupWatch
 
 _DEFAULT_W = 420
 _DEFAULT_H = 570
 _MIN_H     = 510   # header + controls + tiles + log + actions + switch
 _MIN_W     = 300
+
+_SPEEDUP_BOOST_MS = 15_000   # how long to keep max poll rate / priority after a timer mark
 
 # Tile index → on-screen arrow (tiles are ordered A, S, W, D)
 _KEY_LABELS = ["←", "↓", "↑", "→"]
@@ -44,12 +47,14 @@ _LIT_MS      = 220  # how long a hit stays lit
 _KIND_COLOUR = {
     NICE:    theme.VW_CYAN,
     BONUS:   theme.ACCENT_GREEN,
+    BOMB:    theme.VW_PURPLE,
     BAD:     theme.ACCENT_RED,
     DISLIKE: theme.ACCENT_RED,
 }
 _KIND_LABEL = {
     NICE:    "стрелка",
     BONUS:   "бонус",
+    BOMB:    "бомба",
     BAD:     "красная",
     DISLIKE: "дизлайк",
 }
@@ -109,6 +114,7 @@ class AvaDancersWindow(ModuleWindow):
         super().__init__("Ava Dancers", config, save_fn, parent_overlay)
         self._wm  = window_manager
         self._bot: AvaBot | None = None
+        self._speedup_watch: SpeedupWatch | None = None
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
         self.resize(max(w, _MIN_W), max(h, _MIN_H))
@@ -303,9 +309,10 @@ class AvaDancersWindow(ModuleWindow):
             return
 
         self._bot = AvaBot(hwnd, self._thresholds())
-        self._bot.tile_seen.connect(self._on_tile_seen)
+        self._bot.tiles_seen.connect(self._on_tiles_seen)
         self._bot.error.connect(lambda e: self._log.add_log(e, level="error"))
         self._bot.start()
+        self._start_speedup_watch()
 
         # setText first: it only schedules an update(), set_active() repaints
         self._start_btn.setText(_STOP_TEXT)
@@ -321,6 +328,7 @@ class AvaDancersWindow(ModuleWindow):
             if not self._bot.wait(600):
                 self._bot.terminate()
             self._bot = None
+        self._stop_speedup_watch()
 
         self._start_btn.setText(_START_TEXT)
         self._start_btn.set_active(False)
@@ -331,28 +339,80 @@ class AvaDancersWindow(ModuleWindow):
         if self.parent_overlay:
             self.parent_overlay.add_log("Ava Dancers: бот остановлен")
 
+    # ── Speed-up warnings (04:00 / 06:00 / 07:30 / 09:30 / 11:00) ────────────
+    # These messages live only in the main Avataria Helper log, not this
+    # module's own — Ava Dancers' log is for tile-by-tile play-by-play, this
+    # is a session-level heads-up, and the two don't need to say it twice.
+
+    def _start_speedup_watch(self):
+        self._stop_speedup_watch()   # defensive: never leave a prior watcher
+                                      # orphaned and still running underneath
+                                      # a new one — that alone doubles every
+                                      # message it emits.
+        self._speedup_watch = SpeedupWatch()
+        self._speedup_watch.watch_started.connect(self._on_speedup_watch_started)
+        self._speedup_watch.detected.connect(self._on_speedup_detected)
+        self._speedup_watch.error.connect(lambda e: self._log.add_log(e, level="error"))
+        self._speedup_watch.start()
+
+    def _on_speedup_watch_started(self):
+        if self.parent_overlay:
+            self.parent_overlay.add_log(
+                "Ava Dance — запуск поиска по фото таймера (4:00, 6:00, 7:30, 9:30, 11:00)"
+            )
+
+    def _stop_speedup_watch(self):
+        if self._speedup_watch:
+            self._speedup_watch.stop_watch()
+            if not self._speedup_watch.wait(600):
+                self._speedup_watch.terminate()
+            self._speedup_watch = None
+
+    def _on_speedup_detected(self, label: str, score: float):
+        if self.parent_overlay:
+            self.parent_overlay.add_log(
+                f"Ava Dance — нашёл отметку {label} (похожесть {score:.0%}): "
+                f"скоро волна ускорения"
+            )
+        if self._bot and self._bot.isRunning():
+            self._bot.setPriority(QThread.TimeCriticalPriority)
+            self._bot.boost_poll_rate()
+            QTimer.singleShot(_SPEEDUP_BOOST_MS, self._end_speedup_boost)
+
+    def _end_speedup_boost(self):
+        if self._bot and self._bot.isRunning():
+            self._bot.setPriority(QThread.NormalPriority)
+            self._bot.reset_poll_rate()
+
     def _thresholds(self) -> Thresholds:
+        defaults = Thresholds()
         return Thresholds(
-            lit_share = getattr(self.config, "lit_share", 0.04),
-            red_share = getattr(self.config, "red_share", 0.03),
-            hue_share = getattr(self.config, "hue_share", 0.15),
+            lit_share = getattr(self.config, "lit_share", defaults.lit_share),
+            red_share = getattr(self.config, "red_share", defaults.red_share),
+            hue_share = getattr(self.config, "hue_share", defaults.hue_share),
         )
 
-    def _on_tile_seen(self, tile_id: int, kind: str):
-        """A tile lit up — colour its arrow and the log line by what it is."""
-        if not 0 <= tile_id < 4:
-            return
-        colour = _KIND_COLOUR.get(kind, theme.VW_TEXT)
-        self._flash_tile(tile_id, colour)
-        self._log_tile(tile_id, kind, colour)
+    def _on_tiles_seen(self, events: list[tuple[int, str]]):
+        """One or more tiles changed in the same poll — flash and log together.
 
-    def _log_tile(self, tile_id: int, kind: str, colour: str):
-        """One line per event: all four arrows, the active one in its colour."""
+        Two arrows can be pressable at once, or one pressable and one bad —
+        that's one moment in the game, so it's one flash and one log line,
+        not several arriving back to back.
+        """
+        by_tile = {i: kind for i, kind in events if 0 <= i < 4}
+        if not by_tile:
+            return
+        for tile_id, kind in by_tile.items():
+            self._flash_tile(tile_id, _KIND_COLOUR.get(kind, theme.VW_TEXT))
+        self._log_tiles(by_tile)
+
+    def _log_tiles(self, by_tile: dict[int, str]):
+        """One line: all four arrows, each active one in its own kind's colour."""
         segments = [
-            (f"{arrow}   ", colour if i == tile_id else theme.TEXT_DIM)
+            (f"{arrow}   ",
+             _KIND_COLOUR.get(by_tile[i], theme.VW_TEXT) if i in by_tile else theme.TEXT_DIM)
             for i, arrow in enumerate(_KEY_LABELS)
         ]
-        segments.append((_KIND_LABEL.get(kind, kind), colour))
         self._log.add_log_segments(segments, level="plain")
 
     def _set_arrow_colour(self, label: QLabel, colour: str):
@@ -422,8 +482,8 @@ class AvaDancersWindow(ModuleWindow):
         """Flush the bot's rolling capture buffer to disk for review.
 
         Click this right after a miss: the bot is always recording its last
-        ~2.5s of raw tile frames while it runs, so the moment just happened
-        is still in the buffer.
+        few seconds of raw tile frames while it runs, so the moment just
+        happened is still in the buffer.
         """
         if not self._bot or not self._bot.isRunning():
             self._log.add_log("Бот не запущен — нечего сохранять", level="error")
@@ -480,4 +540,5 @@ class AvaDancersWindow(ModuleWindow):
             self._bot.stop_bot()
             if not self._bot.wait(600):
                 self._bot.terminate()
+        self._stop_speedup_watch()
         super().closeEvent(event)
