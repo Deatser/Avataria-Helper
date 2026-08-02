@@ -25,6 +25,7 @@ class _WM:
     def is_game_alive(self): return False
     def attach_child(self, hwnd): pass
     def move_window(self, *args): pass
+    def window_rect_screen(self, hwnd): return (0, 0, 1600, 900)
 
 
 def _window(tmp_path, monkeypatch):
@@ -76,7 +77,7 @@ def test_the_window_has_its_controls_and_a_log(tmp_path, monkeypatch, app):
                       "▶  Запустить бота по уборке",
                       "⚙  Настройки",
                       "◎  Определить мусор",
-                      "⌫"]                              # clears the log                              # clears the log
+                      "⌫"]                              # clears the log
     assert window._log is not None
     window.close()
 
@@ -221,3 +222,20 @@ def test_the_overlay_puts_its_button_under_the_snowboard_one(tmp_path,
 
     assert labels.index("Включить мод Садовник") \
         > labels.index("Включить мод Сноуборд")
+
+
+def test_a_run_puts_a_dot_of_its_own_colour_on_every_piece(
+        tmp_path, monkeypatch, app):
+    """Brown on the dry bushes, blue on the blue ones — the marks he walks."""
+    window, _config = _window(tmp_path, monkeypatch)
+    _stub_garden(monkeypatch, window, [TRASH_KINDS[0], TRASH_KINDS[1]])
+
+    window._toggle_cleaning()
+    app.processEvents()
+
+    dots = window._markers._markers
+    assert [dot.colour for dot in dots] == [TRASH_KINDS[0].colour,
+                                            TRASH_KINDS[1].colour]
+    window._toggle_cleaning()
+    assert window._markers._markers == []      # and they come down with the run
+    window.close()

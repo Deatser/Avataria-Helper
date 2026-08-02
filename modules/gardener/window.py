@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from PySide6.QtCore import Qt, QTimer
 
 from app.ui import theme
+from app.ui.marker_overlay import Marker, MarkerOverlay
 from app.ui.module_window import ModuleWindow
 from app.ui.widgets.gd_panel import GdPanel
 from app.ui.widgets.log_panel import LogPanel
@@ -74,6 +75,9 @@ class GardenerWindow(ModuleWindow):
         self._wm = window_manager
         self._running  = False
         self._settings: GardenerSettingsPanel | None = None
+        # The marks the gardener walks: a dot on each piece of litter, in the
+        # colour of its kind, over the game window and nowhere else.
+        self._markers  = MarkerOverlay(window_manager, reference=self)
         self._run: CleaningRun | None = None
         self._next_run_at: datetime | None = None
         self._board_room = 0     # extra height lent to the bars, given back later
@@ -192,6 +196,7 @@ class GardenerWindow(ModuleWindow):
     def _clear_log(self):
         self._log.clear_logs()
         if not self._running:
+            self._markers.clear()
             # The bars are the record of a run that is over: they go with it.
             self._put_board_away()
 
@@ -235,8 +240,8 @@ class GardenerWindow(ModuleWindow):
         self._log_counts(counts)
         self._log.add_log("Начинаем уборку", level="plain")
 
-        jobs = [Job(item.kind.key, item.x, item.y)
-                for item in found if item.accepted]
+        jobs = self._jobs_from(found)
+        self._show_dots(found)
         self._board.build(
             len(jobs),
             [(k.key, f"Найдено {k.plural}", counts.get(k.key, 0), k.colour)
@@ -248,43 +253,59 @@ class GardenerWindow(ModuleWindow):
         self._start_btn.set_active(True)
         self._status_dot.set_running()
 
-        self._run = CleaningRun(hwnd, jobs, self._recount, self)
+        self._run = CleaningRun(hwnd, jobs, self._recount, self._rescan, self)
         self._run.cleaned.connect(self._board.advance)
         self._run.marking.connect(self._on_marking)
         self._run.kind_done.connect(self._on_kind_done)
         self._run.finished.connect(self._on_cleaned)
         self._run.start()
 
+    def _jobs_from(self, found: list) -> list:
+        return [Job(item.kind.key, item.x, item.y)
+                for item in found if item.accepted]
+
+    def _show_dots(self, found: list):
+        """A dot on every piece of litter, in its own kind's colour.
+
+        Brown on the dry bushes, blue on the blue ones — the same colours the
+        counts are written in, so the log and the garden read together. They
+        stay up for the whole run: they are the marks being walked.
+        """
+        self._markers.show_markers(
+            [Marker(item.x, item.y, item.kind.colour, True)
+             for item in found if item.accepted])
+
     def _recount(self, key: str) -> int:
         """How many of that kind are still on screen — the run's own evidence."""
         return count_kind(self._kind(key))
 
+    def _rescan(self) -> list:
+        """A fresh look, for marking again whatever is still standing there."""
+        try:
+            found = scan()
+        except Exception:
+            return []
+        self._show_dots(found)
+        return self._jobs_from(found)
+
     def _kind(self, key: str):
         return next(k for k in TRASH_KINDS if k.key == key)
 
-    def _on_marking(self, key: str, count: int, again: int):
-        """All of one kind are clicked at once; then the gardener is left to it."""
-        kind = self._kind(key)
-        head = "Отмечаю заново — " if again else "Отмечено — "
+    def _on_marking(self, count: int, again: int):
+        """Everything is marked in one sweep; then the gardener is left to it."""
+        head = "Отмечаю заново — " if again else "Отмечено на карте — "
         self._log.add_log_segments(
             [(head, theme.TEXT_SECONDARY),
-             (f"{count} {kind.plural}", kind.colour),
-             (", жду садовника", theme.TEXT_SECONDARY)],
+             (str(count), theme.GD_OLIVE),
+             (", иду слева направо", theme.TEXT_SECONDARY)],
             level="plain")
 
-    def _on_kind_done(self, key: str, done: int, total: int):
+    def _on_kind_done(self, key: str, done: int):
         kind = self._kind(key)
-        if done >= total:
-            self._log.add_log_segments(
-                [("Убраны все — ", theme.TEXT_SECONDARY),
-                 (f"{done} {kind.plural}", kind.colour)],
-                level="plain")
-        else:
-            self._log.add_log_segments(
-                [(f"Осталось {kind.plural} — ", theme.TEXT_SECONDARY),
-                 (str(total - done), theme.ACCENT_AMBER),
-                 (", иду дальше", theme.TEXT_SECONDARY)],
-                level="plain")
+        self._log.add_log_segments(
+            [("Убраны все — ", theme.TEXT_SECONDARY),
+             (f"{done} {kind.plural}", kind.colour)],
+            level="plain")
 
     def _on_cleaned(self, seconds: float):
         # The bars are deliberately left where the counting put them: if
@@ -315,6 +336,7 @@ class GardenerWindow(ModuleWindow):
         self._start_btn.setText(_START_TEXT)
         self._start_btn.set_active(False)
         self._status_dot.set_offline()
+        self._markers.clear()      # the marks have been walked, or given up on
         if message:
             self._log.add_log(message, level="plain")
 
@@ -374,6 +396,7 @@ class GardenerWindow(ModuleWindow):
             return
 
         self._log_counts(count_by_kind(found))
+        self._show_dots(found)      # the same dots a run would walk
 
     def _log_counts(self, counts: dict):
         """The summary block: the whole haul, then a braced line per kind.
@@ -425,7 +448,8 @@ class GardenerWindow(ModuleWindow):
         QTimer.singleShot(30, self.repaint)
 
     def _teardown(self):
-        """Nothing of ours should outlive the window."""
+        """Nothing of ours should outlive the window — the dots included."""
         if self._run is not None:
             self._run.stop()
             self._run = None
+        self._markers.clear()

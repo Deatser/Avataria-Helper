@@ -5,7 +5,8 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from modules.gardener import cleaning
-from modules.gardener.cleaning import CleaningRun, Job, format_duration
+from modules.gardener.cleaning import (CleaningRun, Job, format_duration,
+                                       sweep_order)
 
 
 @pytest.fixture(scope="module")
@@ -35,11 +36,10 @@ class _Garden:
 
     def __init__(self, counts: dict, per_look: int = 1,
                  stuck: set[str] = frozenset()):
-        self.left    = dict(counts)
-        self.marked  = {}
-        self.clicks  = []
+        self.left     = dict(counts)
+        self.clicks   = []
         self.per_look = per_look     # how many he clears between two counts
-        self.stuck   = stuck         # kinds he never gets to
+        self.stuck    = stuck        # kinds he never gets to
 
     def click(self, _hwnd, x, y):
         self.clicks.append((x, y))
@@ -52,9 +52,9 @@ class _Garden:
         return self.left.get(key, 0)
 
 
-def _start(app, monkeypatch, jobs, garden, seconds=0.6):
+def _start(app, monkeypatch, jobs, garden, seconds=0.6, rescan=None):
     monkeypatch.setattr(cleaning, "click_at", garden.click)
-    run = CleaningRun(4242, jobs, garden.count)
+    run = CleaningRun(4242, jobs, garden.count, rescan)
     events = {"marking": [], "cleaned": [], "kind_done": [], "finished": []}
     run.marking.connect(lambda *a: events["marking"].append(a))
     run.cleaned.connect(lambda *a: events["cleaned"].append(a))
@@ -65,80 +65,98 @@ def _start(app, monkeypatch, jobs, garden, seconds=0.6):
     return run, events
 
 
-def _jobs(**counts):
-    """Litter at coordinates no two pieces share, whatever the kind."""
-    made = []
-    for key, number in counts.items():
-        for _ in range(number):
-            made.append(Job(key, len(made), len(made)))
-    return made
+# ── The order the garden is walked in ───────────────────────────────────────
+
+def test_the_marks_go_down_left_to_right(app, monkeypatch):
+    """A vertical line sweeping right: every x in turn, whatever the kind."""
+    jobs = [Job("beetle", 800, 100), Job("dry_bush", 120, 700),
+            Job("blue_bush", 450, 300), Job("dry_bush", 120, 200)]
+
+    assert [(j.x, j.y) for j in sweep_order(jobs)] == [
+        (120, 200), (120, 700), (450, 300), (800, 100)]
 
 
-# ── One kind at a time ──────────────────────────────────────────────────────
+def test_kind_does_not_decide_the_order(app, monkeypatch):
+    """Marking each kind in turn sent him back across the map every time."""
+    jobs = [Job("dry_bush", 900, 10), Job("beetle", 100, 10),
+            Job("dry_bush", 500, 10)]
+    garden = _Garden({"dry_bush": 2, "beetle": 1})
 
-def test_a_kind_is_marked_in_full_before_anything_else_is_touched(
-        app, monkeypatch):
-    """The complaint that started this: he was sent round the garden in
-    circles because every kind was clicked at once."""
-    jobs = _jobs(dry_bush=3, beetle=2)
-    garden = _Garden({"dry_bush": 3, "beetle": 2})
+    _run, _events = _start(app, monkeypatch, jobs, garden)
 
-    run, events = _start(app, monkeypatch, jobs, garden)
-
-    # Three dry bushes, then two beetles — never interleaved
-    assert [key for key, _n, _r in events["marking"]] == ["dry_bush", "beetle"]
-    assert garden.clicks[:3] == [(0, 0), (1, 1), (2, 2)]
+    assert garden.clicks[:3] == [(100, 10), (500, 10), (900, 10)]
 
 
-def test_the_next_kind_waits_until_this_one_is_gone(app, monkeypatch):
-    """The gardener clears one bush per look, so the beetles cannot start
-    until the third look at the bushes."""
-    jobs = _jobs(dry_bush=3, beetle=1)
-    garden = _Garden({"dry_bush": 3, "beetle": 1})
+def test_everything_is_marked_before_anything_is_waited_for(app, monkeypatch):
+    jobs = [Job("dry_bush", x, 0) for x in (10, 20, 30)]
+    garden = _Garden({"dry_bush": 3})
 
-    run, events = _start(app, monkeypatch, jobs, garden)
+    _run, events = _start(app, monkeypatch, jobs, garden)
 
-    marked_beetles = events["marking"].index(("beetle", 1, 0))
-    assert marked_beetles == 1                    # the second kind marked
-    assert garden.left["dry_bush"] == 0           # and only once these had gone
-    assert run.done == 4
+    assert events["marking"][0] == (3, 0)      # all three, on the first round
+    assert garden.clicks[:3] == [(10, 0), (20, 0), (30, 0)]
 
+
+# ── Progress is what the screen says, not what was clicked ──────────────────
 
 def test_the_bar_moves_when_the_gardener_removes_it_not_when_it_is_clicked(
         app, monkeypatch):
-    jobs = _jobs(dry_bush=2)
+    jobs = [Job("dry_bush", 10, 0), Job("dry_bush", 20, 0)]
     garden = _Garden({"dry_bush": 2})
 
-    run, events = _start(app, monkeypatch, jobs, garden)
+    _run, events = _start(app, monkeypatch, jobs, garden)
 
-    # Clicked twice, but credited one at a time as the count came down
     assert events["cleaned"] == [("dry_bush", 1, 1), ("dry_bush", 2, 2)]
 
 
-def test_several_going_at_once_are_all_credited(app, monkeypatch):
-    jobs = _jobs(dry_bush=4)
-    garden = _Garden({"dry_bush": 4}, per_look=2)
+def test_every_kind_is_counted_in_turn(app, monkeypatch):
+    """One kind per look — counting all of them every time is half a second
+    of the interface's own time for nothing."""
+    jobs = [Job("dry_bush", 10, 0), Job("beetle", 20, 0)]
+    garden = _Garden({"dry_bush": 1, "beetle": 1})
 
     run, events = _start(app, monkeypatch, jobs, garden)
 
-    assert events["cleaned"] == [("dry_bush", 2, 2), ("dry_bush", 4, 4)]
+    assert {key for key, _d, _t in events["cleaned"]} == {"dry_bush", "beetle"}
+    assert run.done == 2
+
+
+def test_a_kind_finished_is_announced_once(app, monkeypatch):
+    jobs = [Job("dry_bush", 10, 0), Job("dry_bush", 20, 0)]
+    garden = _Garden({"dry_bush": 2})
+
+    _run, events = _start(app, monkeypatch, jobs, garden)
+
+    assert events["kind_done"] == [("dry_bush", 2)]
 
 
 # ── When the gardener never gets there ──────────────────────────────────────
 
-def test_a_kind_that_never_moves_is_marked_again_and_then_left(
+def test_what_is_left_standing_is_marked_again_from_a_fresh_look(
         app, monkeypatch):
     monkeypatch.setattr(cleaning, "PATIENCE", 3)
-    jobs = _jobs(beetle=2, dry_bush=1)
-    garden = _Garden({"beetle": 2, "dry_bush": 1}, stuck={"beetle"})
+    jobs = [Job("beetle", 10, 0), Job("beetle", 20, 0)]
+    garden = _Garden({"beetle": 2}, stuck={"beetle"})
+    # The second look finds only one of them still there, and somewhere else
+    rescan = lambda: [Job("beetle", 55, 5)]
 
-    run, events = _start(app, monkeypatch, jobs, garden)
+    run, events = _start(app, monkeypatch, jobs, garden, rescan=rescan)
 
-    # Marked once, then once more when nothing happened, then given up on
-    assert garden.clicks.count((0, 0)) == 1 + cleaning.MARK_ROUNDS
-    assert ("beetle", 0, 2) in events["kind_done"]
-    assert events["finished"]                      # and the run still ends
-    assert run.done == 1                           # only the bush counted
+    assert (55, 5) in garden.clicks
+    assert len(events["marking"]) == 2 and events["marking"][1] == (1, 1)
+    assert events["finished"]                  # and the run still ends
+    assert run.done == 0                       # nothing was seen to go
+
+
+def test_a_garden_that_is_already_clear_stops_marking(app, monkeypatch):
+    monkeypatch.setattr(cleaning, "PATIENCE", 2)
+    garden = _Garden({"beetle": 1}, stuck={"beetle"})
+
+    _run, events = _start(app, monkeypatch, [Job("beetle", 10, 0)], garden,
+                          rescan=lambda: [])
+
+    assert len(events["marking"]) == 1
+    assert events["finished"]
 
 
 def test_a_screen_that_cannot_be_read_counts_as_nothing_removed(
@@ -149,10 +167,9 @@ def test_a_screen_that_cannot_be_read_counts_as_nothing_removed(
     def count(_key):
         raise OSError("no screen")
 
-    run = CleaningRun(4242, _jobs(dry_bush=1), count)
-    events = []
+    run = CleaningRun(4242, [Job("dry_bush", 1, 1)], count)
+    events, done = [], []
     run.cleaned.connect(lambda *a: events.append(a))
-    done = []
     run.finished.connect(done.append)
     run.start()
     _pump(app)
@@ -164,8 +181,8 @@ def test_a_screen_that_cannot_be_read_counts_as_nothing_removed(
 # ── The rest of the bookkeeping ─────────────────────────────────────────────
 
 def test_a_run_reports_how_long_it_took(app, monkeypatch):
-    run, events = _start(app, monkeypatch, _jobs(dry_bush=1),
-                         _Garden({"dry_bush": 1}))
+    _run, events = _start(app, monkeypatch, [Job("dry_bush", 1, 1)],
+                          _Garden({"dry_bush": 1}))
 
     assert len(events["finished"]) == 1
     assert events["finished"][0][0] >= 0
@@ -174,7 +191,7 @@ def test_a_run_reports_how_long_it_took(app, monkeypatch):
 def test_an_empty_garden_finishes_at_once(app, monkeypatch):
     garden = _Garden({})
 
-    run, events = _start(app, monkeypatch, [], garden)
+    _run, events = _start(app, monkeypatch, [], garden)
 
     assert garden.clicks == [] and events["cleaned"] == []
     assert events["finished"] == [(0.0,)]
@@ -183,7 +200,8 @@ def test_an_empty_garden_finishes_at_once(app, monkeypatch):
 def test_stopping_leaves_the_rest_alone(app, monkeypatch):
     garden = _Garden({"dry_bush": 50})
     monkeypatch.setattr(cleaning, "click_at", garden.click)
-    run = CleaningRun(4242, _jobs(dry_bush=50), garden.count)
+    run = CleaningRun(4242, [Job("dry_bush", x, 0) for x in range(50)],
+                      garden.count)
     run.start()
     _pump(app, 0.02)
 
