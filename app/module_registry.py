@@ -6,9 +6,11 @@
 from modules.ava_dancers import AvaDancersModule
 from modules.gardener import GardenerModule
 from modules.janitor import JanitorModule
+from modules.snowboard import SnowboardModule
 
 MODULES = [
     AvaDancersModule,
+    SnowboardModule,
     GardenerModule,
     JanitorModule,
     # Add new modules here — one line each

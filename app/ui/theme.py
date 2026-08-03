@@ -78,6 +78,19 @@ JN_TEXT        = "#f1e4d2"
 JN_BORDER      = "#3a2716"
 JN_BORDER_DIM  = "#221609"
 
+# ── Steel (Сноуборд module) ───────────────────────────────────────────────────
+# Overcast slope at altitude: cold blue-grey snow, steel rails, ice-white
+# text — muted and hard next to the Amber café's warmth.
+SB_BG          = "#0a0e15"
+SB_SURFACE     = "#131c29"
+SB_ELEVATED    = "#1b2839"
+SB_STEEL       = "#6d84c0"   # the module accent — same value as ACCENT_STEEL
+SB_STEEL_SOFT  = "#aebbe0"
+SB_ICE         = "#cfe8f5"
+SB_TEXT        = "#e9eef7"
+SB_BORDER      = "#293957"
+SB_BORDER_DIM  = "#182234"
+
 # ── Geometry ─────────────────────────────────────────────────────────────────
 RADIUS  = 8
 PADDING = 14

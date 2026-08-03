@@ -70,6 +70,18 @@ class JanitorConfig:
 
 
 @dataclass
+class SnowboardConfig:
+    favorite: bool = False
+    position_saved: bool = False
+    x: int = 370
+    y: int = 10
+    width: int = 420
+    height: int = 570
+    background: str = ""            # explicit backdrop path; empty → auto-pick
+    video_background: bool = True   # off → still image instead of the video
+
+
+@dataclass
 class StatsWindowConfig:
     """Geometry and autostart — the numbers themselves live in stats.json."""
     favorite: bool = False      # open together with the helper at startup
@@ -86,6 +98,7 @@ class AppConfig:
     ava_dancers: AvaDancersConfig = field(default_factory=AvaDancersConfig)
     gardener: GardenerConfig = field(default_factory=GardenerConfig)
     janitor: JanitorConfig = field(default_factory=JanitorConfig)
+    snowboard: SnowboardConfig = field(default_factory=SnowboardConfig)
     stats_window: StatsWindowConfig = field(default_factory=StatsWindowConfig)
 
 

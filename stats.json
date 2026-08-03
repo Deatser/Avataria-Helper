@@ -10,7 +10,13 @@
         "silver_won": 0
     },
     "gardener": {
-        "shifts_finished": 2,
-        "clean_next_time": ""
+        "shifts_finished": 4,
+        "clean_next_time": "0:00:00",
+        "clean_was_time": "2026-08-03T16:34:22.906542"
+    },
+    "janitor": {
+        "shifts_finished": 0,
+        "clean_next_time": "0:00:00",
+        "clean_was_time": "2026-08-03T16:34:22.907402"
     }
 }
