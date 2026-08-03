@@ -122,6 +122,21 @@ def test_finds_come_back_best_first():
     assert scores == sorted(scores, reverse=True)
 
 
+def test_a_scan_within_a_region_still_reports_screen_coordinates():
+    """Only the garden rectangle gets grabbed, but a find is still reported
+    where it sits on the real screen, not where it sits in that patch."""
+    small = load_template(TRASH_KINDS[0].filenames[0])
+    patch = np.full((900, 1400), 40, np.uint8)
+    patch[100:100 + small.shape[0], 200:200 + small.shape[1]] = small
+    region = {"left": 780, "top": 312, "width": 1400, "height": 900}
+
+    found = scan(screen_gray=patch, region=region, near=0.4)
+
+    hit = next(f for f in found if f.kind.key == "dry_bush")
+    assert hit.x == region["left"] + 200 + small.shape[1] // 2
+    assert hit.y == region["top"] + 100 + small.shape[0] // 2
+
+
 def test_a_kind_can_have_several_pictures_of_itself():
     """A dry bush is drawn two ways; both are the same kind of litter."""
     by_key = {k.key: k for k in TRASH_KINDS}
@@ -130,7 +145,9 @@ def test_a_kind_can_have_several_pictures_of_itself():
         "gardener_-1.png", "gardener_0.png", "gardener_1.png",
         "gardener_2.png", "gardener_3.png")
     assert by_key["blue_bush"].filenames == ("gardener_4.png",)
-    assert by_key["beetle"].filenames == ("gardener_7.png", "gardener_8.png")
+    assert by_key["beetle"].filenames == (
+        "gardener_7.png", "gardener_8.png",
+        "gardener_71.png", "gardener_81.png")
 
 
 def test_one_object_matching_two_variants_is_counted_once():
@@ -168,7 +185,7 @@ def test_a_kind_can_carry_its_own_threshold():
     by_key = {k.key: k for k in TRASH_KINDS}
 
     assert by_key["blue_bush"].threshold == 0.85     # clean bushes hit 81%
-    assert by_key["beetle"].threshold == 0.54        # small and rarely crisp
+    assert by_key["beetle"].threshold == 0.65
     assert by_key["dry_bush"].threshold == 0.65
 
 

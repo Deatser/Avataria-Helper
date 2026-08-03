@@ -40,6 +40,21 @@ class Area:
     def centre(self) -> tuple[int, int]:
         return self.left + self.width // 2, self.top + self.height // 2
 
+    @property
+    def region(self) -> dict:
+        """The rectangle in the mss shape every grab call takes."""
+        return {"left": self.left, "top": self.top,
+                "width": self.width, "height": self.height}
+
+
+# Calibrated once by hand (2026-08-03) by dragging the area overlay onto
+# the real garden and reading its position back. locate() kept landing the
+# same fixed distance off — a drift consistent enough that a known-good
+# rectangle beats searching for one that keeps ending up in the same wrong
+# place. GARDEN_TEMPLATE and locate() are left in place but unused by the
+# gardener window now.
+FIXED_AREA = Area(score=1.0, left=780, top=313, width=1000, height=797)
+
 
 def locate(filename: str = GARDEN_TEMPLATE, screen_gray=None,
            scale: float = SCALE) -> Area | None:

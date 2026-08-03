@@ -27,16 +27,22 @@ from app.ui.no_capture import exclude_from_capture
 class GameLayer(QWidget):
     """Base for overlays that live above the game window."""
 
-    def __init__(self, window_manager=None):
+    def __init__(self, window_manager=None, click_through: bool = True):
         super().__init__()
         self._wm    = window_manager
         self._owner = 0
 
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool
-                            | Qt.WindowTransparentForInput
-                            | Qt.WindowDoesNotAcceptFocus)
+        flags = Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus
+        if click_through:
+            # WA_TransparentForMouseEvents below is what actually does this
+            # on Windows, but setting it also latches WindowTransparentForInput
+            # onto the native window for good — there is no clearing it again
+            # once set, so a layer that wants the mouse itself has to be built
+            # without ever passing through here in the first place.
+            flags |= Qt.WindowTransparentForInput
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, click_through)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
 
     def showEvent(self, event):

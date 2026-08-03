@@ -73,6 +73,17 @@ class ProgressBoard(QWidget):
         if TOTAL_KEY in self._bars:
             self._bars[TOTAL_KEY].set_done(total_done)
 
+    def dec_total(self, key: str, amount: int = 1):
+        """A pick that turned out not to be real litter after all — taken
+        back out of both its own bar and the overall one, the same way a
+        cleared one is credited to both."""
+        if key in self._bars:
+            bar = self._bars[key]
+            bar.set_total(bar.total - amount)
+        if TOTAL_KEY in self._bars:
+            bar = self._bars[TOTAL_KEY]
+            bar.set_total(bar.total - amount)
+
     def bar(self, key: str) -> NeonBar | None:
         return self._bars.get(key)
 

@@ -1,5 +1,6 @@
 # app/core/capture.py
 from __future__ import annotations
+import ctypes
 import threading
 import time
 from threading import Lock
@@ -7,9 +8,16 @@ import mss
 import mss.exception
 import numpy as np
 import cv2
+import win32gui
+import win32ui
 
 _RETRIES     = 3      # BitBlt can fail transiently — a retry usually succeeds
 _RETRY_DELAY = 0.015  # seconds between attempts
+
+# Asks a window to render its own content into the given DC, the same way
+# it would paint to the screen — DWM fills it in even for a window that is
+# fully covered or minimised, which plain BitBlt-based capture cannot do.
+_PW_RENDERFULLCONTENT = 0x00000002
 
 
 class ScreenCapture:
@@ -72,3 +80,52 @@ class ScreenCapture:
 
         img = np.array(raw)
         return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+
+def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
+    """Capture hwnd's own content, wherever it sits in the window stack.
+
+    ScreenCapture.grab reads the screen, which only ever shows whatever is
+    drawn on top — alt-tab to something else and it starts describing that
+    instead of the game. PrintWindow renders the window itself into an
+    off-screen bitmap, unaffected by whatever else is in front of it.
+
+    region, if given, is in the same absolute screen coordinates every
+    other region in this codebase uses; it is converted to window-relative
+    pixels here using hwnd's own current position.
+    """
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    width, height = right - left, bottom - top
+    if width <= 0 or height <= 0:
+        raise RuntimeError("Окно игры свёрнуто")
+
+    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    src_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+    mem_dc = src_dc.CreateCompatibleDC()
+    bitmap = win32ui.CreateBitmap()
+    bitmap.CreateCompatibleBitmap(src_dc, width, height)
+    mem_dc.SelectObject(bitmap)
+    try:
+        ok = ctypes.windll.user32.PrintWindow(
+            hwnd, mem_dc.GetSafeHdc(), _PW_RENDERFULLCONTENT)
+        if not ok:
+            raise RuntimeError("Не удалось отрисовать окно игры")
+
+        info = bitmap.GetInfo()
+        bits = bitmap.GetBitmapBits(True)
+        img = np.frombuffer(bits, dtype=np.uint8).reshape(
+            info["bmHeight"], info["bmWidth"], 4)[:, :, :3]
+        img = np.ascontiguousarray(img)
+    finally:
+        mem_dc.DeleteDC()
+        src_dc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwnd_dc)
+        win32gui.DeleteObject(bitmap.GetHandle())
+
+    if region is None:
+        return img
+    rel_left = region["left"] - left
+    rel_top  = region["top"] - top
+    return np.ascontiguousarray(
+        img[rel_top:rel_top + region["height"],
+           rel_left:rel_left + region["width"]])

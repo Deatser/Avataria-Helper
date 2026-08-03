@@ -55,10 +55,11 @@ TRASH_KINDS: list[TrashKind] = [
     TrashKind("yellow_bush", "жёлтых кустов", "Жёлтый куст",
               ("gardener_5.png",), colour="#ffe14d", threshold=0.80),
     TrashKind("pink_bush", "розовых кустов", "Розовый куст",
-              ("gardener_6.png",), colour="#ff6ec7", threshold=0.60),
+              ("gardener_6.png",), colour="#ff6ec7", threshold=0.65),
     TrashKind("beetle", "жуков", "Жук",
-              ("gardener_7.png", "gardener_8.png"),
-              colour="#9944ff", threshold=0.54),
+              ("gardener_7.png", "gardener_8.png",
+               "gardener_71.png", "gardener_81.png"),   # mirrored the same way
+              colour="#9944ff", threshold=0.65),
     TrashKind("butterfly", "бабочек", "Бабочка",
               ("gardener_9.png", "gardener_10.png"),
               colour="#00ffa3", threshold=0.65),
@@ -90,7 +91,8 @@ class TrashFind:
     accepted: bool  # cleared MATCH_THRESHOLD, rather than merely NEAR
 
 
-def scan(screen_gray=None, threshold: float | None = None,
+def scan(screen_gray=None, region: dict | None = None,
+         threshold: float | None = None,
          near: float = NEAR_THRESHOLD) -> list[TrashFind]:
     """Every piece of litter on screen, of every known kind, best first.
 
@@ -99,12 +101,17 @@ def scan(screen_gray=None, threshold: float | None = None,
     from the log rather than by guesswork.
 
     Pass `screen_gray` to search an image that has already been grabbed;
-    otherwise the primary monitor is captured here.
+    otherwise `region` is captured here, or the primary monitor if `region`
+    is not given either. Either way, `region`'s corner is what turns a match
+    found in that patch back into a screen coordinate — pass it even
+    alongside an already-grabbed `screen_gray` if that image is not itself
+    the whole screen.
     """
     if screen_gray is None:
+        region = region or primary_monitor_region()
         screen_gray = cv2.cvtColor(
-            ScreenCapture.get().grab(primary_monitor_region()),
-            cv2.COLOR_BGR2GRAY)
+            ScreenCapture.get().grab(region), cv2.COLOR_BGR2GRAY)
+    origin = (region["left"], region["top"]) if region else (0, 0)
 
     found: list[TrashFind] = []
     for kind in TRASH_KINDS:
@@ -120,7 +127,8 @@ def scan(screen_gray=None, threshold: float | None = None,
                                                  min(near, bar),
                                                  limit=MAX_PER_KIND)]
         for score, x, y in _merge_variants(hits):
-            found.append(TrashFind(kind, score, x, y, accepted=score >= bar))
+            found.append(TrashFind(kind, score, origin[0] + x, origin[1] + y,
+                                   accepted=score >= bar))
     return found
 
 

@@ -58,8 +58,20 @@ class NeonBar(QWidget):
         return self._done
 
     @property
+    def total(self) -> int:
+        return self._total
+
+    @property
     def complete(self) -> bool:
         return self._total > 0 and self._done >= self._total
+
+    def set_total(self, total: int):
+        """One fewer counted after all — a pick that turned out to be a
+        false positive, taken back out of what this bar is measured
+        against rather than left to sit as litter that will never clear."""
+        self._total = max(0, total)
+        self.set_done(self._done)   # re-clamps, re-glides, re-checks complete
+        self.update()               # the (done/total) label reads _total directly
 
     def set_done(self, done: int):
         self._done = max(0, min(done, self._total))

@@ -3,7 +3,7 @@
 import numpy as np
 
 from app.core.template_match import load_template
-from modules.gardener.garden_area import GARDEN_TEMPLATE, locate
+from modules.gardener.garden_area import Area, GARDEN_TEMPLATE, locate
 
 
 def _screen_with(picture, at, size=(1080, 1920)):
@@ -41,3 +41,10 @@ def test_a_screen_smaller_than_the_view_finds_nothing():
 
 def test_a_missing_picture_is_not_an_error():
     assert locate("not_a_real_file.png") is None
+
+
+def test_the_region_is_the_mss_shape_a_grab_takes():
+    area = Area(score=0.9, left=780, top=312, width=1000, height=797)
+
+    assert area.region == {"left": 780, "top": 312,
+                           "width": 1000, "height": 797}

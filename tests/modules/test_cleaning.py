@@ -19,6 +19,7 @@ def quick(monkeypatch):
     """The real run is paced in seconds; the tests are not."""
     monkeypatch.setattr(cleaning, "MARK_MS", 1)
     monkeypatch.setattr(cleaning, "WATCH_MS", 1)
+    monkeypatch.setattr(cleaning, "SETTLE_S", 0.0)
 
 
 def _pump(app, seconds=0.4):
@@ -52,9 +53,9 @@ class _Garden:
         return [job for job in jobs if job in self.cleared]
 
 
-def _start(app, monkeypatch, jobs, garden, seconds=0.6, rescan=None):
+def _start(app, monkeypatch, jobs, garden, seconds=0.6):
     monkeypatch.setattr(cleaning, "click_at", garden.click)
-    run = CleaningRun(4242, jobs, garden.gone, rescan)
+    run = CleaningRun(4242, jobs, garden.gone)
     events = {"marking": [], "cleaned": [], "kind_done": [], "finished": []}
     run.marking.connect(lambda *a: events["marking"].append(a))
     run.cleaned.connect(lambda *a: events["cleaned"].append(a))
@@ -93,7 +94,7 @@ def test_everything_is_marked_before_anything_is_watched(app, monkeypatch):
 
     _run, events = _start(app, monkeypatch, jobs, garden)
 
-    assert events["marking"][0] == (3, 0)      # all three, on the first round
+    assert events["marking"][0] == (3,)
     assert garden.clicks[:3] == [(10, 0), (20, 0), (30, 0)]
 
 
@@ -108,6 +109,34 @@ def test_a_mark_counts_when_it_is_empty_not_when_it_is_clicked(
 
     assert events["cleaned"] == [("dry_bush", 1, 1), ("dry_bush", 2, 2)]
     assert run.done == 2
+
+
+def test_a_fresh_mark_is_left_alone_until_it_has_had_time_to_settle(
+        app, monkeypatch):
+    """A click gets its own flourish on screen; asked about too soon, that
+    flourish alone would read as the litter already being gone."""
+    monkeypatch.setattr(cleaning, "SETTLE_S", 0.15)
+    monkeypatch.setattr(cleaning, "PATIENCE", 10_000)   # only settling is timed here
+    monkeypatch.setattr(cleaning, "click_at", lambda *a: True)
+    job = Job("dry_bush", 10, 0)
+    calls = []
+
+    def always_gone(jobs):
+        calls.append(list(jobs))
+        return list(jobs)
+
+    run = CleaningRun(4242, [job], always_gone)
+    events = []
+    run.cleaned.connect(lambda *a: events.append(a))
+    run.start()
+    _pump(app, 0.05)              # well before SETTLE_S has passed
+
+    assert events == []
+    assert calls == []            # never even asked about yet
+
+    _pump(app, 0.6)                # now it has had time to settle
+
+    assert events == [("dry_bush", 1, 1)]
 
 
 def test_one_empty_look_is_not_enough(app, monkeypatch):
@@ -151,31 +180,21 @@ def test_a_kind_finished_is_announced(app, monkeypatch):
 
 # ── When the gardener never gets there ──────────────────────────────────────
 
-def test_what_is_left_standing_is_marked_again_from_a_fresh_look(
+def test_marks_that_never_clear_are_left_standing_not_clicked_again(
         app, monkeypatch):
+    """Clicking an already-queued spot again does not help the game along
+    — it might knock it out of the queue — so a stuck mark is reported and
+    left alone, not marked a second time."""
     monkeypatch.setattr(cleaning, "PATIENCE", 3)
     jobs = [Job("beetle", 10, 0), Job("beetle", 20, 0)]
-    garden = _Garden(stuck={"beetle"})
-    # The fresh look finds only one of them still there, and somewhere else
-    rescan = lambda: [Job("beetle", 55, 5)]
+    garden = _Garden(stuck={"beetle"})   # never comes up empty
 
-    run, events = _start(app, monkeypatch, jobs, garden, rescan=rescan)
+    run, events = _start(app, monkeypatch, jobs, garden)
 
-    assert (55, 5) in garden.clicks
-    assert len(events["marking"]) == 2 and events["marking"][1] == (1, 1)
-    assert events["finished"]                  # and the run still ends
-    assert run.done == 0                       # nothing was seen to go
-
-
-def test_a_garden_that_is_already_clear_stops_marking(app, monkeypatch):
-    monkeypatch.setattr(cleaning, "PATIENCE", 2)
-    garden = _Garden(stuck={"beetle"})
-
-    _run, events = _start(app, monkeypatch, [Job("beetle", 10, 0)], garden,
-                          rescan=lambda: [])
-
-    assert len(events["marking"]) == 1
-    assert events["finished"]
+    assert garden.clicks == [(10, 0), (20, 0)]   # each mark clicked once, ever
+    assert len(events["marking"]) == 1           # one sweep, never a second
+    assert events["finished"]                    # and the run still ends
+    assert run.done == 0                         # nothing was seen to go
 
 
 def test_a_screen_that_cannot_be_read_counts_as_nothing_removed(
