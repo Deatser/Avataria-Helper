@@ -32,18 +32,33 @@ class WindowManager:
         self._game_hwnd: int | None = None
 
     def find_game(self, title_contains: str) -> bool:
-        """Scan all visible windows for one whose title contains title_contains."""
-        result: int | None = None
+        """The window whose title matches — exactly, if any visible window's
+        does; only falling back to "merely contains it" otherwise.
+
+        A browser tab *about* the game ("Аватария: записи сообщества —
+        Google Chrome") contains the same title text as the game's own PWA
+        window ("Аватария") and previously won outright: EnumWindows order
+        is not the game's own window stacking order, so a plain substring
+        search picks whichever matching window happens to enumerate last,
+        with no preference for the one actually named that and nothing
+        else.
+        """
+        exact_match: int | None = None
+        partial_match: int | None = None
 
         def callback(hwnd: int, _):
-            nonlocal result
-            if win32gui.IsWindowVisible(hwnd):
-                if title_contains in win32gui.GetWindowText(hwnd):
-                    result = hwnd
+            nonlocal exact_match, partial_match
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            text = win32gui.GetWindowText(hwnd)
+            if text == title_contains:
+                exact_match = hwnd
+            elif title_contains in text:
+                partial_match = hwnd
 
         win32gui.EnumWindows(callback, None)
-        self._game_hwnd = result
-        return result is not None
+        self._game_hwnd = exact_match if exact_match is not None else partial_match
+        return self._game_hwnd is not None
 
     def get_game_hwnd(self) -> int | None:
         return self._game_hwnd
