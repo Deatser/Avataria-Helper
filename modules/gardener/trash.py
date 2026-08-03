@@ -61,21 +61,38 @@ TRASH_KINDS: list[TrashKind] = [
                "gardener_71.png", "gardener_81.png"),   # mirrored the same way
               colour="#9944ff", threshold=0.65),
     TrashKind("butterfly", "бабочек", "Бабочка",
-              ("gardener_9.png", "gardener_10.png"),
+              ("gardener_9.png", "gardener_10.png",
+               # Butterflies never sit still and never face the same way
+               # twice — one picture each of both colours was never going to
+               # match a live one turned even a little. Twelve copies of
+               # each, rotated 30° apart, cover the whole circle instead.
+               "gardener_91.png", "gardener_92.png", "gardener_93.png",
+               "gardener_94.png", "gardener_95.png", "gardener_96.png",
+               "gardener_97.png", "gardener_98.png", "gardener_99.png",
+               "gardener_910.png", "gardener_911.png", "gardener_912.png",
+               "gardener_101.png", "gardener_102.png", "gardener_103.png",
+               "gardener_104.png", "gardener_105.png", "gardener_106.png",
+               "gardener_107.png", "gardener_108.png", "gardener_109.png",
+               "gardener_1010.png", "gardener_1011.png", "gardener_1012.png"),
               colour="#00ffa3", threshold=0.65),
 ]
+
+# Picked out for the butterfly hunt, which searches for this one kind alone
+# many times a second and has no reason to spell out which kind that is
+# everywhere it is used.
+BUTTERFLY = next(kind for kind in TRASH_KINDS if kind.key == "butterfly")
 
 # TEMPORARY, for choosing the bar above. Everything down to here is reported
 # too, marked as a near miss: without seeing what the misses actually scored
 # there is no way to tell a threshold that is slightly too strict from one
 # that is about right.
 #
-# Measured on a real screen at 0.55 the blue bush had nothing to show at all —
-# its scores went 100, 96, 81, then straight down to 48 — so the list simply
-# did not appear for that kind. Low enough that every kind has something to
-# judge by; the extra candidates cost about 7 ms and only the best few are
-# ever printed.
-NEAR_THRESHOLD = 0.45
+# Raised from 0.45 (2026-08-03): with the butterfly hunt running find_all
+# across 26 rotated templates several times a second, a bar this low was
+# turning up 100+ near misses a tick on a real screen — flooding the debug
+# log and, far worse, slow enough to make the hunt itself visibly lag
+# behind a butterfly that had already moved on by the time a tick finished.
+NEAR_THRESHOLD = 0.60
 
 # Per kind. A garden with more litter than this in one screen is not a
 # reading worth trusting anyway.
@@ -93,7 +110,8 @@ class TrashFind:
 
 def scan(screen_gray=None, region: dict | None = None,
          threshold: float | None = None,
-         near: float = NEAR_THRESHOLD) -> list[TrashFind]:
+         near: float = NEAR_THRESHOLD,
+         kinds: list[TrashKind] | None = None) -> list[TrashFind]:
     """Every piece of litter on screen, of every known kind, best first.
 
     Searching down to `near` and marking the difference costs nothing extra
@@ -106,6 +124,11 @@ def scan(screen_gray=None, region: dict | None = None,
     found in that patch back into a screen coordinate — pass it even
     alongside an already-grabbed `screen_gray` if that image is not itself
     the whole screen.
+
+    Pass `kinds` to search only some of them — the butterfly hunt runs this
+    many times a second and has no use for re-checking bushes and beetles
+    that are already long since cleared, on top of butterflies now costing
+    26 templates apiece to check instead of one or two.
     """
     if screen_gray is None:
         region = region or primary_monitor_region()
@@ -114,7 +137,7 @@ def scan(screen_gray=None, region: dict | None = None,
     origin = (region["left"], region["top"]) if region else (0, 0)
 
     found: list[TrashFind] = []
-    for kind in TRASH_KINDS:
+    for kind in (kinds if kinds is not None else TRASH_KINDS):
         bar = kind.threshold if threshold is None else threshold
         hits = []
         for filename in kind.filenames:

@@ -11,7 +11,7 @@ from app.module_registry import MODULES
 from app.ui import theme
 from modules.gardener import GardenerModule
 from modules.gardener.garden_area import Area
-from modules.gardener.trash import TRASH_KINDS, TrashFind
+from modules.gardener.trash import BUTTERFLY, TRASH_KINDS, TrashFind
 from modules.gardener.window import GardenerWindow
 import modules.gardener.window as window_module
 
@@ -30,9 +30,9 @@ class _WM:
 
 
 class _FakeCapture:
-    """A grab that never touches the real screen — its content does not
-    matter to these tests, since score_at is stubbed wherever it would be
-    read; it only has to be a plausible-shaped image."""
+    """A grab that never touches the real screen — only its shape has to
+    be plausible; nothing in the cleaning loop reads this content any
+    more, only grab_window's, stubbed separately in _stub_environment."""
 
     def grab(self, region):
         return np.zeros((region["height"], region["width"], 3), np.uint8)
@@ -49,41 +49,46 @@ def _stub_environment(monkeypatch, window, found, hwnd=4242):
     scan finds exactly `found` — everything a run needs before it clicks
     anything. The screen itself is never really grabbed.
 
-    Every click also passes the movement-verification gate on its first
-    look: grab_window alternates between two starkly different frames, a
-    world apart from the noise threshold, and the wait between looks is
-    shrunk to nothing — so a test of the scoring loop below it is not also
-    a test that waits out five real seconds first.
+    Every click also walks straight through to being credited, whichever
+    object it is: grab_window repeats a 7-call cycle — a baseline that is
+    never compared to anything, a second call that differs from it
+    (one tick of movement, enough to set did_move), and five more calls
+    identical to that one (_STILL_TICKS quiet readings in a row, enough to
+    end the watch) — so a test of picking order or bookkeeping across
+    several objects is not also a test that waits out a real five-second
+    stillness streak for each one. The tick itself is also shrunk to
+    nothing.
     """
     window._garden_area = Area(score=0.9, left=0, top=0,
                                width=1600, height=900)
     monkeypatch.setattr(window._wm, "get_game_hwnd", lambda: hwnd,
                         raising=False)
-    monkeypatch.setattr(window_module, "scan", lambda *a, **k: found)
-    monkeypatch.setattr(window_module.ScreenCapture, "get",
-                        classmethod(lambda cls: _FakeCapture()))
-    monkeypatch.setattr(window_module, "_MOVE_CHECK_MS", 1)
-    frame_calls = {"n": 0}
 
-    def moving_frame(hwnd, region):
-        frame_calls["n"] += 1
-        value = 255 if frame_calls["n"] % 2 else 0
-        return np.full((region["height"], region["width"], 3), value, np.uint8)
-
-    monkeypatch.setattr(window_module, "grab_window", moving_frame)
-
-
-def _stub_scan_rounds(monkeypatch, rounds):
-    """scan() returns each of `rounds` in turn, then repeats the last one —
-    for simulating an object no longer being there on the look after it."""
-    calls = {"n": 0}
-
-    def fake_scan(*a, **k):
-        i = min(calls["n"], len(rounds) - 1)
-        calls["n"] += 1
-        return rounds[i]
+    def fake_scan(*a, kinds=None, **k):
+        # Real scan() only ever returns what was asked for — once the
+        # bushes are done and the butterfly hunt's own scan(kinds=[...])
+        # comes asking, it must not be handed the leftover bush/beetle
+        # finds back and mistake them for butterflies.
+        if kinds is None:
+            return found
+        keys = {kind.key for kind in kinds}
+        return [item for item in found if item.kind.key in keys]
 
     monkeypatch.setattr(window_module, "scan", fake_scan)
+    monkeypatch.setattr(window_module.ScreenCapture, "get",
+                        classmethod(lambda cls: _FakeCapture()))
+    monkeypatch.setattr(window_module, "_WATCH_MS", 1)
+    monkeypatch.setattr(window_module, "_HUNT_MS", 1)
+    monkeypatch.setattr(window_module, "_CATCH_WATCH_MS", 1)
+    frame_calls = {"n": 0}
+
+    def moving_then_still(hwnd, region):
+        idx = frame_calls["n"] % 7
+        frame_calls["n"] += 1
+        value = 0 if idx == 0 else 255
+        return np.full((region["height"], region["width"], 3), value, np.uint8)
+
+    monkeypatch.setattr(window_module, "grab_window", moving_then_still)
 
 
 def _wait_for(app, window, needle, seconds=4.0):
@@ -362,7 +367,6 @@ def test_the_first_object_is_the_one_most_top_left(tmp_path, monkeypatch, app):
     clicks = []
     monkeypatch.setattr(window_module, "click_at",
                         lambda hwnd, x, y: clicks.append((x, y)) or True)
-    monkeypatch.setattr(window_module, "score_at", lambda *a, **k: 0.9)
 
     window._toggle_cleaning()
     app.processEvents()
@@ -377,7 +381,6 @@ def test_the_start_button_flips_while_the_one_object_is_watched(
     found = [TrashFind(TRASH_KINDS[0], 0.9, 100, 100, accepted=True)]
     _stub_environment(monkeypatch, window, found)
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    monkeypatch.setattr(window_module, "score_at", lambda *a, **k: 0.9)
 
     window._toggle_cleaning()
     app.processEvents()                 # the run starts a turn later
@@ -390,8 +393,10 @@ def test_the_start_button_flips_while_the_one_object_is_watched(
     window.close()
 
 
-def test_an_empty_garden_is_reported_and_nothing_is_clicked(
+def test_an_empty_garden_moves_straight_to_the_butterfly_hunt(
         tmp_path, monkeypatch, app):
+    """Nothing walkable does not stop the run any more — it means the
+    bushes and beetles are done, so it turns to the butterflies instead."""
     window, _config = _window(tmp_path, monkeypatch)
     _stub_environment(monkeypatch, window, [])
     clicks = []
@@ -402,8 +407,9 @@ def test_an_empty_garden_is_reported_and_nothing_is_clicked(
     app.processEvents()
 
     assert clicks == []
-    assert window._running is False
     assert _wait_for(app, window, "Объект не найден")
+    assert _wait_for(app, window, "Начинаем ловить бабочек")
+    assert window._running is True
     window.close()
 
 
@@ -418,7 +424,6 @@ def test_the_board_is_built_from_the_opening_count(tmp_path, monkeypatch, app):
     another_dry = TrashFind(TRASH_KINDS[0], 0.9, 300, 10, accepted=True)
     _stub_environment(monkeypatch, window, [dry, blue, another_dry])
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    monkeypatch.setattr(window_module, "score_at", lambda *a, **k: 0.9)
 
     window._toggle_cleaning()
     app.processEvents()
@@ -433,34 +438,34 @@ def test_the_board_is_built_from_the_opening_count(tmp_path, monkeypatch, app):
 
 def test_a_cleared_object_advances_its_bar_and_the_total(
         tmp_path, monkeypatch, app):
+    """Credited once the character has walked to it, gone still, and the
+    fixed clean-up wait has passed — nothing about a score enters into it
+    any more, so _handled alone keeps the next search from finding it
+    again once it is gone."""
     window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
     target = TrashFind(TRASH_KINDS[0], 0.9, 50, 50, accepted=True)
     _stub_environment(monkeypatch, window, [target])
-    _stub_scan_rounds(monkeypatch, [[target], [target], []])
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    scores = iter([0.9, 0.2])   # still there once, then a sharp drop
-    monkeypatch.setattr(window_module, "score_at",
-                        lambda *a, **k: next(scores, 0.2))
 
     window._toggle_cleaning()
     app.processEvents()
 
-    assert _wait_for(app, window, "Объект не найден")
+    assert _wait_for(app, window, "Объект убран")
     assert window._board.bar(TRASH_KINDS[0].key).done == 1
     assert window._board.bar("__total__").done == 1
+    assert _wait_for(app, window, "Объект не найден")   # nothing left after it
     window.close()
 
 
-# ── The movement check before settling in to watch a score ──────────────────
+# ── The movement check before watching the character arrive ─────────────────
 
 def test_a_click_that_never_makes_the_character_move_is_rejected(
         tmp_path, monkeypatch, app):
     """A misdetection gets clicked exactly like real litter would, but the
-    character never sets off toward it — five quiet looks in a row, not
-    one of them showing more change than the garden already has on its
-    own, and the pick is struck off rather than watched for a score that
-    was never going to move either."""
+    character never sets off toward it — two quiet looks in a row, not one
+    of them showing more change than the garden already has on its own,
+    and the pick is struck off rather than waited on for an arrival that
+    was never coming."""
     window, _config = _window(tmp_path, monkeypatch)
     target = TrashFind(TRASH_KINDS[0], 0.9, 50, 50, accepted=True)
     _stub_environment(monkeypatch, window, [target])
@@ -468,41 +473,37 @@ def test_a_click_that_never_makes_the_character_move_is_rejected(
                         lambda hwnd, region: np.zeros(
                             (region["height"], region["width"], 3), np.uint8))
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    score_calls = []
-    monkeypatch.setattr(window_module, "score_at",
-                        lambda *a, **k: score_calls.append(1) or 0.9)
 
     window._toggle_cleaning()
     app.processEvents()
 
-    assert _wait_for(app, window, "Игрок не стал двигаться")
-    assert _wait_for(app, window, "определили неверно")
+    assert _wait_for(app, window, "Игрок стоит")
+    assert _wait_for(app, window, "объект фейк")
     assert window._board.bar(TRASH_KINDS[0].key).total == 0
     assert window._board.bar("__total__").total == 0
-    assert not score_calls   # never got as far as watching its score
     window.close()
 
 
 def test_objects_are_numbered_as_they_are_picked(tmp_path, monkeypatch, app):
-    """A running count across the whole run, not restarted per object —
-    "объект №2" means the second one taken on, whichever circle it is in."""
+    """A running count across the whole run: the search line spells out
+    which attempt this is ("первый", "второй", ...), and once the
+    character has actually arrived at one the arrival line names it by
+    the same running number, as a plain "№N"."""
     window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
     first  = TrashFind(TRASH_KINDS[0], 0.9, 50, 50, accepted=True)
     second = TrashFind(TRASH_KINDS[1], 0.9, 200, 20, accepted=True)
     _stub_environment(monkeypatch, window, [first, second])
-    _stub_scan_rounds(monkeypatch,
-                      [[first, second], [first, second], [second], []])
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    monkeypatch.setattr(window_module, "score_at", lambda *a, **k: 0.2)
 
     window._toggle_cleaning()
     app.processEvents()
 
+    assert _wait_for(app, window, "Ищем второй объект")
+    assert _wait_for(app, window, "объекту №2")
     assert _wait_for(app, window, "Объект не найден")
     text = window._log.toPlainText()
-    assert "Выбираем объект №1" in text
-    assert "Выбираем объект №2" in text
+    assert "Ищем первый объект" in text
+    assert "объекту №1" in text
     window.close()
 
 
@@ -575,209 +576,47 @@ def test_a_popup_below_threshold_is_ignored(tmp_path, monkeypatch, app):
     window.close()
 
 
-def test_a_sharp_drop_in_score_reads_as_the_object_being_gone(
-        tmp_path, monkeypatch, app):
-    window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
-    target = TrashFind(TRASH_KINDS[0], 0.9, 50, 50, accepted=True)
-    _stub_environment(monkeypatch, window, [target])
-    # One round for the opening count, one to pick the target, then it's gone
-    _stub_scan_rounds(monkeypatch, [[target], [target], []])
-    monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    scores = iter([0.9, 0.85, 0.2])   # still there, then a sharp drop
-    monkeypatch.setattr(window_module, "score_at",
-                        lambda *a, **k: next(scores, 0.2))
-
-    window._toggle_cleaning()
-    app.processEvents()
-    assert window._running is True
-
-    assert _wait_for(app, window, "Удалили объект")
-    assert _wait_for(app, window, "Объект не найден")   # nothing left after it
-    assert window._running is False
-    window.close()
-
-
-def test_a_small_drop_that_settles_still_counts_as_gone(
-        tmp_path, monkeypatch, app):
-    """Some kinds barely look different clean vs dirty — this is the real
-    reading from one that never reaches _DROP_RATIO's halving at all, only
-    a ~5% drop that then holds. Three steady readings after the drop is
-    enough to call it gone, well short of the _STUCK_LOOKS defer."""
-    window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
-    target = TrashFind(TRASH_KINDS[0], 0.870, 50, 50, accepted=True)
-    _stub_environment(monkeypatch, window, [target])
-    _stub_scan_rounds(monkeypatch, [[target], [target], []])
-    monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    readings = iter([0.864, 0.861, 0.862, 0.863, 0.828, 0.828, 0.828])
-    monkeypatch.setattr(window_module, "score_at",
-                        lambda *a, **k: next(readings, 0.828))
-
-    window._toggle_cleaning()
-    app.processEvents()
-
-    assert _wait_for(app, window, "Удалили объект")
-    assert "второй круг" not in window._log.toPlainText()
-    window.close()
-
-
-def test_a_mark_that_never_changes_gets_one_retry_in_the_second_circle(
-        tmp_path, monkeypatch, app):
-    """Clicking it again right away would not help the game along, so a
-    reading that never moves is set aside for the second circle instead —
-    where, if it still never moves, it is finally left for good."""
-    window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
-    monkeypatch.setattr(window_module, "_STUCK_LOOKS", 2)
-    stuck = TrashFind(TRASH_KINDS[0], 0.9, 50, 50, accepted=True)
-    _stub_environment(monkeypatch, window, [stuck])
-    monkeypatch.setattr(window_module, "scan", lambda *a, **k: [stuck])
-    clicks = []
-    monkeypatch.setattr(window_module, "click_at",
-                        lambda hwnd, x, y: clicks.append((x, y)) or True)
-    monkeypatch.setattr(window_module, "score_at", lambda *a, **k: 0.9)
-
-    window._toggle_cleaning()
-    app.processEvents()
-
-    assert _wait_for(app, window, "второй круг")
-    assert _wait_for(app, window, "Объект не найден")
-    assert window._running is False
-    assert clicks == [(50, 50), (50, 50)]   # one try in each circle, no more
-    window.close()
-
-
-def test_a_score_that_wobbles_but_never_drops_still_gets_deferred(
-        tmp_path, monkeypatch, app):
-    """A real screen never holds perfectly still — a character walking near
-    an object it has not reached yet wobbles the reading up and down. That
-    must not be mistaken for progress and left to poll forever; only an
-    actual drop below the bar counts."""
-    window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
-    monkeypatch.setattr(window_module, "_STUCK_LOOKS", 4)
-    target = TrashFind(TRASH_KINDS[0], 0.9, 50, 50, accepted=True)
-    _stub_environment(monkeypatch, window, [target])
-    monkeypatch.setattr(window_module, "scan", lambda *a, **k: [target])
-    monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    # Never identical two reads running, never below the 0.45 drop bar either
-    wobble = iter([0.85, 0.73, 0.60, 0.72, 0.58, 0.61, 0.55, 0.63, 0.50, 0.59])
-    monkeypatch.setattr(window_module, "score_at",
-                        lambda *a, **k: next(wobble, 0.55))
-
-    window._toggle_cleaning()
-    app.processEvents()
-
-    assert _wait_for(app, window, "второй круг")
-    window.close()
-
-
-def test_a_refilling_spot_does_not_starve_a_stalled_object_of_its_turn(
-        tmp_path, monkeypatch, app):
-    """A spot that keeps scanning as freshly-found — real regrowth, or a
-    false match — must not let the main circle run forever and starve a
-    genuinely stalled object of ever reaching the second circle."""
-    window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
-    monkeypatch.setattr(window_module, "_STUCK_LOOKS", 2)
-    recurring = TrashFind(TRASH_KINDS[0], 0.9, 10, 10, accepted=True)
-    stuck     = TrashFind(TRASH_KINDS[1], 0.9, 500, 500, accepted=True)
-    _stub_environment(monkeypatch, window, [recurring, stuck])
-    # Always both there, as if whatever is at (10, 10) refills instantly
-    monkeypatch.setattr(window_module, "scan",
-                        lambda *a, **k: [recurring, stuck])
-    monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-
-    stuck_calls = {"n": 0}
-
-    def fake_score(kind, gray, x, y, origin):
-        if (x, y) == (500, 500):
-            stuck_calls["n"] += 1
-            return 0.9 if stuck_calls["n"] <= 2 else 0.1   # clears on retry
-        return 0.1   # the refilling spot clears every time it is tried
-
-    monkeypatch.setattr(window_module, "score_at", fake_score)
-
-    window._toggle_cleaning()
-    app.processEvents()
-
-    assert _wait_for(app, window, "второй круг")
-    assert _wait_for(app, window, "Объект не найден")
-    assert window._running is False
-    window.close()
-
-
-def test_the_second_circle_retries_only_what_stalled_in_the_first(
-        tmp_path, monkeypatch, app):
-    """A stalled object does not block the rest of the main circle, and it
-    gets exactly one more try once that circle is done — which this time
-    is enough for it to clear."""
-    window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
-    monkeypatch.setattr(window_module, "_STUCK_LOOKS", 2)
-    stuck = TrashFind(TRASH_KINDS[0], 0.9, 10, 10, accepted=True)
-    real  = TrashFind(TRASH_KINDS[1], 0.9, 200, 20, accepted=True)
-    _stub_environment(monkeypatch, window, [stuck, real])
-    state = {"real_cleared": False}
-
-    def fake_scan(*a, **k):
-        items = [stuck]
-        if not state["real_cleared"]:
-            items.append(real)
-        return items
-
-    monkeypatch.setattr(window_module, "scan", fake_scan)
-    clicks = []
-    monkeypatch.setattr(window_module, "click_at",
-                        lambda hwnd, x, y: clicks.append((x, y)) or True)
-
-    stuck_calls = {"n": 0}
-
-    def fake_score(kind, gray, x, y, origin):
-        if (x, y) == (10, 10):
-            stuck_calls["n"] += 1
-            return 0.9 if stuck_calls["n"] <= 2 else 0.1   # clears on retry
-        state["real_cleared"] = True
-        return 0.1                                          # `real` clears at once
-
-    monkeypatch.setattr(window_module, "score_at", fake_score)
-
-    window._toggle_cleaning()
-    app.processEvents()
-
-    assert _wait_for(app, window, "второй круг")
-    assert _wait_for(app, window, "Объект не найден")
-    assert window._running is False
-    # `stuck` clicked once in the main circle, once more in the second;
-    # `real` clicked once, in between, without waiting on `stuck` first
-    assert clicks == [(10, 10), (200, 20), (10, 10)]
-    window.close()
-
-
 def test_after_one_object_the_next_leftmost_one_is_taken(
         tmp_path, monkeypatch, app):
     """The whole point of the loop: one done, the next is picked up on its
-    own, in the same left-to-right order, without anyone asking again."""
+    own — with nowhere to measure from yet, the very first pick is the
+    leftmost one."""
     window, _config = _window(tmp_path, monkeypatch)
-    monkeypatch.setattr(window_module, "_POLL_MS", 1)
     first  = TrashFind(TRASH_KINDS[0], 0.9, 50, 50, accepted=True)
     second = TrashFind(TRASH_KINDS[1], 0.9, 200, 20, accepted=True)
     _stub_environment(monkeypatch, window, [first, second])
-    # Opening count, pick `first`, `first` is gone so pick `second`, then none
-    _stub_scan_rounds(monkeypatch,
-                      [[first, second], [first, second], [second], []])
     clicks = []
     monkeypatch.setattr(window_module, "click_at",
                         lambda hwnd, x, y: clicks.append((x, y)) or True)
-    monkeypatch.setattr(window_module, "score_at", lambda *a, **k: 0.2)
 
     window._toggle_cleaning()
     app.processEvents()
 
     assert _wait_for(app, window, "Объект не найден")
-    assert window._running is False
     assert clicks == [(50, 50), (200, 20)]
+    window.close()
+
+
+def test_the_next_object_is_the_nearest_to_the_last_one_not_the_leftmost(
+        tmp_path, monkeypatch, app):
+    """A raster sweep would take the far one next, since it starts further
+    left — but it sits nowhere near where the character already is, and
+    the nearer one is only a little further right. Distance from the last
+    stop wins over which one is more to the left."""
+    window, _config = _window(tmp_path, monkeypatch)
+    first = TrashFind(TRASH_KINDS[0], 0.9, 100, 100, accepted=True)
+    far   = TrashFind(TRASH_KINDS[1], 0.9, 140, 900, accepted=True)   # x=140
+    near  = TrashFind(TRASH_KINDS[2], 0.9, 300, 110, accepted=True)   # x=300
+    _stub_environment(monkeypatch, window, [first, far, near])
+    clicks = []
+    monkeypatch.setattr(window_module, "click_at",
+                        lambda hwnd, x, y: clicks.append((x, y)) or True)
+
+    window._toggle_cleaning()
+    app.processEvents()
+
+    assert _wait_for(app, window, "Объект не найден")
+    assert clicks == [(100, 100), (300, 110), (140, 900)]
     window.close()
 
 
@@ -790,7 +629,6 @@ def test_the_object_gets_a_single_dot_of_its_own_colour(
              TrashFind(TRASH_KINDS[1], 0.9, 100, 500, accepted=True)]
     _stub_environment(monkeypatch, window, found)
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
-    monkeypatch.setattr(window_module, "score_at", lambda *a, **k: 0.9)
 
     window._toggle_cleaning()
     app.processEvents()
@@ -801,4 +639,99 @@ def test_the_object_gets_a_single_dot_of_its_own_colour(
     assert dots[0].colour == TRASH_KINDS[1].colour
     window._toggle_cleaning()
     assert window._markers._markers == []      # comes down when the run stops
+    window.close()
+
+
+# ── The butterfly hunt ────────────────────────────────────────────────────────
+
+def test_the_butterfly_hunt_starts_once_nothing_walkable_is_left(
+        tmp_path, monkeypatch, app):
+    """Once the bushes and beetles are done, the run does not stop — it
+    turns to butterflies instead and starts searching for them."""
+    window, _config = _window(tmp_path, monkeypatch)
+    window._garden_area = Area(score=0.9, left=0, top=0,
+                               width=1600, height=900)
+    monkeypatch.setattr(window._wm, "get_game_hwnd", lambda: 4242,
+                        raising=False)
+    monkeypatch.setattr(window_module.ScreenCapture, "get",
+                        classmethod(lambda cls: _FakeCapture()))
+    monkeypatch.setattr(window_module, "click_at", lambda *a: True)
+    monkeypatch.setattr(window_module, "scan", lambda *a, **k: [])
+
+    window._toggle_cleaning()
+    app.processEvents()
+
+    assert _wait_for(app, window, "Объект не найден")
+    assert _wait_for(app, window, "Начинаем ловить бабочек")
+    assert window._running is True
+    assert window._hunting is True
+    assert window._butterfly_timer is not None
+    window.close()
+
+
+def test_the_hunt_waits_for_a_trail_before_clicking_ahead_of_it(
+        tmp_path, monkeypatch, app):
+    """No click on the first sighting or the second — only once there is
+    enough of a trail (_HUNT_MIN_HISTORY points) to judge a direction
+    from, and even then not at the last point but one step past it, the
+    same way the trail itself had been moving."""
+    window, _config = _window(tmp_path, monkeypatch)
+    area = Area(score=0.9, left=0, top=0, width=1600, height=900)
+    window._garden_area = area
+    window._hunting = True
+    window._butterfly_timer = window_module.QTimer(window)   # search "active"
+
+    clock = iter([0.0, 0.4, 0.8])
+    monkeypatch.setattr(window_module.time, "monotonic", lambda: next(clock))
+    positions = iter([(500, 500), (510, 500), (520, 500)])   # moving right
+
+    def fake_scan(*a, kinds=None, **k):
+        x, y = next(positions)
+        return [TrashFind(BUTTERFLY, 0.9, x, y, accepted=True)]
+
+    monkeypatch.setattr(window_module, "scan", fake_scan)
+    clicks = []
+    monkeypatch.setattr(window_module, "click_at",
+                        lambda hwnd, x, y: clicks.append((x, y)) or True)
+    monkeypatch.setattr(window_module, "grab_window",
+                        lambda hwnd, region: np.zeros(
+                            (region["height"], region["width"], 3), np.uint8))
+
+    window._hunt_tick(4242, area)
+    assert clicks == []                       # first sighting — building the trail
+    window._hunt_tick(4242, area)
+    assert clicks == []                       # second — still not enough
+    window._hunt_tick(4242, area)
+
+    assert len(clicks) == 1
+    click_x, _click_y = clicks[0]
+    assert click_x > 520                      # ahead of the trail, not its last point
+    assert window._butterfly_timer is None    # search paused while this is watched
+    assert _wait_for(app, window, "Кликнули по бабочке")
+    window.close()
+
+
+def test_a_lost_trail_is_dropped_and_the_dot_cleared(
+        tmp_path, monkeypatch, app):
+    """A butterfly that stops matching — flew off, or just turned to an
+    angle none of the 26 templates catches — takes its dot and its trail
+    with it, so an old trail never gets stitched onto a new sighting."""
+    window, _config = _window(tmp_path, monkeypatch)
+    area = Area(score=0.9, left=0, top=0, width=1600, height=900)
+    window._garden_area = area
+    window._hunting = True
+    window._butterfly_timer = window_module.QTimer(window)
+
+    monkeypatch.setattr(
+        window_module, "scan",
+        lambda *a, **k: [TrashFind(BUTTERFLY, 0.9, 500, 500, accepted=True)])
+    window._hunt_tick(4242, area)
+    assert len(window._markers._markers) == 1
+    assert len(window._hunt_history) == 1
+
+    monkeypatch.setattr(window_module, "scan", lambda *a, **k: [])
+    window._hunt_tick(4242, area)
+
+    assert window._markers._markers == []
+    assert window._hunt_history == []
     window.close()
