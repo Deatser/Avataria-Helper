@@ -81,15 +81,33 @@ def test_the_gardener_row_shows_a_real_zero_and_the_time_left(
 
 
 def test_the_gardener_countdown_counts_down(tmp_path, monkeypatch, app):
+    from datetime import datetime
+
+    monkeypatch.chdir(tmp_path)
+    stats = StatsManager()
+    stats.data.gardener.clean_next_time = "1:02:03"
+    stats.data.gardener.clean_was_time = datetime.now().isoformat()
+    window, _config = _window(tmp_path, monkeypatch, app, stats)
+
+    assert window._next_tile.value in ("1:02:03", "1:02:02")   # tick skew
+    window.close()
+
+
+def test_the_gardener_countdown_catches_up_after_being_closed(
+        tmp_path, monkeypatch, app):
+    """The mod does not run while it's closed, so nothing decrements
+    clean_next_time by hand — the countdown has to be worked out from how
+    long ago clean_was_time was instead."""
     from datetime import datetime, timedelta
 
     monkeypatch.chdir(tmp_path)
     stats = StatsManager()
-    stats.data.gardener.clean_next_time = (
-        datetime.now() + timedelta(hours=1, minutes=2, seconds=3)).isoformat()
+    stats.data.gardener.clean_next_time = "1:00:00"
+    stats.data.gardener.clean_was_time = (
+        datetime.now() - timedelta(minutes=45)).isoformat()
     window, _config = _window(tmp_path, monkeypatch, app, stats)
 
-    assert window._next_tile.value in ("01:02:03", "01:02:02")   # tick skew
+    assert window._next_tile.value in ("0:15:00", "0:14:59")   # tick skew
     window.close()
 
 

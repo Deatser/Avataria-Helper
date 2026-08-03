@@ -13,8 +13,7 @@ import numpy as np
 
 from app.core.capture import ScreenCapture, grab_window
 from app.core.input_sender import click_at
-from app.core.stats import shown
-from app.core.template_match import best_match, load_template
+from app.core.template_match import TEMPLATES_DIR, best_match, load_template
 from app.ui import theme
 from app.ui.area_overlay import AreaOverlay
 from app.ui.marker_overlay import Marker, MarkerOverlay
@@ -27,6 +26,7 @@ from app.ui.widgets.nt_status_dot import NtStatusDot
 from app.ui.widgets.progress_board import ProgressBoard
 from modules.gardener.garden_area import Area, FIXED_AREA
 from modules.gardener.settings_panel import GardenerSettingsPanel
+from modules.gardener.timer_read import read_timer
 from modules.gardener.trash import BUTTERFLY, TRASH_KINDS, count_by_kind, scan
 
 _DEFAULT_W = 380
@@ -226,6 +226,14 @@ _HUNT_GIVE_UP_S = 20.0
 # these two run once, not several times a second, and can afford it.
 _WIDE_NEAR = 0.30
 
+# Locates clean_next_time on screen — see _run_next_shift_search below.
+_NEXTSHIFT_TEMPLATE = "gardener_nextshift_placeholder.png"
+
+# Below this the placeholder was not actually found — the "best" match is
+# just wherever in the game window happened to look least unlike it, and a
+# crop taken there is not the timer at all.
+_NEXTSHIFT_THRESHOLD = 0.90
+
 _POPUP_TEMPLATE = "button_close.png"
 
 # Calibrated once by hand (2026-08-03): the close button was found at
@@ -250,6 +258,26 @@ _POPUP_RECHECK_MS = 300
 _DONE_TEMPLATE   = "gardener_done.png"
 _DONE_THRESHOLD  = 0.85
 _DONE_CHECK_MS   = 1000
+
+# Re-entering the garden once it is done: Places, then Professions, then
+# Gardener — the same three taps a person would make — is what makes the
+# timer badge redraw, so "Поиск времени"'s own logic has a fresh one to
+# read once this chain finishes.
+_NAV_STEPS = [
+    ("button_places.png",   "Места"),
+    ("button_jobs.png",     "Профессии"),
+    ("button_gardener.png", "Садовник"),
+]
+_NAV_THRESHOLD      = 0.85
+_NAV_POLL_MS        = 400    # how often a step retries while its button is not yet on screen
+_NAV_TIMEOUT_S      = 15.0   # how long a single step waits before giving up
+_NAV_AFTER_CLICK_MS = 800    # time given to the game to start reacting to a click
+
+# The Gardener click is the odd one out: it does not just switch a panel,
+# it loads the whole location — the badge is not drawn yet at
+# _NAV_AFTER_CLICK_MS, which is what read a stale screen at 60% and landed
+# the crop somewhere wrong. Given the load its own, longer wait.
+_NAV_LOCATION_LOAD_MS = 5000
 
 
 class GardenerWindow(ModuleWindow):
@@ -560,17 +588,62 @@ class GardenerWindow(ModuleWindow):
         if score < _DONE_THRESHOLD:
             return
         self._stop_cleaning("Работа завершена")
-        # TEMPORARY — clean_next_time is not computed yet; %clean_next_time%
-        # is the project's own convention for "nothing filled in here yet"
-        # (see app/core/stats.shown), not a made-up placeholder of its own.
-        next_time = ""
         if self._stats is not None:
             self._stats.record_gardener_cleanup()
-            next_time = self._stats.data.gardener.clean_next_time
-        next_time = shown(next_time, "clean_next_time")
-        self._log_to_helper(
-            f"— Завершена уборка в саду, следующая уборка доступна через "
-            f"{next_time}")
+        self._log_to_helper("— Завершена уборка в саду, определяем время до следующей")
+        self._reenter_garden()
+
+    def _reenter_garden(self):
+        """Places, then Professions, then Gardener — see _NAV_STEPS. Once
+        the chain is through, the same read "Поиск времени" does is run on
+        its own, since re-entering is what makes the badge worth reading."""
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd:
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+        self._nav_step(hwnd, 0, time.monotonic())
+
+    def _nav_step(self, hwnd: int, step: int, started: float):
+        if step >= len(_NAV_STEPS):
+            self._run_next_shift_search()
+            return
+
+        filename, label = _NAV_STEPS[step]
+        template = load_template(filename)
+        if template is None:
+            self._log.add_log(f"Шаблон «{label}» не найден", level="error")
+            return
+
+        clicked = False
+        try:
+            frame = grab_window(hwnd)
+            rect = self._wm.window_rect_screen(hwnd)
+        except Exception:
+            frame, rect = None, None
+        if frame is not None and rect is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            score, (x, y) = best_match(gray, template)
+            if score >= _NAV_THRESHOLD:
+                th, tw = template.shape[:2]
+                ox, oy, _w, _h = rect
+                click_at(hwnd, ox + x + tw // 2, oy + y + th // 2)
+                clicked = True
+
+        if clicked:
+            next_step = step + 1
+            delay = (_NAV_LOCATION_LOAD_MS if next_step >= len(_NAV_STEPS)
+                     else _NAV_AFTER_CLICK_MS)
+            QTimer.singleShot(
+                delay,
+                lambda: self._nav_step(hwnd, next_step, time.monotonic()))
+            return
+
+        if time.monotonic() - started >= _NAV_TIMEOUT_S:
+            self._log.add_log(f"Не удалось найти «{label}» — переход прерван",
+                              level="error")
+            return
+        QTimer.singleShot(_NAV_POLL_MS,
+                          lambda: self._nav_step(hwnd, step, started))
 
     def _handle_next_object(self, hwnd: int, area: Area):
         """Look again, and take on whatever is nearest to wherever the last
@@ -1159,6 +1232,65 @@ class GardenerWindow(ModuleWindow):
 
         self._log_counts(count_by_kind(found))
         self._show_dots(found)      # the same dots a run would walk
+
+    def _run_next_shift_search(self):
+        """Where gardener_nextshift_placeholder.png is found on the whole
+        game screen — read into clean_next_time once it scores well
+        enough, run automatically once _reenter_garden finishes."""
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd:
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+        template = load_template(_NEXTSHIFT_TEMPLATE)
+        if template is None:
+            self._log.add_log("Шаблон не найден", level="error")
+            return
+        try:
+            frame = grab_window(hwnd)
+        except Exception as exc:
+            self._log.add_log(str(exc), level="error")
+            return
+        rect = self._wm.window_rect_screen(hwnd)
+        if rect is None:
+            self._log.add_log("Не удалось определить положение окна игры",
+                              level="error")
+            return
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        score, (x, y) = best_match(gray, template)
+        ox, oy, _w, _h = rect
+        th, tw = template.shape[:2]
+        abs_x, abs_y = ox + x, oy + y
+
+        self._log.add_log_segments(
+            [("Поиск времени — ", theme.TEXT_SECONDARY),
+             (f"({abs_x}, {abs_y})", theme.GD_OLIVE_SOFT),
+             (" — ", theme.TEXT_SECONDARY),
+             (f"{score * 100:.1f}%",
+              theme.GD_OLIVE_SOFT if score >= _NEXTSHIFT_THRESHOLD
+              else theme.ACCENT_RED)],
+            level="plain")
+        if score < _NEXTSHIFT_THRESHOLD:
+            # Too weak a match to trust the crop under it — reading a
+            # timer from the wrong spot on screen is worse than not
+            # reading one at all, so nothing below is saved or counted.
+            return
+
+        crop = frame[y:y + th, x:x + tw]
+        cv2.imwrite(str(TEMPLATES_DIR / "gardener_nextshift.png"), crop)
+
+        timer_text = read_timer(crop)
+        self._log.add_log_segments(
+            [("Распознанное время — ", theme.TEXT_SECONDARY),
+             (timer_text if timer_text else "не распознано",
+              theme.GD_OLIVE_SOFT if timer_text else theme.ACCENT_RED)],
+            level="plain")
+        if timer_text and self._stats is not None:
+            # Stamps clean_was_time too — whoever displays the countdown
+            # (the stats window) works out how much is actually left from
+            # wall-clock time elapsed since then, so nothing here needs to
+            # keep ticking it down by hand.
+            self._stats.set_gardener_next_time(timer_text)
 
     def _toggle_area_overlay(self):
         """TEMPORARY — a filled rectangle over exactly what gets scanned,

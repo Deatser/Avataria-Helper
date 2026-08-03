@@ -66,11 +66,14 @@ def test_the_shipped_file_has_every_field(tmp_path, monkeypatch):
     # The real stats.json, so a field added in code but forgotten in the file
     # is caught here rather than showing up as a silent placeholder.
     raw = json.loads(StatsManager.STATS_FILE.read_text(encoding="utf-8"))
-    assert set(raw) == {"player", "ava_dancers", "gardener"}
+    assert set(raw) == {"player", "ava_dancers", "gardener", "janitor"}
     assert set(raw["player"]) == {"player_id", "player_name",
                                   "registration_date"}
     assert set(raw["ava_dancers"]) == {"games_played", "gold_won", "silver_won"}
-    assert set(raw["gardener"]) == {"shifts_finished", "clean_next_time"}
+    assert set(raw["gardener"]) == {"shifts_finished", "clean_next_time",
+                                    "clean_was_time"}
+    assert set(raw["janitor"]) == {"shifts_finished", "clean_next_time",
+                                   "clean_was_time"}
 
 
 # ── Recording ───────────────────────────────────────────────────────────────

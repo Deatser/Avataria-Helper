@@ -1,11 +1,10 @@
 # app/ui/stats_window.py
 from __future__ import annotations
 
-from datetime import datetime
-
 from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QGridLayout
 from PySide6.QtCore import Qt, QTimer, Signal
 
+from app.core.duration import from_seconds
 from app.core.stats import shown
 from app.ui import theme
 from app.ui.module_window import ModuleWindow
@@ -20,21 +19,12 @@ _MIN_H = 420   # header + player rows + both games' tiles + hint + handle
 _COUNTDOWN_MS = 1000
 
 
-def _countdown_text(iso_value: str) -> str:
-    """A live HH:MM:SS to the moment the garden is cleanable again, or
-    "Доступна!" once that moment has passed — or if it was never set at
-    all, since no time recorded reads the same as no time left."""
-    if iso_value:
-        try:
-            remaining = int(
-                (datetime.fromisoformat(iso_value) - datetime.now())
-                .total_seconds())
-        except ValueError:
-            remaining = 0
-        if remaining > 0:
-            h, rem = divmod(remaining, 3600)
-            m, s = divmod(rem, 60)
-            return f"{h:02d}:{m:02d}:{s:02d}"
+def _countdown_text(remaining_seconds: int) -> str:
+    """The live H:MM:SS still left, worked out from wall-clock time — so
+    it reads correctly even after the mod was closed for a while, not
+    whatever was last written to disk — or "Доступна!" once it hits 0."""
+    if remaining_seconds > 0:
+        return from_seconds(remaining_seconds)
     return "Доступна!"
 
 
@@ -102,6 +92,10 @@ class StatsWindow(ModuleWindow):
 
         layout.addWidget(self._section_label("САДОВНИК", theme.GD_OLIVE))
         layout.addLayout(self._build_gardener_tiles())
+        layout.addSpacing(6)
+
+        layout.addWidget(self._section_label("УБОРЩИК", theme.JN_AMBER))
+        layout.addLayout(self._build_janitor_tiles())
         layout.addStretch()
 
         drag = NtDragHandle()
@@ -157,13 +151,30 @@ class StatsWindow(ModuleWindow):
         grid = QGridLayout()
         grid.setSpacing(theme.SPACING)
         self._cleanup_tile = StatTile("уборок сделано", accent=theme.GD_OLIVE)
-        self._next_tile    = StatTile("до новой уборки", accent=theme.GD_OLIVE)
+        self._next_tile    = StatTile("Новая смена", accent=theme.GD_OLIVE)
         grid.addWidget(self._cleanup_tile, 0, 0)
         grid.addWidget(self._next_tile, 0, 1, 1, 2)
         # Without this, an unspanned column and a pair a span shares do not
         # reliably end up in the 1:2 ratio their column counts imply — Qt
         # sizes each from its own widgets' hints first and only falls back
         # to stretch for what is left over, which read backwards here.
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        return grid
+
+    def _build_janitor_tiles(self) -> QGridLayout:
+        """Same layout as Садовник's own row — one square tile plus one
+        wide one, for the same reason: its own countdown, independent of
+        Садовник's."""
+        grid = QGridLayout()
+        grid.setSpacing(theme.SPACING)
+        self._janitor_cleanup_tile = StatTile("уборок сделано",
+                                              accent=theme.JN_AMBER)
+        self._janitor_next_tile    = StatTile("Новая смена",
+                                              accent=theme.JN_AMBER)
+        grid.addWidget(self._janitor_cleanup_tile, 0, 0)
+        grid.addWidget(self._janitor_next_tile, 0, 1, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
@@ -236,6 +247,7 @@ class StatsWindow(ModuleWindow):
         player   = self._stats.data.player
         ava      = self._stats.data.ava_dancers
         gardener = self._stats.data.gardener
+        janitor  = self._stats.data.janitor
 
         self._set_value(self._id_value,
                         shown(player.player_id, "player_id"))
@@ -249,11 +261,20 @@ class StatsWindow(ModuleWindow):
         self._silver_tile.set_value(str(ava.silver_won))
 
         self._cleanup_tile.set_value(str(gardener.shifts_finished))
+        self._janitor_cleanup_tile.set_value(str(janitor.shifts_finished))
         self._update_countdown()
 
     def _update_countdown(self):
-        clean_next_time = self._stats.data.gardener.clean_next_time
-        self._next_tile.set_value(_countdown_text(clean_next_time))
+        # sync_*_countdown, not *_remaining_seconds: this timer is the one
+        # place in the whole app that ticks once a second, so it is also
+        # the one place that writes the live value back to stats.json —
+        # see StatsManager.sync_gardener_countdown / sync_janitor_countdown.
+        # One timer, two independent countdowns — Уборщик's own cooldown
+        # never touches Садовник's.
+        self._next_tile.set_value(
+            _countdown_text(self._stats.sync_gardener_countdown()))
+        self._janitor_next_tile.set_value(
+            _countdown_text(self._stats.sync_janitor_countdown()))
 
     def _set_value(self, label: QLabel, text: str):
         """Unfilled values are marked, not hidden — that is the point of them."""
