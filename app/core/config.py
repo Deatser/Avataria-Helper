@@ -46,6 +46,14 @@ class GardenerConfig:
     y: int = 500
     width: int = 380
     height: int = 800
+    # The six per-kind debug buttons — off by default, since they are a
+    # troubleshooting tool rather than something a normal run needs.
+    show_kind_buttons: bool = False
+    # Once a way to read the game's own cooldown timer exists, this is what
+    # will let the bot switch to Садовник on its own the moment it runs
+    # out, wherever the avatar happens to be. Off until that switch-over
+    # exists.
+    auto_clean: bool = False
 
 
 @dataclass

@@ -20,9 +20,12 @@ class AreaOverlay(GameLayer):
     thing that swallows one of those clicks.
     """
 
-    def __init__(self, window_manager=None, reference=None):
+    def __init__(self, window_manager=None, reference=None,
+                fill: QColor = _FILL, border: QColor = _BORDER):
         super().__init__(window_manager)
         self._reference = reference
+        self._fill = fill
+        self._border = border
 
     def show_area(self, rect: QRect):
         self.setGeometry(rect)
@@ -38,7 +41,7 @@ class AreaOverlay(GameLayer):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), _FILL)
-        painter.setPen(_BORDER)
+        painter.fillRect(self.rect(), self._fill)
+        painter.setPen(self._border)
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
         painter.end()

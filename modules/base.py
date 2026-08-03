@@ -13,6 +13,12 @@ class ModuleBase(ABC):
     panel_slot: str  = "top"
 
     @abstractmethod
-    def create_window(self, config, save_fn, window_manager, parent_overlay=None):
-        """Instantiate and return the module's control window (ModuleWindow subclass)."""
+    def create_window(self, config, save_fn, window_manager, parent_overlay=None,
+                      stats=None):
+        """Instantiate and return the module's control window (ModuleWindow subclass).
+
+        `stats` is the shared StatsManager — optional because most modules
+        do not record anything yet, not because the ones that do should
+        each go find their own way to it.
+        """
         ...

@@ -8,5 +8,9 @@
         "games_played": 0,
         "gold_won": 0,
         "silver_won": 0
+    },
+    "gardener": {
+        "shifts_finished": 2,
+        "clean_next_time": ""
     }
 }

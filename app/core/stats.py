@@ -29,9 +29,18 @@ class AvaDancersStats:
 
 
 @dataclass
+class GardenerStats:
+    shifts_finished: int = 0
+    # When the garden next becomes cleanable — personal history, not a
+    # setting, so it lives here rather than in config.
+    clean_next_time: str = ""
+
+
+@dataclass
 class AppStats:
     player: PlayerStats = field(default_factory=PlayerStats)
     ava_dancers: AvaDancersStats = field(default_factory=AvaDancersStats)
+    gardener: GardenerStats = field(default_factory=GardenerStats)
 
 
 def shown(value, field_name: str) -> str:
@@ -67,4 +76,10 @@ class StatsManager:
         stats.games_played += 1
         stats.gold_won     += max(0, int(gold))
         stats.silver_won   += max(0, int(silver))
+        self.save()
+
+    def record_gardener_cleanup(self):
+        """One finished garden — the count Statistics shows next to
+        Садовник's own countdown."""
+        self.data.gardener.shifts_finished += 1
         self.save()

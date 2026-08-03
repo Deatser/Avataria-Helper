@@ -78,7 +78,18 @@ def _stub_environment(monkeypatch, window, found, hwnd=4242):
     monkeypatch.setattr(window_module.ScreenCapture, "get",
                         classmethod(lambda cls: _FakeCapture()))
     monkeypatch.setattr(window_module, "_WATCH_MS", 1)
-    monkeypatch.setattr(window_module, "_HUNT_MS", 1)
+    # The watch itself now judges stillness by real elapsed time, not a
+    # tick count, so a fast tick alone no longer makes it resolve fast —
+    # these need shrinking too, or a test would sit through 2.5 real
+    # seconds (0.75 for the final check) waiting for either to elapse.
+    monkeypatch.setattr(window_module, "_STILL_S", 0.001)
+    monkeypatch.setattr(window_module, "_FINAL_REJECT_S", 0.001)
+    # Not 1 ms: this one keeps firing for as long as hunting stays active
+    # after a test's own assertions are done with it, and a 1 ms repeat
+    # timer left running (however briefly, before teardown catches it)
+    # was enough event-loop churn to occasionally starve a later test's
+    # own _wait_for budget.
+    monkeypatch.setattr(window_module, "_HUNT_MS", 50)
     monkeypatch.setattr(window_module, "_CATCH_WATCH_MS", 1)
     frame_calls = {"n": 0}
 
@@ -119,9 +130,8 @@ def test_the_window_has_its_controls_and_a_log(tmp_path, monkeypatch, app):
     assert labels == ["▲", "☆", "×",                    # window chrome
                       "▶  Запустить бота по уборке",
                       "⚙  Настройки",
-                      "◎  Определить мусор",
-                      "▭  Определить игрока",
-                      *[k.singular for k in TRASH_KINDS],  # one button each
+                      *[k.singular for k in TRASH_KINDS],  # one button each,
+                                                            # hidden by default
                       "⌫"]                              # clears the log
     assert window._log is not None
     window.close()
@@ -152,6 +162,31 @@ def test_the_settings_sheet_opens_inside_the_window(tmp_path, monkeypatch, app):
 
     window._toggle_settings()
     assert not sheet.isVisible()
+    window.close()
+
+
+def test_the_kind_buttons_are_hidden_until_settings_turns_them_on(
+        tmp_path, monkeypatch, app):
+    """Off by default — a troubleshooting tool, not something a normal run
+    needs cluttering the window. The switch in Settings rolls the block
+    open (and back shut) rather than snapping it, hence the animation
+    rather than a plain setVisible."""
+    window, config = _window(tmp_path, monkeypatch)
+    assert config.data.gardener.show_kind_buttons is False
+    assert window._kind_buttons_box.maximumHeight() == 0
+
+    window._toggle_settings()
+    switch = window._settings._kind_switch
+    assert switch.isChecked() is False
+
+    switch.setChecked(True)
+    assert config.data.gardener.show_kind_buttons is True
+    assert window._kind_buttons_anim is not None
+    assert window._kind_buttons_anim.endValue() > 0
+
+    switch.setChecked(False)
+    assert config.data.gardener.show_kind_buttons is False
+    assert window._kind_buttons_anim.endValue() == 0
     window.close()
 
 
@@ -393,6 +428,36 @@ def test_the_start_button_flips_while_the_one_object_is_watched(
     window.close()
 
 
+def test_starting_a_run_tells_the_helper_log_too(tmp_path, monkeypatch, app):
+    """Not just the module's own log — the start of a run is worth a line
+    in the helper's shared log too, [Садовник] marking whose line it is,
+    so it is visible without the module even being open."""
+    class _FakeOverlay:
+        def __init__(self):
+            self.logged = []
+
+        def add_log_segments(self, segments, level="info"):
+            self.logged.append((segments, level))
+
+        def on_module_closed(self, name):
+            pass   # window.close() below expects this to exist
+
+    config = ConfigManager()
+    overlay = _FakeOverlay()
+    window = GardenerWindow(config.data.gardener, config.save, _WM(), overlay)
+    _stub_environment(monkeypatch, window, [])
+    monkeypatch.setattr(window_module, "click_at", lambda *a: True)
+
+    window._toggle_cleaning()
+    app.processEvents()
+
+    assert any(
+        segs[0] == ("[Садовник] ", theme.GD_OLIVE)
+        and "Запущена уборка" in segs[1][0]
+        for segs, _level in overlay.logged)
+    window.close()
+
+
 def test_an_empty_garden_moves_straight_to_the_butterfly_hunt(
         tmp_path, monkeypatch, app):
     """Nothing walkable does not stop the run any more — it means the
@@ -576,6 +641,54 @@ def test_a_popup_below_threshold_is_ignored(tmp_path, monkeypatch, app):
     window.close()
 
 
+# ── The "garden finished" detector ───────────────────────────────────────────
+
+def test_finishing_the_garden_counts_a_cleanup(tmp_path, monkeypatch, app):
+    """gardener_done.png showing up is not just a log line and a stopped
+    bot — it is also the one moment the completed-cleanups counter (shown
+    in the Statistics window) is allowed to move."""
+    from app.core.stats import StatsManager
+
+    monkeypatch.chdir(tmp_path)
+    config = ConfigManager()
+    stats  = StatsManager()
+    window = GardenerWindow(config.data.gardener, config.save, _WM(),
+                            stats=stats)
+    monkeypatch.setattr(window_module, "grab_window",
+                        lambda hwnd: np.zeros((20, 20, 3), np.uint8))
+    template = np.zeros((20, 20), np.uint8)
+    monkeypatch.setattr(window_module, "load_template", lambda name: template)
+    monkeypatch.setattr(window_module, "best_match",
+                        lambda scene, tmpl: (0.99, (0, 0)))
+
+    window._check_done(4242)
+
+    assert stats.data.gardener.shifts_finished == 1
+    window.close()
+
+
+def test_a_match_below_threshold_does_not_count_a_cleanup(
+        tmp_path, monkeypatch, app):
+    from app.core.stats import StatsManager
+
+    monkeypatch.chdir(tmp_path)
+    config = ConfigManager()
+    stats  = StatsManager()
+    window = GardenerWindow(config.data.gardener, config.save, _WM(),
+                            stats=stats)
+    monkeypatch.setattr(window_module, "grab_window",
+                        lambda hwnd: np.zeros((20, 20, 3), np.uint8))
+    template = np.zeros((20, 20), np.uint8)
+    monkeypatch.setattr(window_module, "load_template", lambda name: template)
+    monkeypatch.setattr(window_module, "best_match",
+                        lambda scene, tmpl: (0.10, (0, 0)))
+
+    window._check_done(4242)
+
+    assert stats.data.gardener.shifts_finished == 0
+    window.close()
+
+
 def test_after_one_object_the_next_leftmost_one_is_taken(
         tmp_path, monkeypatch, app):
     """The whole point of the loop: one done, the next is picked up on its
@@ -671,19 +784,24 @@ def test_the_butterfly_hunt_starts_once_nothing_walkable_is_left(
 
 def test_the_hunt_waits_for_a_trail_before_clicking_ahead_of_it(
         tmp_path, monkeypatch, app):
-    """No click on the first sighting or the second — only once there is
-    enough of a trail (_HUNT_MIN_HISTORY points) to judge a direction
-    from, and even then not at the last point but one step past it, the
-    same way the trail itself had been moving."""
+    """No click on the first sighting alone — only once there is enough
+    of a trail (_HUNT_MIN_HISTORY points) to judge a direction from, and
+    even then not at the last point but one step past it, the same way
+    the trail itself had been moving."""
     window, _config = _window(tmp_path, monkeypatch)
     area = Area(score=0.9, left=0, top=0, width=1600, height=900)
     window._garden_area = area
     window._hunting = True
     window._butterfly_timer = window_module.QTimer(window)   # search "active"
 
-    clock = iter([0.0, 0.4, 0.8])
-    monkeypatch.setattr(window_module.time, "monotonic", lambda: next(clock))
-    positions = iter([(500, 500), (510, 500), (520, 500)])   # moving right
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        clock["t"] += 0.2
+        return clock["t"]
+
+    monkeypatch.setattr(window_module.time, "monotonic", fake_monotonic)
+    positions = iter([(500, 500), (510, 500)])   # moving right
 
     def fake_scan(*a, kinds=None, **k):
         x, y = next(positions)
@@ -697,15 +815,13 @@ def test_the_hunt_waits_for_a_trail_before_clicking_ahead_of_it(
                         lambda hwnd, region: np.zeros(
                             (region["height"], region["width"], 3), np.uint8))
 
-    window._hunt_tick(4242, area)
-    assert clicks == []                       # first sighting — building the trail
-    window._hunt_tick(4242, area)
-    assert clicks == []                       # second — still not enough
-    window._hunt_tick(4242, area)
+    window._hunt_tick(4242, area)                       # wide search — first sighting
+    assert clicks == []                                  # still building the trail
+    window._hunt_track_tick(4242, area, 500, 500)        # localized — second, triggers it
 
     assert len(clicks) == 1
     click_x, _click_y = clicks[0]
-    assert click_x > 520                      # ahead of the trail, not its last point
+    assert click_x > 510                      # ahead of the trail, not its last point
     assert window._butterfly_timer is None    # search paused while this is watched
     assert _wait_for(app, window, "Кликнули по бабочке")
     window.close()

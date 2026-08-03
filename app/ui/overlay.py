@@ -197,6 +197,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             save_fn        = self.config.save,
             window_manager = self.wm,
             parent_overlay = self,
+            stats          = self.stats,
         )
         self._open_windows[name] = window
 
@@ -248,11 +249,11 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             return
 
         window = StatsWindow(
-            config         = self.config.data.stats_window,
-            save_fn        = self.config.save,
-            stats          = self.stats,
-            window_manager = self.wm,
-            overlay        = self,
+            config          = self.config.data.stats_window,
+            save_fn         = self.config.save,
+            stats           = self.stats,
+            window_manager  = self.wm,
+            overlay         = self,
         )
         window.closed.connect(self._on_stats_closed)
         # Attach before the first show, same rule as the module windows —

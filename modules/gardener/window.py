@@ -1,17 +1,19 @@
 # modules/gardener/window.py
 from __future__ import annotations
 
-from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel
+from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QWidget
 from datetime import datetime
 import time
 
-from PySide6.QtCore import Qt, QRect, QTimer
+from PySide6.QtCore import Qt, QRect, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QColor
 
 import cv2
 import numpy as np
 
 from app.core.capture import ScreenCapture, grab_window
 from app.core.input_sender import click_at
+from app.core.stats import shown
 from app.core.template_match import best_match, load_template
 from app.ui import theme
 from app.ui.area_overlay import AreaOverlay
@@ -98,22 +100,30 @@ def _brace(row: int, total: int) -> str:
 
 
 def _extrapolate(history: list[tuple[float, int, int]]) -> tuple[int, int]:
-    """Where a butterfly is heading, judged from as much of its recent
-    trail as there has been time to collect. Velocity comes from the
-    oldest and newest points in the trail — the longer that span, the
-    less a single noisy reading can throw it off — but the prediction
-    itself only reaches one more step past the last point, the same gap
-    as between the last two looks, since that is roughly how far off a
-    click actually landing is.
+    """Where a butterfly is heading, judged from its whole recent trail
+    at once rather than just its two ends: a least-squares fit through
+    every point gives velocity less say to any one noisy reading than a
+    plain "first to last" secant would, which matters more the shorter
+    and jumpier the trail gets. The prediction itself still only reaches
+    one more step past the last point, the same gap as between the last
+    two looks, since that is roughly how far off a click actually
+    landing is.
     """
     t_last, x_last, y_last = history[-1]
-    t_first, x_first, y_first = history[0]
-    span = t_last - t_first
-    if span <= 0:
+    if len(history) < 2:
         return x_last, y_last
     lead = t_last - history[-2][0]
-    vx = (x_last - x_first) / span
-    vy = (y_last - y_first) / span
+
+    n = len(history)
+    t_mean = sum(t for t, _, _ in history) / n
+    denom = sum((t - t_mean) ** 2 for t, _, _ in history)
+    if denom <= 0:
+        return x_last, y_last
+
+    x_mean = sum(x for _, x, _ in history) / n
+    y_mean = sum(y for _, _, y in history) / n
+    vx = sum((t - t_mean) * (x - x_mean) for t, x, _ in history) / denom
+    vy = sum((t - t_mean) * (y - y_mean) for t, _, y in history) / denom
     return int(x_last + vx * lead), int(y_last + vy * lead)
 
 
@@ -123,19 +133,50 @@ def _clamp(value: int, origin: int, span: int) -> int:
     return max(origin, min(origin + span - 1, value))
 
 
+def _track_box(x0: int, y0: int) -> QRect:
+    """The _HUNT_TRACK_BOX square centred on a point — what gets both
+    shown on screen and, via _track_region, actually searched."""
+    half = _HUNT_TRACK_BOX // 2
+    return QRect(x0 - half, y0 - half, _HUNT_TRACK_BOX, _HUNT_TRACK_BOX)
+
+
+def _track_region(area: Area, x0: int, y0: int) -> dict:
+    """The same box _track_box shows, clipped to the garden itself and
+    turned into the shape scan() wants — searching only this instead of
+    the whole area is what lets the trail be sampled fast enough to mean
+    anything by the time a click actually lands."""
+    box = _track_box(x0, y0)
+    left   = max(area.left, box.left())
+    top    = max(area.top, box.top())
+    right  = min(area.left + area.width, box.right() + 1)
+    bottom = min(area.top + area.height, box.bottom() + 1)
+    return {"left": left, "top": top,
+           "width": max(1, right - left), "height": max(1, bottom - top)}
+
+
 _START_TEXT = "▶  Запустить бота по уборке"
 _STOP_TEXT  = "■  Выключить бота по уборке"
 
 # A score is never read after a click — the walk itself is the
-# confirmation. One look a second, for as long as it takes, watching for
-# the screen to hold still for _STILL_TICKS seconds running. A single
-# noisy dip is not enough to end the wait, only a real streak of them —
-# a walking character never produces that many quiet readings in a row,
-# so nothing short of an actual stop or an actual fake ever reaches it.
-# _TRACK_MOVE_PCT (defined above) is the same line the manual "Определить
-# игрока" check uses to call something movement.
-_WATCH_MS    = 1000
-_STILL_TICKS = 5
+# confirmation. A look twice a second, for as long as it takes, watching
+# for the screen to hold still. A single noisy dip is not enough to end
+# the wait, only a real stretch of stillness — a walking character never
+# holds still that long on its own, so nothing short of an actual stop or
+# an actual fake ever reaches it. _TRACK_MOVE_PCT (defined above) is the
+# same line the manual "Определить игрока" check uses to call something
+# movement.
+_WATCH_MS = 500
+
+# How long the stillness has to hold before it is believed — a real stop,
+# once the character has actually set off, always waits this long
+# (_STILL_S). A fake that never moved at all is judged much faster during
+# the final check specifically (_FINAL_REJECT_S): by then every real pick
+# has already had its full, patient look during the main pass, so a
+# leftover near miss that never budges is far more likely to just be
+# noise, and there is no reason to make the whole check sit through 2.5
+# seconds of confirming that hundreds of times over.
+_STILL_S        = 2.5
+_FINAL_REJECT_S = 0.75
 
 # A drop counts as the object being gone once its score has at least halved
 # from what it was when found — used only by the popup closer now that
@@ -143,26 +184,47 @@ _STILL_TICKS = 5
 _DROP_RATIO = 0.5
 
 # TEMPORARY — the click lands, but nothing is done yet with whether it
-# actually caught anything. Full-garden, 26-template searches many times
-# a second were too slow to keep up with themselves, so this is a
-# compromise: faster than once a second, not so fast it lags again.
+# actually caught anything. Full-garden, 26-template searches are too
+# slow to run more than a few times a second, so this — the wide, "is
+# anything at all here" search — only ever runs while nothing has been
+# spotted yet.
 _HUNT_MS = 400
 
-# A butterfly is never where it was first seen by the time a click could
-# reach it. Rather than one fresh close-up look after the fact, every
-# search tick that finds one is kept as a trail; once there is enough of
-# a trail to judge a direction from (_HUNT_MIN_HISTORY points, capped at
-# _HUNT_HISTORY so an old trail never outweighs a fresh one), the click
-# goes to where that trail says it is heading, not where it already was.
-_HUNT_HISTORY     = 4
-_HUNT_MIN_HISTORY = 3
+# The moment something is spotted, tracking switches to a small box
+# around it (_HUNT_TRACK_BOX, shown on screen and searched via
+# _track_region) instead of the whole garden — small enough, and cheap
+# enough, to check every _HUNT_TRACK_MS rather than every _HUNT_MS, which
+# is what actually closes the gap between a sighting and a click landing
+# somewhere still true. _HUNT_MIN_HISTORY trail points (the first from
+# the wide search, the rest from tracking) is enough to judge a direction
+# from before a click goes out, aimed ahead of the trail rather than at
+# it. Named apart from the unrelated _TRACK_MS above — that one is the
+# manual "Определить игрока" screen-diff check.
+_HUNT_TRACK_MS    = 60
+_HUNT_TRACK_BOX   = 50
+_HUNT_MIN_HISTORY = 2
 
 # How long a click on a butterfly is given before it is judged one way or
-# the other — its own clock, separate from litter's _WATCH_MS/_STILL_TICKS,
+# the other — its own clock, separate from litter's _WATCH_MS/_STILL_S,
 # since a butterfly that got away is not worth watching for as long as a
 # bush might be worth waiting on.
 _CATCH_WATCH_MS    = 500
 _CATCH_STILL_TICKS = 3
+
+# A click landing near a butterfly is not the same as catching it — so
+# rather than declare victory after any one chase, the hunt keeps going
+# until the search itself has turned up nothing at all for this long.
+# Long enough that one flying out of frame for a few ticks is not
+# mistaken for none being left.
+_HUNT_GIVE_UP_S = 20.0
+
+# How far below a kind's own bar a match is still worth showing as a near
+# miss — used by the final check and the per-kind debug buttons, both of
+# which want a wide window to judge a threshold by. Lower than trash.py's
+# own NEAR_THRESHOLD on purpose: that one is a floor the fast-repeating
+# butterfly hunt also scans at, where a wide window means a slow one:
+# these two run once, not several times a second, and can afford it.
+_WIDE_NEAR = 0.30
 
 _POPUP_TEMPLATE = "button_close.png"
 
@@ -179,6 +241,16 @@ _POPUP_THRESHOLD = 0.85
 # How long to give the game to draw the popup gone before checking again.
 _POPUP_RECHECK_MS = 300
 
+# "Здесь вся работа завершена" — the game's own sign that the garden has
+# nothing left at all. Checked across the whole game window, not just the
+# garden rectangle, since there is no telling in advance where the game
+# draws it; on its own clock, independent of whatever the run is doing at
+# that moment (cleaning, hunting, the final check), since it can turn up
+# during any of them.
+_DONE_TEMPLATE   = "gardener_done.png"
+_DONE_THRESHOLD  = 0.85
+_DONE_CHECK_MS   = 1000
+
 
 class GardenerWindow(ModuleWindow):
     """Садовник — the shell only: header, frame and the usual window habits.
@@ -194,25 +266,40 @@ class GardenerWindow(ModuleWindow):
     _RESIZE_MIN_W = _MIN_W
     _RESIZE_MIN_H = _MIN_H
 
-    def __init__(self, config, save_fn, window_manager, parent_overlay=None):
+    def __init__(self, config, save_fn, window_manager, parent_overlay=None,
+                stats=None):
         super().__init__("Садовник", config, save_fn, parent_overlay)
         self._wm = window_manager
+        self._stats = stats
         self._running  = False
         self._settings: GardenerSettingsPanel | None = None
+        self._kind_buttons_anim: QPropertyAnimation | None = None
         # The marks the gardener walks: a dot on each piece of litter, in the
         # colour of its kind, over the game window and nowhere else.
         self._markers  = MarkerOverlay(window_manager, reference=self)
         # TEMPORARY — a debug toggle to check the scanned rectangle against
         # the game by eye; take it back out once that is confirmed good.
         self._area_overlay = AreaOverlay(window_manager, reference=self)
+        # The box the butterfly hunt is actually searching right now, once
+        # it has one — shown so the search itself can be watched, not
+        # just its result.
+        _hunt_fill = QColor(BUTTERFLY.colour); _hunt_fill.setAlpha(60)
+        _hunt_border = QColor(BUTTERFLY.colour); _hunt_border.setAlpha(220)
+        self._hunt_box = AreaOverlay(window_manager, reference=self,
+                                     fill=_hunt_fill, border=_hunt_border)
         # The garden's own rectangle — calibrated by hand once and fixed;
         # every grab is pointed at this instead of the whole screen.
         self._garden_area: Area = FIXED_AREA
         self._move_timer: QTimer | None = None
+        self._done_timer: QTimer | None = None
         self._butterfly_timer: QTimer | None = None
         self._catch_timer: QTimer | None = None
         self._hunting = False   # true across both the search and watch halves
         self._hunt_history: list[tuple[float, int, int]] = []
+        self._hunt_last_seen = 0.0   # when the search last found one at all
+        # The final pass's own worklist — every near miss left over once
+        # the butterflies are done, best score first.
+        self._final_queue: list = []
         self._track_timer: QTimer | None = None
         self._track_prev_frame = None
         self._track_moving = False
@@ -265,17 +352,14 @@ class GardenerWindow(ModuleWindow):
         settings_btn.clicked.connect(self._toggle_settings)
         layout.addWidget(settings_btn)
 
-        scan_btn = NtButton("◎  Определить мусор", accent=theme.GD_OLIVE_SOFT,
-                            upper=False)
-        scan_btn.clicked.connect(self._scan_trash)
-        layout.addWidget(scan_btn)
-
-        player_btn = NtButton("▭  Определить игрока", accent=theme.ACCENT_AMBER,
-                              upper=False)
-        player_btn.clicked.connect(self._toggle_area_overlay)
-        layout.addWidget(player_btn)
-
-        layout.addLayout(self._build_kind_buttons())
+        # Off by default, and rolled open or shut from Settings — a
+        # troubleshooting tool, not something a normal run needs to see.
+        self._kind_buttons_box = QWidget(self._panel)
+        self._kind_buttons_box.setLayout(self._build_kind_buttons())
+        self._kind_buttons_box.setMaximumHeight(
+            self._kind_buttons_box.sizeHint().height()
+            if getattr(self.config, "show_kind_buttons", False) else 0)
+        layout.addWidget(self._kind_buttons_box)
 
         self._board = ProgressBoard(self._panel)
         layout.addWidget(self._board)
@@ -290,8 +374,10 @@ class GardenerWindow(ModuleWindow):
     def _build_kind_buttons(self) -> QVBoxLayout:
         """One small button per kind, two rows of three — each one a look
         at just that kind: where it is, how well it matched, and the bar
-        it is being judged against right now."""
+        it is being judged against right now. Hidden behind the Settings
+        switch by default."""
         block = QVBoxLayout()
+        block.setContentsMargins(0, 0, 0, 0)
         block.setSpacing(theme.SPACING)
         rows = [QHBoxLayout(), QHBoxLayout()]
         for row in rows:
@@ -311,6 +397,19 @@ class GardenerWindow(ModuleWindow):
         for row in rows:
             block.addLayout(row)
         return block
+
+    def _set_kind_buttons_visible(self, enabled: bool):
+        """Rolled open or shut, not just shown or hidden — a switch flipped
+        in Settings should read as something happening, not a jump cut."""
+        box = self._kind_buttons_box
+        target = box.sizeHint().height() if enabled else 0
+        anim = QPropertyAnimation(box, b"maximumHeight", self)
+        anim.setDuration(220)
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        anim.setStartValue(box.maximumHeight())
+        anim.setEndValue(target)
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._kind_buttons_anim = anim   # keep it alive until it finishes
 
     def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
@@ -423,6 +522,7 @@ class GardenerWindow(ModuleWindow):
 
         counts = count_by_kind(found)
         self._log_start(True)
+        self._log_to_helper("— Запущена уборка в саду")
 
         self._running = True
         self._handled = set()
@@ -439,7 +539,38 @@ class GardenerWindow(ModuleWindow):
              for k in TRASH_KINDS])
         self._make_room_for_board()
 
+        self._done_timer = QTimer(self)
+        self._done_timer.timeout.connect(lambda: self._check_done(hwnd))
+        self._done_timer.start(_DONE_CHECK_MS)
+
         self._handle_next_object(hwnd, area)
+
+    def _check_done(self, hwnd: int):
+        """The game's own word that the garden is finished — checked on
+        its own clock the whole time the run is going, whatever else it
+        happens to be doing at that moment."""
+        try:
+            gray = cv2.cvtColor(grab_window(hwnd), cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return   # a dropped frame here is not worth stopping the run over
+        template = load_template(_DONE_TEMPLATE)
+        if template is None:
+            return
+        score, _loc = best_match(gray, template)
+        if score < _DONE_THRESHOLD:
+            return
+        self._stop_cleaning("Работа завершена")
+        # TEMPORARY — clean_next_time is not computed yet; %clean_next_time%
+        # is the project's own convention for "nothing filled in here yet"
+        # (see app/core/stats.shown), not a made-up placeholder of its own.
+        next_time = ""
+        if self._stats is not None:
+            self._stats.record_gardener_cleanup()
+            next_time = self._stats.data.gardener.clean_next_time
+        next_time = shown(next_time, "clean_next_time")
+        self._log_to_helper(
+            f"— Завершена уборка в саду, следующая уборка доступна через "
+            f"{next_time}")
 
     def _handle_next_object(self, hwnd: int, area: Area):
         """Look again, and take on whatever is nearest to wherever the last
@@ -467,7 +598,8 @@ class GardenerWindow(ModuleWindow):
 
         self._log.add_log("Идём убирать объект", level="plain")
         click_at(hwnd, target.x, target.y)
-        self._start_watching(target, area, hwnd)
+        self._start_watching(target, area, hwnd,
+                             lambda: self._handle_next_object(hwnd, area))
 
     def _pick_target(self, accepted: list):
         """Nearest to wherever the last object was, not strictly left to
@@ -502,6 +634,17 @@ class GardenerWindow(ModuleWindow):
               theme.ACCENT_GREEN if ok else theme.ACCENT_RED)],
             level="plain")
 
+    def _log_to_helper(self, message: str):
+        """Only the events worth knowing about without the module even
+        being open — start and finish, not every object along the way —
+        go to the helper's own log, [Садовник] marking whose line it is."""
+        if not self.parent_overlay:
+            return
+        self.parent_overlay.add_log_segments(
+            [("[Садовник] ", theme.GD_OLIVE),
+             (message, theme.TEXT_SECONDARY)],
+            level="plain")
+
     def _log_search_result(self, found: bool, number: int):
         self._log.add_log_segments(
             [(f"Ищем {_ordinal_ru(number)} объект — ", theme.TEXT_SECONDARY),
@@ -509,9 +652,17 @@ class GardenerWindow(ModuleWindow):
               theme.ACCENT_GREEN if found else theme.ACCENT_RED)],
             level="plain")
 
-    def _start_watching(self, target, area: Area, hwnd: int):
+    def _start_watching(self, target, area: Area, hwnd: int, on_done,
+                        reject_s: float = _STILL_S):
         """A baseline frame, right as the click lands — nothing is compared
-        to it yet, since it is the only frame there is so far."""
+        to it yet, since it is the only frame there is so far. `on_done` is
+        called once this target is resolved, whichever way — the main loop
+        moves on to its next nearest pick; the final check moves on to the
+        next one in its own, separately ordered queue. `reject_s` is how
+        long standing still with no movement at all has to hold before
+        it's called a fake — the final check uses a much shorter one of
+        its own; everything else keeps the same wait either way.
+        """
         try:
             frame = grab_window(hwnd, area.region)
         except Exception as exc:
@@ -522,21 +673,24 @@ class GardenerWindow(ModuleWindow):
         self._move_timer = QTimer(self)
         self._move_timer.setSingleShot(True)
         self._move_timer.timeout.connect(
-            lambda: self._watch_target(target, area, hwnd, frame, 0, False))
+            lambda: self._watch_target(
+                target, area, hwnd, frame, None, False, on_done, reject_s))
         self._move_timer.start(_WATCH_MS)
 
     def _watch_target(self, target, area: Area, hwnd: int, prev_frame,
-                      still_streak: int, did_move: bool):
-        """One look a second, for as long as it takes, until the screen has
-        held still for _STILL_TICKS seconds running.
+                      still_since: float | None, did_move: bool, on_done,
+                      reject_s: float):
+        """One look at a time, for as long as it takes, until the screen
+        has held still long enough to believe it: _STILL_S once it has
+        actually moved, `reject_s` if it never did at all.
 
-        Whether it ever moved before that streak began decides what the
-        stillness means: litter that was never real never sends the
-        character anywhere, so a streak with no movement in it at all is a
-        misdetection; litter that did gets walked to and then stood over,
-        so a streak that follows real movement is the character having
-        arrived. Any movement during the streak resets it — a single
-        quiet reading is never enough on its own, in either direction.
+        Whether it ever moved before the stillness began decides what
+        that stillness means: litter that was never real never sends the
+        character anywhere, so holding still throughout is a misdetection;
+        litter that did gets walked to and then stood over, so holding
+        still only after moving is the character having arrived. Any
+        movement resets the clock — a single quiet reading is never
+        enough on its own, in either direction.
         """
         if not self._running:
             return      # stopped mid-watch
@@ -556,27 +710,30 @@ class GardenerWindow(ModuleWindow):
                 frame.astype(np.int16) - prev_frame.astype(np.int16)).mean()) \
                 / 255 * 100
 
+        now = time.monotonic()
         if changed >= _TRACK_MOVE_PCT:
             did_move = True
-            still_streak = 0
+            still_since = None
         else:
-            still_streak += 1
-
-        if still_streak >= _STILL_TICKS:
-            if did_move:
-                self._finish_target(target, area, hwnd)
-            else:
-                self._reject_target(target, area, hwnd)
-            return
+            if still_since is None:
+                still_since = now
+            threshold = _STILL_S if did_move else reject_s
+            if now - still_since >= threshold:
+                if did_move:
+                    self._finish_target(target, on_done)
+                else:
+                    self._reject_target(target, on_done)
+                return
 
         self._move_timer = QTimer(self)
         self._move_timer.setSingleShot(True)
         self._move_timer.timeout.connect(
             lambda: self._watch_target(
-                target, area, hwnd, frame, still_streak, did_move))
+                target, area, hwnd, frame, still_since, did_move, on_done,
+                reject_s))
         self._move_timer.start(_WATCH_MS)
 
-    def _finish_target(self, target, area: Area, hwnd: int):
+    def _finish_target(self, target, on_done):
         self._log.add_log_segments(
             [("Игрок подошёл к объекту №", theme.TEXT_SECONDARY),
              (str(self._object_number), theme.GD_OLIVE),
@@ -584,9 +741,9 @@ class GardenerWindow(ModuleWindow):
             level="plain")
         self._log.add_log("Объект убран", level="plain")
         self._credit(target.kind.key)
-        QTimer.singleShot(0, lambda: self._handle_next_object(hwnd, area))
+        QTimer.singleShot(0, on_done)
 
-    def _reject_target(self, target, area: Area, hwnd: int):
+    def _reject_target(self, target, on_done):
         """The click landed, but the character never set off toward it —
         read as a misdetection rather than real litter, so it is dropped
         for good rather than tried again for the same nothing."""
@@ -594,11 +751,11 @@ class GardenerWindow(ModuleWindow):
             [("Игрок стоит — ", theme.TEXT_SECONDARY),
              ("объект фейк", theme.ACCENT_RED)],
             level="plain")
-        self._write_off(target, hwnd, area)
+        self._write_off(target, on_done)
 
-    def _write_off(self, target, hwnd: int, area: Area):
+    def _write_off(self, target, on_done):
         self._board.dec_total(target.kind.key)
-        QTimer.singleShot(0, lambda: self._handle_next_object(hwnd, area))
+        QTimer.singleShot(0, on_done)
 
     def _toggle_butterfly_hunt(self):
         """The "Бабочка" button: the same hunt the run turns to once
@@ -635,22 +792,33 @@ class GardenerWindow(ModuleWindow):
             self._catch_timer = None
         self._hunt_history.clear()
         self._markers.clear()
+        self._hunt_box.clear()
 
     def _resume_search(self, hwnd: int, area: Area):
         """Only while nothing is already being clicked and watched —
         search and watch never run at once, so a found butterfly is never
         clicked twice over. The trail from whatever was being chased
-        before does not belong to whatever turns up next."""
+        before does not belong to whatever turns up next, and the
+        "nothing found in a while" clock starts fresh from here too — a
+        chase just happened, so a butterfly being around is not in doubt
+        yet.
+        """
         self._hunt_history.clear()
+        self._hunt_last_seen = time.monotonic()
+        self._hunt_box.clear()
         self._butterfly_timer = QTimer(self)
         self._butterfly_timer.timeout.connect(lambda: self._hunt_tick(hwnd, area))
         self._butterfly_timer.start(_HUNT_MS)
 
     def _hunt_tick(self, hwnd: int, area: Area):
-        """Every tick a butterfly is seen adds to its trail rather than
-        acting right away — only once that trail is long enough to judge
-        a direction from does a click actually go out, aimed ahead of the
-        trail rather than at it.
+        """The whole garden, looking for anything at all — slow going
+        with 26 templates over that much area, so this only ever runs
+        while nothing has been spotted yet. The moment something is,
+        _hunt_track_tick takes over: a small box around it, checked much
+        faster, since a fast, narrow look is what actually keeps a click
+        from landing behind where it already flew off to. A tick that
+        finds nothing at all is not itself a reason to stop — only
+        _HUNT_GIVE_UP_S seconds straight of that is.
         """
         try:
             found = scan(region=area.region, kinds=[BUTTERFLY])
@@ -660,15 +828,58 @@ class GardenerWindow(ModuleWindow):
         if not tracked:
             self._markers.clear()
             self._hunt_history.clear()
+            if time.monotonic() - self._hunt_last_seen >= _HUNT_GIVE_UP_S:
+                self._finish_hunt(hwnd, area)
             return
 
+        self._hunt_last_seen = time.monotonic()
         target = min(tracked, key=lambda item: item.x)   # leftmost of them
+        self._hunt_history = [(time.monotonic(), target.x, target.y)]
+        self._markers.show_markers(
+            [Marker(target.x, target.y, BUTTERFLY.colour, True)])
+        self._hunt_box.show_area(_track_box(target.x, target.y))
+
+        self._butterfly_timer.stop()
+        self._butterfly_timer = QTimer(self)
+        self._butterfly_timer.setSingleShot(True)
+        self._butterfly_timer.timeout.connect(
+            lambda: self._hunt_track_tick(hwnd, area, target.x, target.y))
+        self._butterfly_timer.start(_HUNT_TRACK_MS)
+
+    def _hunt_track_tick(self, hwnd: int, area: Area, last_x: int, last_y: int):
+        """A small box around wherever it was a moment ago, checked every
+        _HUNT_TRACK_MS — the trail this builds is both fresher and far
+        more frequent than the wide search could manage, which is what
+        makes the extrapolation from it actually land. Nothing left in
+        the box at all means it flew out of it entirely; worth a fresh,
+        wide look rather than guessing from a trail that is no longer
+        true.
+        """
+        region = _track_region(area, last_x, last_y)
+        try:
+            found = scan(region=region, kinds=[BUTTERFLY])
+        except Exception:
+            self._resume_search(hwnd, area)
+            return
+        tracked = [item for item in found if item.accepted]
+        if not tracked:
+            self._resume_search(hwnd, area)
+            return
+
+        self._hunt_last_seen = time.monotonic()
+        target = min(tracked, key=lambda item:
+                    (item.x - last_x) ** 2 + (item.y - last_y) ** 2)
         self._hunt_history.append((time.monotonic(), target.x, target.y))
-        del self._hunt_history[:-_HUNT_HISTORY]
+        self._hunt_box.show_area(_track_box(target.x, target.y))
 
         if len(self._hunt_history) < _HUNT_MIN_HISTORY:
             self._markers.show_markers(
                 [Marker(target.x, target.y, BUTTERFLY.colour, True)])
+            self._butterfly_timer = QTimer(self)
+            self._butterfly_timer.setSingleShot(True)
+            self._butterfly_timer.timeout.connect(
+                lambda: self._hunt_track_tick(hwnd, area, target.x, target.y))
+            self._butterfly_timer.start(_HUNT_TRACK_MS)
             return   # still building a trail — nothing to aim ahead of yet
 
         click_x, click_y = _extrapolate(self._hunt_history)
@@ -676,12 +887,79 @@ class GardenerWindow(ModuleWindow):
         click_y = _clamp(click_y, area.top, area.height)
         self._markers.show_markers(
             [Marker(click_x, click_y, BUTTERFLY.colour, True)])
+        self._hunt_box.clear()
 
         self._butterfly_timer.stop()
         self._butterfly_timer = None
         click_at(hwnd, click_x, click_y)
         self._log.add_log("Кликнули по бабочке", level="plain")
         self._start_catch_watch(hwnd, area)
+
+    def _finish_hunt(self, hwnd: int, area: Area):
+        if self._butterfly_timer is not None:
+            self._butterfly_timer.stop()
+            self._butterfly_timer = None
+        self._markers.clear()
+        self._hunt_box.clear()
+        self._log.add_log("Поймали всех бабочек", level="plain")
+        self._log.add_log("Начинаем последнюю проверку", level="plain")
+        self._start_final_check(hwnd, area)
+
+    def _start_final_check(self, hwnd: int, area: Area):
+        """One more pass, over everything the first pass would have had to
+        skip: litter that spawned partly hidden behind something else
+        never clears its own kind's bar, no matter how real it is. Best
+        score first, on the theory that the closest near misses are the
+        ones most likely to actually be litter rather than noise.
+        """
+        try:
+            found = scan(region=area.region, near=_WIDE_NEAR)
+        except Exception as exc:
+            self._log.add_log(str(exc), level="error")
+            return
+        self._final_queue = sorted(
+            (item for item in found
+             if item.kind.key != BUTTERFLY.key
+             and (item.kind.key, item.x, item.y) not in self._handled),
+            key=lambda item: -item.score)
+        self._show_final_markers()
+        self._handle_final_next(hwnd, area)
+
+    def _handle_final_next(self, hwnd: int, area: Area):
+        if not self._running:
+            return
+        if not self._final_queue:
+            self._markers.clear()
+            return   # TEMPORARY — what happens once this empties is next
+        target = self._final_queue.pop(0)
+        self._handled.add((target.kind.key, target.x, target.y))
+        self._object_number += 1
+        self._show_final_markers(current=target)
+
+        self._log.add_log_segments(
+            [("Проверяем невошедшую координату ", theme.TEXT_SECONDARY),
+             (f"({target.x}, {target.y})", theme.GD_OLIVE_SOFT),
+             (" — ", theme.TEXT_SECONDARY),
+             (f"{target.score * 100:.0f}%", theme.GD_OLIVE_SOFT),
+             (" (", theme.TEXT_SECONDARY),
+             (target.kind.singular, target.kind.colour),
+             (")", theme.TEXT_SECONDARY)],
+            level="plain")
+        click_at(hwnd, target.x, target.y)
+        self._start_watching(target, area, hwnd,
+                             lambda: self._handle_final_next(hwnd, area),
+                             reject_s=_FINAL_REJECT_S)
+
+    def _show_final_markers(self, current=None):
+        """Every near miss still waiting its turn, red and hollow like the
+        per-kind buttons already draw them — plus the one actually being
+        tried right now, picked out in white so it reads apart from the
+        rest of the pack at a glance."""
+        markers = [Marker(item.x, item.y, theme.ACCENT_RED, False)
+                  for item in self._final_queue]
+        if current is not None:
+            markers.append(Marker(current.x, current.y, theme.ACCENT_WHITE, True))
+        self._markers.show_markers(markers)
 
     def _start_catch_watch(self, hwnd: int, area: Area):
         try:
@@ -803,6 +1081,9 @@ class GardenerWindow(ModuleWindow):
         if self._move_timer is not None:
             self._move_timer.stop()
             self._move_timer = None
+        if self._done_timer is not None:
+            self._done_timer.stop()
+            self._done_timer = None
         if self._butterfly_timer is not None:
             self._butterfly_timer.stop()
             self._butterfly_timer = None
@@ -815,6 +1096,7 @@ class GardenerWindow(ModuleWindow):
         self._start_btn.set_active(False)
         self._status_dot.set_offline()
         self._markers.clear()      # the mark has been walked, or given up on
+        self._hunt_box.clear()
         if message:
             self._log.add_log(message, level="plain")
 
@@ -852,6 +1134,8 @@ class GardenerWindow(ModuleWindow):
         if self._settings is None:
             self._settings = GardenerSettingsPanel(self.config, self.save_fn,
                                                    self)
+            self._settings.kind_buttons_toggled.connect(
+                self._set_kind_buttons_visible)
         self._settings.toggle()
 
     # ── Trash detection ──────────────────────────────────────────────────────
@@ -953,7 +1237,7 @@ class GardenerWindow(ModuleWindow):
 
     def _run_kind_scan(self, kind):
         try:
-            found = scan(region=self._garden_area.region)
+            found = scan(region=self._garden_area.region, near=_WIDE_NEAR)
         except Exception as exc:
             self._log.add_log(str(exc), level="error")
             return
@@ -1044,6 +1328,9 @@ class GardenerWindow(ModuleWindow):
         if self._move_timer is not None:
             self._move_timer.stop()
             self._move_timer = None
+        if self._done_timer is not None:
+            self._done_timer.stop()
+            self._done_timer = None
         if self._butterfly_timer is not None:
             self._butterfly_timer.stop()
             self._butterfly_timer = None
@@ -1055,3 +1342,4 @@ class GardenerWindow(ModuleWindow):
             self._track_timer = None
         self._markers.clear()
         self._area_overlay.clear()
+        self._hunt_box.clear()
