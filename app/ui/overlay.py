@@ -214,6 +214,17 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self.add_log(f"Запуск мода {name}")
         self._set_module_active(name, True)
 
+    def own_windows(self) -> list[QWidget]:
+        """Every window the helper owns — this launcher bar, every open
+        module window, and Statistics if it is up. Anything wanting to grab
+        a clean frame of the game needs to know what of ours could be
+        sitting over it, and that is every one of these, not just itself.
+        """
+        windows: list[QWidget] = [self, *self._open_windows.values()]
+        if self._stats_window is not None:
+            windows.append(self._stats_window)
+        return windows
+
     def on_module_closed(self, module_name: str):
         self._open_windows.pop(module_name, None)
         self._set_module_active(module_name, False)

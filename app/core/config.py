@@ -57,6 +57,19 @@ class GardenerConfig:
 
 
 @dataclass
+class JanitorConfig:
+    favorite: bool = False
+    position_saved: bool = False
+    x: int = 420
+    y: int = 500
+    width: int = 380
+    height: int = 800
+    # Same two toggles Садовник's settings sheet has — see GardenerConfig.
+    show_kind_buttons: bool = False
+    auto_clean: bool = False
+
+
+@dataclass
 class StatsWindowConfig:
     """Geometry and autostart — the numbers themselves live in stats.json."""
     favorite: bool = False      # open together with the helper at startup
@@ -72,6 +85,7 @@ class AppConfig:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     ava_dancers: AvaDancersConfig = field(default_factory=AvaDancersConfig)
     gardener: GardenerConfig = field(default_factory=GardenerConfig)
+    janitor: JanitorConfig = field(default_factory=JanitorConfig)
     stats_window: StatsWindowConfig = field(default_factory=StatsWindowConfig)
 
 

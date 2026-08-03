@@ -5,9 +5,11 @@
 
 from modules.ava_dancers import AvaDancersModule
 from modules.gardener import GardenerModule
+from modules.janitor import JanitorModule
 
 MODULES = [
     AvaDancersModule,
     GardenerModule,
+    JanitorModule,
     # Add new modules here — one line each
 ]

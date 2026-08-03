@@ -65,6 +65,19 @@ GD_TEXT        = "#e4ecc9"
 GD_BORDER      = "#2f3d1a"
 GD_BORDER_DIM  = "#1c2510"
 
+# ── Amber (Уборщик module) ────────────────────────────────────────────────────
+# Warm hi-tech street café: dark wood decking, café-string amber light,
+# stone-cream text — the opposite register from the Olive greenhouse.
+JN_BG          = "#100b06"
+JN_SURFACE     = "#1c130b"
+JN_ELEVATED    = "#291c10"
+JN_AMBER       = "#e2a24a"   # the module accent — café string light
+JN_AMBER_SOFT  = "#f3cf94"
+JN_WOOD        = "#7a4f2a"
+JN_TEXT        = "#f1e4d2"
+JN_BORDER      = "#3a2716"
+JN_BORDER_DIM  = "#221609"
+
 # ── Geometry ─────────────────────────────────────────────────────────────────
 RADIUS  = 8
 PADDING = 14
