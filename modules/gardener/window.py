@@ -19,6 +19,7 @@ from app.ui.area_overlay import AreaOverlay
 from app.ui.marker_overlay import Marker, MarkerOverlay
 from app.ui.module_window import ModuleWindow
 from app.ui.widgets.gd_panel import GdPanel
+from app.ui.widgets.log_actions import build_log_actions
 from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
@@ -481,21 +482,19 @@ class GardenerWindow(ModuleWindow):
         block = QVBoxLayout()
         block.setSpacing(4)
 
+        self._log = LogPanel()
+        self._log.setMinimumHeight(_LOG_H)
+
         head = QHBoxLayout()
         title = QLabel("Garden Log:")
         title.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         title.setStyleSheet(f"color:{theme.GD_TEXT}; background:transparent;")
-        clear_btn = NtButton("⌫", accent=theme.GD_BORDER)
-        clear_btn.setFixedSize(22, 20)
-        clear_btn.setToolTip("Очистить логи")
-        clear_btn.clicked.connect(self._clear_log)
         head.addWidget(title)
         head.addStretch()
-        head.addWidget(clear_btn)
+        head.addLayout(build_log_actions(self._log, theme.GD_BORDER,
+                                         on_clear=self._clear_log))
         block.addLayout(head)
 
-        self._log = LogPanel()
-        self._log.setMinimumHeight(_LOG_H)
         block.addWidget(self._log, stretch=1)
         return block
 
