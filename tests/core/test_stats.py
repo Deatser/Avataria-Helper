@@ -1,5 +1,6 @@
 # tests/core/test_stats.py
 import json
+from datetime import datetime
 
 from app.core.stats import AppStats, StatsManager, shown
 
@@ -66,7 +67,8 @@ def test_the_shipped_file_has_every_field(tmp_path, monkeypatch):
     # The real stats.json, so a field added in code but forgotten in the file
     # is caught here rather than showing up as a silent placeholder.
     raw = json.loads(StatsManager.STATS_FILE.read_text(encoding="utf-8"))
-    assert set(raw) == {"player", "ava_dancers", "gardener", "janitor"}
+    assert set(raw) == {"player", "ava_dancers", "gardener", "janitor",
+                        "snowboard", "hockey"}
     assert set(raw["player"]) == {"player_id", "player_name",
                                   "registration_date"}
     assert set(raw["ava_dancers"]) == {"games_played", "gold_won", "silver_won"}
@@ -99,3 +101,38 @@ def test_a_negative_payout_cannot_eat_the_total(tmp_path, monkeypatch):
     stats.record_ava_dancers_run(gold=-50)
 
     assert stats.data.ava_dancers.gold_won == 100
+
+
+# ── Daily log wiring ─────────────────────────────────────────────────────────
+# The recording behaviour itself belongs to DailyLog and is covered in
+# test_daily_log.py; these just check StatsManager actually calls it.
+
+def _todays_log(tmp_path) -> dict:
+    name = f"Статистика за {datetime.now().strftime('%d.%m.%Y')}.json"
+    return json.loads((tmp_path / "logs" / name).read_text(encoding="utf-8"))
+
+
+def test_constructing_stats_manager_creates_todays_log_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    StatsManager()
+    assert _todays_log(tmp_path)["ava_dancers"] == \
+        {"games_played": 0, "gold_won": 0, "silver_won": 0}
+
+
+def test_a_recorded_run_also_bumps_todays_log(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    StatsManager().record_ava_dancers_run(gold=30, silver=2250)
+
+    assert _todays_log(tmp_path)["ava_dancers"] == \
+        {"games_played": 1, "gold_won": 30, "silver_won": 2250}
+
+
+def test_a_cleanup_also_bumps_todays_log(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    stats = StatsManager()
+    stats.record_gardener_cleanup()
+    stats.record_janitor_cleanup()
+
+    log = _todays_log(tmp_path)
+    assert log["gardener"]["shifts_finished"] == 1
+    assert log["janitor"]["shifts_finished"] == 1

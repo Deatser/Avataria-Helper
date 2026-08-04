@@ -1,8 +1,10 @@
 # app/ui/widgets/stat_tile.py
 """A single number worth looking at, in a bracketed card."""
+import random
+
 from PySide6.QtWidgets import QWidget, QSizePolicy
 from PySide6.QtGui import QPainter, QColor, QPen, QLinearGradient
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, QTimer
 
 from app.ui import theme
 
@@ -11,6 +13,23 @@ _BRACKET     = 14    # length of each corner bracket arm
 _BRACKET_PAD = 7     # inset of the brackets from the card edge
 _MIN_W       = 96
 _MIN_H       = 84
+
+# Text glow — both the value and the caption get one, see _draw_glow_text.
+_GLOW_PASSES = 5
+_GLOW_REACH  = 1.6   # px the outermost pass's ring sits out at
+_GLOW_RING   = ((1, 0), (-1, 0), (0, 1), (0, -1),
+               (0.7, 0.7), (-0.7, 0.7), (0.7, -0.7), (-0.7, -0.7))
+
+# Same noise LogPanel's own reveal uses — one scramble look across the app,
+# not a tile-specific one.
+_SCRAMBLE = "!@#$%^&*<>?/|[]{}~+=_-"
+
+# Frame count is duration ÷ interval rather than tied to the value's own
+# length (a 1-digit change would otherwise finish in well under the full
+# span), so every tile takes the same 0.3s regardless of how many digits
+# it's revealing.
+_SCRAMBLE_DURATION_MS = 300
+_SCRAMBLE_INTERVAL_MS = 40
 
 
 class StatTile(QWidget):
@@ -26,6 +45,12 @@ class StatTile(QWidget):
         super().__init__(parent)
         self._caption = caption
         self._value   = value
+        self._display = value   # what paintEvent draws — differs from
+                                 # _value only mid-animation
+        self._anim_gen = 0      # bumped on every set/animate, so a stale
+                                 # scheduled frame from a superseded
+                                 # animation knows to no-op instead of
+                                 # painting over a newer value
         self._accent  = accent or theme.ACCENT
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -33,8 +58,33 @@ class StatTile(QWidget):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def set_value(self, value: str):
-        self._value = value
+        self._anim_gen += 1
+        self._value   = value
+        self._display = value
         self.update()
+
+    def animate_value(self, value: str):
+        """Reveal a changed value left-to-right through scramble noise —
+        the same reveal LogPanel does for a new line, so a number that just
+        moved catches the eye instead of silently jumping."""
+        if value == self._value:
+            return
+        self._anim_gen += 1
+        gen = self._anim_gen
+        self._value = value
+        total_frames = max(1, _SCRAMBLE_DURATION_MS // _SCRAMBLE_INTERVAL_MS)
+
+        def tick(f):
+            if gen != self._anim_gen:
+                return   # superseded by a newer value before this frame ran
+            revealed = int((f / total_frames) * len(value))
+            self._display = value[:revealed] + "".join(
+                random.choice(_SCRAMBLE) for _ in value[revealed:])
+            self.update()
+            if f < total_frames:
+                QTimer.singleShot(_SCRAMBLE_INTERVAL_MS, lambda: tick(f + 1))
+
+        tick(1)
 
     @property
     def value(self) -> str:
@@ -75,17 +125,36 @@ class StatTile(QWidget):
         self._draw_brackets(painter, rect, accent)
 
         # Value — the reason the tile exists, so it gets the display face
-        painter.setPen(QColor(accent))
         painter.setFont(theme.get_display_font(theme.FONT_SIZE_L))
         value_rect = rect.adjusted(6, 10, -6, -rect.height() * 0.34)
-        painter.drawText(value_rect, Qt.AlignCenter, self._value)
+        self._draw_glow_text(painter, value_rect, self._display, accent,
+                            Qt.AlignCenter)
 
-        painter.setPen(QColor(theme.TEXT_DIM))
         painter.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
         caption_rect = rect.adjusted(4, rect.height() * 0.62, -4, -8)
-        painter.drawText(caption_rect, Qt.AlignHCenter | Qt.AlignTop,
-                         self._caption)
+        self._draw_glow_text(painter, caption_rect, self._caption,
+                            QColor(theme.TEXT_PRIMARY),
+                            Qt.AlignHCenter | Qt.AlignTop)
         painter.end()
+
+    def _draw_glow_text(self, painter: QPainter, rect: QRectF, text: str,
+                        colour: QColor, align):
+        """A soft halo behind the crisp text — several low-alpha copies at
+        a small ring of offsets, the same "many passes, rising alpha"
+        trick NeonSection's own border glow uses, just applied to drawn
+        text instead of a stroked rectangle rather than a real Gaussian
+        blur (QPainter has no cheap way to blur a run of text on its
+        own)."""
+        for i in range(_GLOW_PASSES, 0, -1):
+            glow = QColor(colour)
+            glow.setAlpha(int(6 * (_GLOW_PASSES - i + 1)))
+            painter.setPen(glow)
+            reach = i * _GLOW_REACH / _GLOW_PASSES
+            for dx, dy in _GLOW_RING:
+                painter.drawText(rect.translated(dx * reach, dy * reach),
+                                 align, text)
+        painter.setPen(QColor(colour))
+        painter.drawText(rect, align, text)
 
     def _draw_brackets(self, painter, rect, accent: QColor):
         """Four corner arms — the frame is implied rather than drawn."""

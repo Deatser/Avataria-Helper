@@ -1,22 +1,55 @@
 # app/ui/stats_window.py
 from __future__ import annotations
+from pathlib import Path
 
-from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QGridLayout
+from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
+                               QScrollArea, QWidget, QFrame,
+                               QGraphicsDropShadowEffect)
+from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QTimer, Signal
 
 from app.core.duration import from_seconds
 from app.core.stats import shown
 from app.ui import theme
 from app.ui.module_window import ModuleWindow
-from app.ui.widgets.nt_panel import NtPanel
+from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
+from app.ui.widgets.neon_section import NeonSection
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
+from app.ui.widgets.segmented_control import SegmentedControl
 from app.ui.widgets.stat_tile import StatTile
 
-_MIN_W = 380
-_MIN_H = 560   # header + player rows + all four modules' tiles + handle
+# Index into both the period SegmentedControl and _PERIOD_LABELS.
+_PERIOD_ALL   = 0
+_PERIOD_TODAY = 1
+_PERIOD_MONTH = 2
+_PERIOD_LABELS = ("всё время", "сегодня", "месяц")
+
+# Set by hand (2026-08-04) to the size the window was actually left at —
+# smaller than this and the period/view controls, tiles and scroll area
+# start crowding each other rather than just scrolling past the edge.
+_MIN_W = 519
+_MIN_H = 657
 
 _COUNTDOWN_MS = 1000
+
+# Same auto-pick rule every module's own backdrop uses — see
+# modules.ava_dancers.window._default_backdrop.
+_BACKDROP_STEM  = "AvaStats"
+_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
+_TEMPLATES      = _PROJECT_ROOT / "templates"
+_STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _default_backdrop(video: bool = True) -> str:
+    """First existing templates/AvaStats.* file."""
+    moving = VIDEO_SUFFIXES + (".gif",)
+    order  = moving + _STILL_SUFFIXES if video else _STILL_SUFFIXES + moving
+    for suffix in order:
+        candidate = _TEMPLATES / f"{_BACKDROP_STEM}{suffix}"
+        if candidate.is_file():
+            return str(candidate)
+    return ""
 
 
 def _countdown_text(remaining_seconds: int) -> str:
@@ -49,7 +82,8 @@ class StatsWindow(ModuleWindow):
         self._wm      = window_manager
         self._stats   = stats
         self._overlay = overlay
-        self._countdown_timer: QTimer | None = None
+        self._period  = _PERIOD_ALL   # which SegmentedControl option is lit
+        self._poll_timer: QTimer | None = None
         self.resize(max(getattr(config, "width",  _MIN_W), _MIN_W),
                     max(getattr(config, "height", _MIN_H), _MIN_H))
         self.setMinimumSize(_MIN_W, _MIN_H)
@@ -58,27 +92,99 @@ class StatsWindow(ModuleWindow):
         self._init_collapse(self._panel, window_manager)
         self.refresh()
 
-        # The countdown reads real wall-clock time, not an event of ours —
-        # nothing else would ever tell it a second has passed.
-        self._countdown_timer = QTimer(self)
-        self._countdown_timer.timeout.connect(self._update_countdown)
-        self._countdown_timer.start(_COUNTDOWN_MS)
+        # One timer for everything that has to move on its own while this
+        # window sits open: the countdown reads real wall-clock time, and
+        # stats.json can change under us too — another module recording a
+        # run, or a hand edit — so both get checked on the same second-by-
+        # second beat. See _poll.
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll)
+        self._poll_timer.start(_COUNTDOWN_MS)
 
     # ── UI construction ──────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._panel = NtPanel(self)
+        self._panel = VwPanel(self)
+        # This window is tall and narrow next to a 16:9 backdrop, so it
+        # crops down to a thin vertical slice of it — biased right, since
+        # centred left the visually busier right half of the source
+        # offscreen.
+        self._panel.focus_x = 0.55
         self._panel.setGeometry(0, 0, self.width(), self.height())
         self._panel.setMouseTracking(True)
 
-        layout = QVBoxLayout(self._panel)
-        layout.setContentsMargins(theme.PADDING, theme.PADDING,
-                                  theme.PADDING, theme.PADDING)
-        layout.setSpacing(theme.SPACING)
+        outer = QVBoxLayout(self._panel)
+        outer.setContentsMargins(theme.PADDING, theme.PADDING,
+                                 theme.PADDING, theme.PADDING)
+        outer.setSpacing(theme.SPACING)
 
-        layout.addLayout(self._build_header())
-        layout.addWidget(self._hairline())
-        layout.addSpacing(2)
+        outer.addLayout(self._build_header())
+        outer.addWidget(self._hairline())
+        outer.addSpacing(2)
+
+        outer.addWidget(self._build_scroll_area(), stretch=1)
+
+        # ── Backdrop: templates/AvaStats.* by default, video first ───────────
+        self._panel.background_failed.connect(self._on_background_failed)
+        self._apply_backdrop(fade=False)
+
+        drag = NtDragHandle()
+        drag.mousePressEvent = self.start_drag
+        drag.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
+        outer.addWidget(drag)
+
+    # ── Backdrop ─────────────────────────────────────────────────────────────
+
+    def _apply_backdrop(self, fade: bool = True):
+        video    = getattr(self.config, "video_background", True)
+        backdrop = getattr(self.config, "background", "") or _default_backdrop(video)
+        if backdrop and not self._panel.set_background(backdrop, fade=fade):
+            self._on_background_failed(f"Фон не загружен: {backdrop}")
+
+    def _on_background_failed(self, message: str):
+        if self._overlay:
+            self._overlay.add_log(message, level="error")
+
+    def _crt_open_ready(self) -> bool:
+        """Hold the switch-on until the video backdrop has a frame to show."""
+        return self._panel.backdrop_ready
+
+    def _build_scroll_area(self) -> QScrollArea:
+        """Everything below the header, scrollable — squeezing the window
+        down used to compress the fixed gaps between sections instead of
+        just hiding the overflow; a real minimum height (_MIN_H) plus a
+        scrollbar for whatever does not fit is what a resizable panel
+        with this much content actually needs."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Transparent all the way down: VwPanel paints its own backdrop
+        # (video, photo or the drawn scene) behind everything, and a plain
+        # QScrollArea would otherwise sit an opaque rectangle on top of it.
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: transparent; }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 6px;
+                border: none;
+                margin: 2px 0px 2px {theme.PADDING}px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {theme.BORDER_BRIGHT};
+                border-radius: 3px;
+                min-height: 24px;
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{ height: 0px; }}
+        """)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACING)
 
         layout.addWidget(self._section_label("ИГРОК", theme.ACCENT))
         self._id_value   = self._add_row(layout, "ID")
@@ -86,30 +192,74 @@ class StatsWindow(ModuleWindow):
         self._date_value = self._add_row(layout, "Регистрация")
         layout.addSpacing(6)
 
-        layout.addWidget(self._section_label("AVA DANCERS", theme.VW_MAGENTA))
-        layout.addLayout(self._build_tiles())
-        layout.addSpacing(6)
+        layout.addLayout(self._build_controls())
+        layout.addSpacing(2)
 
-        layout.addWidget(self._section_label("САДОВНИК", theme.GD_OLIVE))
-        layout.addLayout(self._build_gardener_tiles())
-        layout.addSpacing(6)
-
-        layout.addWidget(self._section_label("УБОРЩИК", theme.JN_AMBER))
-        layout.addLayout(self._build_janitor_tiles())
-        layout.addSpacing(6)
-
-        layout.addWidget(self._section_label("СНОУБОРД", theme.SB_STEEL))
-        layout.addLayout(self._build_snowboard_tiles())
-        layout.addSpacing(6)
-
-        layout.addWidget(self._section_label("ХОККЕЙ", theme.HK_ICE))
-        layout.addLayout(self._build_hockey_tiles())
+        layout.addWidget(self._build_games_section())
+        layout.addSpacing(8)
+        layout.addWidget(self._build_professions_section())
         layout.addStretch()
 
-        drag = NtDragHandle()
-        drag.mousePressEvent = self.start_drag
-        drag.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
-        layout.addWidget(drag)
+        scroll.setWidget(content)
+        return scroll
+
+    def _build_controls(self) -> QVBoxLayout:
+        """Period — all-time / today / month — a segmented row with
+        exactly one option lit; changes what refresh() reads."""
+        col = QVBoxLayout()
+        col.setSpacing(6)
+
+        self._period_label = QLabel()
+        self._period_label.setFont(theme.get_display_font(theme.FONT_SIZE_S))
+        self._period_label.setStyleSheet(
+            f"color:{theme.TEXT_PRIMARY}; background:transparent;")
+        self._glow(self._period_label)
+        self._refresh_period_label()
+        col.addWidget(self._period_label)
+
+        self._period_control = SegmentedControl(
+            ["Всё время", "Сегодня", "Месяц"],
+            accent=theme.ACCENT, active=self._period)
+        self._period_control.changed.connect(self._on_period_changed)
+        col.addWidget(self._period_control)
+
+        return col
+
+    def _refresh_period_label(self):
+        self._period_label.setText(f"Статистика за {_PERIOD_LABELS[self._period]}")
+
+    def _on_period_changed(self, idx: int):
+        self._period = idx
+        self._refresh_period_label()
+        self.refresh(animate=True)
+
+    def _build_games_section(self) -> NeonSection:
+        section = NeonSection("Игры", theme.ACCENT_CYAN)
+        body = section.body()
+
+        body.addWidget(self._section_label("AVA DANCERS", theme.VW_MAGENTA))
+        body.addLayout(self._build_tiles())
+        body.addSpacing(6)
+
+        body.addWidget(self._section_label("ХОККЕЙ", theme.HK_ICE))
+        body.addLayout(self._build_hockey_tiles())
+        body.addSpacing(6)
+
+        body.addWidget(self._section_label("СНОУБОРД", theme.SB_STEEL))
+        body.addLayout(self._build_snowboard_tiles())
+        return section
+
+    def _build_professions_section(self) -> NeonSection:
+        section = NeonSection("Профессии", theme.ACCENT_GREEN)
+        body = section.body()
+
+        body.addWidget(self._section_label("УБОРЩИК", theme.JN_AMBER))
+        body.addLayout(self._build_janitor_tiles())
+        body.addSpacing(6)
+
+        body.addWidget(self._section_label("САДОВНИК", theme.GD_OLIVE))
+        body.addLayout(self._build_gardener_tiles())
+        return section
 
     def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
@@ -161,6 +311,9 @@ class StatsWindow(ModuleWindow):
         changes between modules; gold and silver always read in their own
         colour no matter whose row they are in."""
         grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)   # QGridLayout's own default
+                                              # margins were stacking on top
+                                              # of the label above it
         grid.setSpacing(theme.SPACING)
         games_tile  = StatTile("игр сыграно", accent=games_accent)
         gold_tile   = StatTile("золота",  accent=theme.ACCENT_AMBER)
@@ -175,6 +328,7 @@ class StatsWindow(ModuleWindow):
         since a countdown reads better with room to breathe than squeezed
         into a square next to its neighbours."""
         grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(theme.SPACING)
         self._cleanup_tile = StatTile("уборок сделано", accent=theme.GD_OLIVE)
         self._next_tile    = StatTile("Новая смена", accent=theme.GD_OLIVE)
@@ -194,6 +348,7 @@ class StatsWindow(ModuleWindow):
         wide one, for the same reason: its own countdown, independent of
         Садовник's."""
         grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(theme.SPACING)
         self._janitor_cleanup_tile = StatTile("уборок сделано",
                                               accent=theme.JN_AMBER)
@@ -221,20 +376,32 @@ class StatsWindow(ModuleWindow):
         return label
 
     def _add_row(self, layout: QVBoxLayout, caption: str) -> QLabel:
-        """Caption on the left, value on the right; returns the value label."""
+        """Caption on the left, value on the right — the same bright,
+        glowing white both, not a dim label next to a lit-up value."""
         row = QHBoxLayout()
         row.setSpacing(theme.SPACING)
         name = QLabel(caption)
-        name.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
-        name.setStyleSheet(f"color:{theme.TEXT_SECONDARY}; background:transparent;")
+        name.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
+        name.setStyleSheet(f"color:{theme.TEXT_PRIMARY}; background:transparent;")
+        self._glow(name)
         value = QLabel("—")
         value.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
         value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._glow(value)
         row.addWidget(name)
         row.addStretch()
         row.addWidget(value)
         layout.addLayout(row)
         return value
+
+    def _glow(self, widget: QLabel, color: str = None, radius: float = 12.0):
+        """A soft halo the label's own colour, not a plain drop shadow —
+        what actually reads as "glowing" rather than just "bright"."""
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(radius)
+        effect.setOffset(0, 0)
+        effect.setColor(QColor(color or theme.TEXT_PRIMARY))
+        widget.setGraphicsEffect(effect)
 
     # ── Favorite ─────────────────────────────────────────────────────────────
     # Same star as the module windows carry, and the same meaning: the
@@ -269,14 +436,28 @@ class StatsWindow(ModuleWindow):
         self._stats.reload()
         self.refresh()
 
-    def refresh(self):
-        player    = self._stats.data.player
-        ava       = self._stats.data.ava_dancers
-        gardener  = self._stats.data.gardener
-        janitor   = self._stats.data.janitor
-        snowboard = self._stats.data.snowboard
-        hockey    = self._stats.data.hockey
+    def _poll(self):
+        """Runs once a second while the window is open — see __init__.
 
+        Re-reading stats.json here, not just trusting the in-memory
+        StatsManager, is what catches a hand edit made while this window
+        sits open, on top of whatever another module already changed in
+        memory (which reload() picks up too, just redundantly).
+        """
+        self._stats.reload()
+        self.refresh(animate=True)
+
+    def refresh(self, animate: bool = False):
+        """Redraw every tile from whichever source the current period
+        picks out.
+
+        animate=True (only from the once-a-second poll, or a period
+        switch) runs each tile's own scramble reveal, but only the ones
+        whose value actually changed — animate_value() itself no-ops
+        otherwise — so a poll tick with nothing new to show causes no
+        visible flicker at all.
+        """
+        player = self._stats.data.player
         self._set_value(self._id_value,
                         shown(player.player_id, "player_id"))
         self._set_value(self._name_value,
@@ -284,21 +465,47 @@ class StatsWindow(ModuleWindow):
         self._set_value(self._date_value,
                         shown(player.registration_date, "registration_date"))
 
-        self._games_tile.set_value(str(ava.games_played))
-        self._gold_tile.set_value(str(ava.gold_won))
-        self._silver_tile.set_value(str(ava.silver_won))
+        # Loaded once, not once per module: this_month() sums every kept
+        # day's own file from disk, and five separate calls to it would
+        # just re-do that same work five times over.
+        daily = None
+        if self._period == _PERIOD_TODAY:
+            daily = self._stats.daily.today()
+        elif self._period == _PERIOD_MONTH:
+            daily = self._stats.daily.this_month()
 
-        self._sb_games_tile.set_value(str(snowboard.games_played))
-        self._sb_gold_tile.set_value(str(snowboard.gold_won))
-        self._sb_silver_tile.set_value(str(snowboard.silver_won))
+        def source(module_key: str):
+            owner = daily if daily is not None else self._stats.data
+            return getattr(owner, module_key)
 
-        self._hk_games_tile.set_value(str(hockey.games_played))
-        self._hk_gold_tile.set_value(str(hockey.gold_won))
-        self._hk_silver_tile.set_value(str(hockey.silver_won))
+        ava       = source("ava_dancers")
+        hockey    = source("hockey")
+        snowboard = source("snowboard")
+        gardener  = source("gardener")
+        janitor   = source("janitor")
 
-        self._cleanup_tile.set_value(str(gardener.shifts_finished))
-        self._janitor_cleanup_tile.set_value(str(janitor.shifts_finished))
+        self._set_tile(self._games_tile, ava.games_played, animate)
+        self._set_tile(self._gold_tile, ava.gold_won, animate)
+        self._set_tile(self._silver_tile, ava.silver_won, animate)
+
+        self._set_tile(self._sb_games_tile, snowboard.games_played, animate)
+        self._set_tile(self._sb_gold_tile, snowboard.gold_won, animate)
+        self._set_tile(self._sb_silver_tile, snowboard.silver_won, animate)
+
+        self._set_tile(self._hk_games_tile, hockey.games_played, animate)
+        self._set_tile(self._hk_gold_tile, hockey.gold_won, animate)
+        self._set_tile(self._hk_silver_tile, hockey.silver_won, animate)
+
+        self._set_tile(self._cleanup_tile, gardener.shifts_finished, animate)
+        self._set_tile(self._janitor_cleanup_tile, janitor.shifts_finished, animate)
         self._update_countdown()
+
+    def _set_tile(self, tile: StatTile, value: int, animate: bool):
+        text = str(value)
+        if animate:
+            tile.animate_value(text)
+        else:
+            tile.set_value(text)
 
     def _update_countdown(self):
         # sync_*_countdown, not *_remaining_seconds: this timer is the one
@@ -329,7 +536,8 @@ class StatsWindow(ModuleWindow):
         QTimer.singleShot(30, self.repaint)
 
     def _teardown(self):
-        if self._countdown_timer is not None:
-            self._countdown_timer.stop()
-            self._countdown_timer = None
+        self._panel.stop_background()
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
         self.closed.emit()

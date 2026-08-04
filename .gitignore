@@ -26,3 +26,6 @@ desktop.ini
 
 # Raw frame dumps from the "Сохранить последние кадры" button
 /debug_frames/
+
+# Per-day activity totals — see app/core/daily_log.py
+/logs/

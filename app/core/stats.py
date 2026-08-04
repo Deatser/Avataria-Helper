@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from app.core.daily_log import DailyLog
 from app.core.duration import from_seconds, to_seconds
 from app.core.json_store import load_dataclass, save_dataclass
 
@@ -95,6 +96,11 @@ class StatsManager:
 
     def __init__(self):
         self.data = load_dataclass(self.STATS_FILE, AppStats)
+        # The daily breakdown lives in its own files (logs/) — see
+        # daily_log.py — not in stats.json, which only ever holds the
+        # all-time running totals.
+        self.daily = DailyLog()
+        self.daily.ensure_today()
 
     def reload(self):
         """Pick up hand edits to stats.json without restarting the helper."""
@@ -104,35 +110,42 @@ class StatsManager:
         save_dataclass(self.STATS_FILE, self.data)
 
     # ── Recording ────────────────────────────────────────────────────────────
+    # Every recording call updates two places at once: the running total
+    # here, and today's own delta in self.daily — the same numbers, so
+    # daily and all-time can never drift apart.
 
     def record_ava_dancers_run(self, gold: int = 0, silver: int = 0):
         """One finished Ava Dancers round and what it paid out."""
-        self._record_run(self.data.ava_dancers, gold, silver)
+        self._record_run("ava_dancers", gold, silver)
 
     def record_snowboard_run(self, gold: int = 0, silver: int = 0):
         """One finished Snowboard run and what it paid out."""
-        self._record_run(self.data.snowboard, gold, silver)
+        self._record_run("snowboard", gold, silver)
 
     def record_hockey_run(self, gold: int = 0, silver: int = 0):
         """One finished Hockey round and what it paid out."""
-        self._record_run(self.data.hockey, gold, silver)
+        self._record_run("hockey", gold, silver)
 
-    def _record_run(self, entity, gold: int, silver: int):
+    def _record_run(self, module_key: str, gold: int, silver: int):
+        entity = getattr(self.data, module_key)
         entity.games_played += 1
         entity.gold_won     += max(0, int(gold))
         entity.silver_won   += max(0, int(silver))
         self.save()
+        self.daily.bump_run(module_key, gold, silver)
 
     def record_gardener_cleanup(self):
         """One finished garden — the count Statistics shows next to
         Садовник's own countdown."""
         self.data.gardener.shifts_finished += 1
         self.save()
+        self.daily.bump_cleanup("gardener")
 
     def record_janitor_cleanup(self):
         """The same, for Уборщик's own count."""
         self.data.janitor.shifts_finished += 1
         self.save()
+        self.daily.bump_cleanup("janitor")
 
     def set_gardener_next_time(self, clean_next_time: str):
         """What the timer badge itself reads — overwrites whatever was
