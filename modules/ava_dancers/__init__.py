@@ -12,4 +12,4 @@ class AvaDancersModule(ModuleBase):
     def create_window(self, config, save_fn, window_manager, parent_overlay=None,
                       stats=None):
         from modules.ava_dancers.window import AvaDancersWindow
-        return AvaDancersWindow(config, save_fn, window_manager, parent_overlay)
+        return AvaDancersWindow(config, save_fn, window_manager, parent_overlay, stats)

@@ -28,12 +28,15 @@ SOLO_STEP   = ("Кнопка ОДИНОЧНЫЙ РЕЖИМ", "button_solo.png")
 REPEAT_STEP, START_STEP = RESTART_STEPS
 LOBBY_STEPS = [SOLO_STEP, START_STEP]
 
-# With the EXIT sign up, the game is inside Ava Dancers but not necessarily
-# playing — it can equally be sitting on the results screen of a round that
-# just ended, or in the lobby. All three markers are scored off the same
-# screenshot; the first one recognised says where to pick the chain up, and
-# the steps after it follow from there. Ordered the way the screens appear,
-# so a results screen showing both ОК and ЗАНОВО starts at ОК.
+# Each of these is its own unambiguous marker for "inside Ava Dancers but not
+# playing" — the results screen of a round that just ended (ОК, ЗАНОВО) or
+# the lobby (Одиночный режим) — checked directly rather than gated behind the
+# EXIT sign first: that gate used to mean a flaky EXIT-sign reading on the
+# results screen could send the flow down the full menu-walk chain instead,
+# where none of Места/Игры/... are there to find. All three markers are
+# scored off the same screenshot; the first one recognised says where to pick
+# the chain up, and the steps after it follow from there. Ordered the way the
+# screens appear, so a results screen showing both ОК and ЗАНОВО starts at ОК.
 RESUME_POINTS = [
     (OK_STEP,     [OK_STEP] + RESTART_STEPS),
     (REPEAT_STEP, RESTART_STEPS),
@@ -58,13 +61,13 @@ class EntryFlow(ClickFlow):
 
     One screenshot decides where the game already is:
 
-      * no EXIT sign — out in the menus, so the whole chain runs;
-      * EXIT sign plus one of the marker buttons — inside Ava Dancers but
-        not playing: on the results screen of a finished round (ОК, ЗАНОВО)
-        or in the lobby (Одиночный режим). The chain is picked up from
-        there rather than walked from the start;
-      * EXIT sign on its own — a round is running, nothing to do, and the
-        screenshots stop right there.
+      * one of the resume markers (ОК, ЗАНОВО, Одиночный режим) — inside Ava
+        Dancers but not playing: on the results screen of a finished round,
+        or in the lobby. The chain is picked up from there rather than
+        walked from the start;
+      * no resume marker, but the EXIT sign is up — a round is already
+        running, nothing to do, and the screenshots stop right there;
+      * neither — out in the menus, so the whole chain runs.
     """
     exit_checked = Signal(float)   # score of the EXIT sign
     in_game      = Signal()        # already playing — chain skipped
@@ -84,17 +87,6 @@ class EntryFlow(ClickFlow):
         if gray is None:
             return
 
-        exit_score = self._score(gray, EXIT_BUTTON[1])
-        self.exit_checked.emit(exit_score)
-
-        if exit_score < EXIT_PRESENT:
-            if self.run_all_steps():
-                self.flow_done.emit()
-            return
-
-        # The EXIT sign hangs on every Ava Dancers screen, so on its own it
-        # cannot tell a running round from the lobby or from the results of
-        # a round that just ended. Whichever marker button is on screen can.
         for (label, filename), steps in RESUME_POINTS:
             if self._score(gray, filename) >= BUTTON_THRESHOLD:
                 self.in_lobby.emit(label)
@@ -102,8 +94,16 @@ class EntryFlow(ClickFlow):
                     self.flow_done.emit()
                 return
 
-        self.in_game.emit()
-        self.flow_done.emit()
+        exit_score = self._score(gray, EXIT_BUTTON[1])
+        self.exit_checked.emit(exit_score)
+
+        if exit_score >= EXIT_PRESENT:
+            self.in_game.emit()
+            self.flow_done.emit()
+            return
+
+        if self.run_all_steps():
+            self.flow_done.emit()
 
     def _screen(self):
         """One grab, shared by every check below; None if the grab failed."""

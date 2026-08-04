@@ -103,6 +103,19 @@ def test_exit_plus_repeat_picks_up_from_repeat(monkeypatch):
     assert seen["done"] is True
 
 
+def test_a_resume_marker_wins_even_without_the_exit_sign(monkeypatch):
+    """Checked directly, not gated behind the EXIT sign: a results screen
+    where EXIT does not happen to read as confidently present must still
+    resume from ОК, not fall through to walking the whole menu chain."""
+    flow, seen = _flow_over(monkeypatch, _screen_showing(load_template(OK_STEP[1])))
+
+    flow._execute()
+
+    assert seen["in_lobby"] == OK_STEP[0]
+    assert seen["ran"] == [OK_STEP] + RESTART_STEPS
+    assert seen["done"] is True
+
+
 def test_ok_wins_when_the_results_screen_shows_both_buttons(monkeypatch):
     """ОК and ЗАНОВО share the results screen; the earlier one goes first."""
     flow, seen = _flow_over(monkeypatch, _screen_showing(

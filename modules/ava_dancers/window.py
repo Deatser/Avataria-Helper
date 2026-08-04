@@ -6,25 +6,29 @@ import cv2
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
                                QGraphicsDropShadowEffect)
 from PySide6.QtGui import QColor, QFontMetricsF
-from PySide6.QtCore import Qt, QTimer, QThread
+from PySide6.QtCore import Qt, QRect, QTimer, QThread
 
 from app.core.capture import grab_window
 from app.core.input_sender import press_key
-from app.core.template_match import FINISH_GOLD, FINISH_SILVER
+from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
+                                     load_template, primary_monitor_region)
+from app.ui.calibration_overlay import CalibrationOverlay
 from app.ui.module_window import ModuleWindow
 from app.ui.settings_panel import SettingsPanel
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
 from app.ui.widgets.nt_status_dot import NtStatusDot
-from app.ui.widgets.nt_switch import NtSwitch
 from app.ui.widgets.nt_drag_handle import NtDragHandle
+from app.ui.widgets.log_actions import build_log_actions
 from app.ui.widgets.log_panel import LogPanel
 from app.ui import theme
 from modules.ava_dancers.bot import (AvaBot, Thresholds, KEY_MAP,
                                      NICE, BONUS, BAD, DISLIKE, BOMB)
 from modules.ava_dancers.entry_flow import EntryFlow
 from modules.ava_dancers.exit_flow import ExitFlow
-from modules.ava_dancers.leave_watch import LeaveWatch
+from modules.ava_dancers.game_over_watch import GameOverWatch
+from modules.ava_dancers.leave_watch import (LEAVE_REGIONS, LEAVE_TEMPLATES,
+                                             MATCH_THRESHOLD, LeaveWatch)
 from modules.ava_dancers.speedup_watch import SpeedupWatch
 
 _DEFAULT_W = 420
@@ -34,29 +38,31 @@ _MIN_W     = 300
 
 _SPEEDUP_BOOST_MS = 15_000   # how long to keep max poll rate / priority after a timer mark
 
-# ── End of run ───────────────────────────────────────────────────────────────
-# Placeholder routine for "the chosen reward is on screen, get out": stop
-# playing well, then mash all four lanes so the game drops the run. The real
-# sequence is still to be specified, so this stays deliberately blunt and
-# short — it only has to end a round that is already over.
-_FINISH_SPAM_MS       = 4_000   # total mashing time
-_FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
-
 # Gap between clicking Старт and putting the detector back to work, so it
 # does not spend its first seconds polling a round that is still loading.
 _RESTART_BOT_DELAY_MS = 2_000
 
-# Time before the test shot is actually taken — long enough to alt-tab away
-# from the game or minimise it by hand, to see whether the capture still
-# gets the game and not whatever is on top of it.
-_SCREENSHOT_DELAY_MS = 3_000
+# The reward line's rise means "stop playing well" — mash every lane until
+# the game drops the run on its own. The exact sequence that follows is not
+# ours to control, so this stays deliberately blunt and short: it only has
+# to end a round that has already, in effect, ended.
+_FINISH_SPAM_MS       = 4_000   # total mashing time
+_FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
+
+# Where the calibration box first appears — centred on the game window,
+# seeded as a plain rectangle; drag its edges or middle from there.
+_CALIB_DEFAULT_W = 300
+_CALIB_DEFAULT_H = 120
+
+_CALIB_START_TEXT = "📐  Область награды"
+_CALIB_STOP_TEXT  = "📐  Записать область"
 
 # Tile index → on-screen arrow (tiles are ordered A, S, W, D)
 _KEY_LABELS = ["←", "↓", "↑", "→"]
 _KEY_ARROWS = {"a": "←", "s": "↓", "w": "↑", "d": "→"}
 
-_START_TEXT = "▶  Запустить бота для фарма золота"
-_STOP_TEXT  = "■  Выключить бота для фарма золота"
+_START_TEXT = "▶  Запустить бота"
+_STOP_TEXT  = "■  Выключить бота"
 
 # Tile readout scales with the window: point size ≈ 12% of its height
 _ARROW_RATIO = 0.12
@@ -127,17 +133,22 @@ class AvaDancersWindow(ModuleWindow):
     _RESIZE_MIN_W = _MIN_W
     _RESIZE_MIN_H = _MIN_H
 
-    def __init__(self, config, save_fn, window_manager, parent_overlay=None):
+    def __init__(self, config, save_fn, window_manager, parent_overlay=None,
+                stats=None):
         super().__init__("Ava Dancers", config, save_fn, parent_overlay)
         self._wm  = window_manager
+        self._stats = stats
+        self._bot_active = False   # intent, not thread liveness — see _running
         self._bot: AvaBot | None = None
         self._speedup_watch: SpeedupWatch | None = None
         self._leave_watch: LeaveWatch | None = None
+        self._gameover_watch: GameOverWatch | None = None
         self._settings: SettingsPanel | None = None
         self._exit_flow: ExitFlow | None = None
         self._entry_flow: EntryFlow | None = None
         self._finish_timer: QTimer | None = None
         self._finish_ticks = 0
+        self._calib = CalibrationOverlay(window_manager, reference=self)
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
         self.resize(max(w, _MIN_W), max(h, _MIN_H))
@@ -206,15 +217,28 @@ class AvaDancersWindow(ModuleWindow):
         settings_btn.clicked.connect(self._toggle_settings)
         layout.addWidget(settings_btn)
 
-        debug_btn = NtButton("🎥  Сохранить последние кадры", accent=theme.VW_PURPLE,
-                             upper=False)
-        debug_btn.clicked.connect(self._dump_debug_frames)
-        layout.addWidget(debug_btn)
+        # Calibration tools, not day-to-day controls — kept wired up for
+        # when the reward templates need retuning, just hidden from the
+        # normal view.
+        detect_silver_btn = NtButton("🥈  Детект серебра", accent=theme.VW_PURPLE,
+                                     upper=False)
+        detect_silver_btn.clicked.connect(
+            lambda: self._detect_reward(FINISH_SILVER, "Серебро"))
+        layout.addWidget(detect_silver_btn)
+        detect_silver_btn.setVisible(False)
 
-        screenshot_btn = NtButton("📷  Скрин поля (через 3 сек)", accent=theme.VW_PURPLE,
-                                  upper=False)
-        screenshot_btn.clicked.connect(self._start_test_screenshot)
-        layout.addWidget(screenshot_btn)
+        detect_gold_btn = NtButton("🥇  Детект золота", accent=theme.VW_PURPLE,
+                                   upper=False)
+        detect_gold_btn.clicked.connect(
+            lambda: self._detect_reward(FINISH_GOLD, "Золото"))
+        layout.addWidget(detect_gold_btn)
+        detect_gold_btn.setVisible(False)
+
+        self._calib_btn = NtButton(_CALIB_START_TEXT, accent=theme.VW_PURPLE,
+                                   upper=False)
+        self._calib_btn.clicked.connect(self._toggle_calib)
+        layout.addWidget(self._calib_btn)
+        self._calib_btn.setVisible(False)
 
         # ── Tile status row — the main readout, so it gets the room ───────────
         tiles_row = QHBoxLayout()
@@ -254,38 +278,27 @@ class AvaDancersWindow(ModuleWindow):
         # Clearing lives on the heading row as a small button, the same as in
         # the overlay and the garden: it is an action on the log itself, and
         # the full-width slot below is worth more to the guide.
+        self._log = LogPanel()
+        self._log.setMinimumHeight(_LOG_H)
+        self._log.setMaximumHeight(_LOG_H)
+
         log_head = QHBoxLayout()
-        log_label = QLabel("Ava Dance Log:")
+        log_label = QLabel("Ava Dancers Log:")
         log_label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         log_label.setStyleSheet(
             f"color:{theme.TEXT_PRIMARY}; background:transparent;"
         )
-        clear_btn = NtButton("⌫", accent=theme.BORDER_BRIGHT)
-        clear_btn.setFixedSize(22, 20)
-        clear_btn.setToolTip("Очистить логи")
         log_head.addWidget(log_label)
         log_head.addStretch()
-        log_head.addWidget(clear_btn)
+        log_head.addLayout(build_log_actions(self._log, theme.BORDER_BRIGHT))
         layout.addLayout(log_head)
 
-        self._log = LogPanel()
-        self._log.setMinimumHeight(_LOG_H)
-        self._log.setMaximumHeight(_LOG_H)
         layout.addWidget(self._log)
-        clear_btn.clicked.connect(lambda: self._log.clear_logs())
 
         guide_btn = NtButton("Гайд", upper=False,
                              accent=theme.VW_PURPLE, filled=True)
         guide_btn.setMinimumHeight(30)
         layout.addWidget(guide_btn)
-
-        self._video_switch = NtSwitch("Видеофон  ·  выключите на слабом ПК",
-                                      accent=theme.VW_CYAN)
-        self._video_switch.set_checked_silently(
-            getattr(self.config, "video_background", True)
-        )
-        self._video_switch.toggled.connect(self._toggle_video_background)
-        layout.addWidget(self._video_switch)
 
         # ── Backdrop: templates/vaporwawe.* by default, video first ──────────
         self._panel.background_failed.connect(
@@ -307,17 +320,6 @@ class AvaDancersWindow(ModuleWindow):
         if backdrop and not self._panel.set_background(backdrop, fade=fade):
             self._log.add_log(f"Фон не загружен: {backdrop}", level="error")
 
-    def _toggle_video_background(self, enabled: bool):
-        self.config.video_background = enabled
-        self.save_fn()
-        self._apply_backdrop()
-        self._log.add_log_segments(
-            [("Фон окна: ", theme.TEXT_SECONDARY),
-             ("видео" if enabled else "фото",
-              theme.VW_CYAN if enabled else theme.TEXT_PRIMARY)],
-            level="plain",
-        )
-
     # ── showEvent: force repaint to fix visual freeze on first show ──────────
 
     def showEvent(self, event):
@@ -338,14 +340,17 @@ class AvaDancersWindow(ModuleWindow):
 
     @property
     def _running(self) -> bool:
-        """Started, from the button's point of view — the entry flow counts.
+        """Started, from the button's point of view — tracks intent, not
+        thread liveness.
 
-        Walking the menus can take several seconds, and during them the
-        button has to read as "on" so a second press cancels instead of
-        kicking off a second flow.
+        Walking the menus, playing a round, and clicking through to the next
+        one are all part of one continuous "on" state (see _bot_active) —
+        between rounds the detector and its watchers are briefly torn down
+        and rebuilt (_begin_round / _stop_round_threads) without the bot
+        itself ever reading as stopped, so a click during that gap still has
+        to route to _stop_bot rather than starting a second flow on top.
         """
-        return bool((self._bot and self._bot.isRunning())
-                    or (self._entry_flow and self._entry_flow.isRunning()))
+        return self._bot_active
 
     def _start_bot(self):
         """Make sure a round is actually running, then switch the bot on.
@@ -359,6 +364,7 @@ class AvaDancersWindow(ModuleWindow):
             return
 
         # Read as started right away: the entry flow is part of starting.
+        self._bot_active = True
         self._start_btn.setText(_STOP_TEXT)
         self._start_btn.set_active(True)
         self._start_entry_flow(hwnd)
@@ -368,20 +374,38 @@ class AvaDancersWindow(ModuleWindow):
         hwnd = self._wm.get_game_hwnd()
         if not hwnd or (self._bot and self._bot.isRunning()):
             return
+        self._begin_round(hwnd, announce=True)
 
+    def _begin_round(self, hwnd: int, announce: bool):
+        """Start the detector and its watchers against one round.
+
+        Shared by the first round of a session (announce=True, from
+        _start_detection) and every round auto-restart picks up after
+        (announce=False, from _resume_after_restart) — the bot never reads
+        as "stopped" in between, so only the first one is worth a log line.
+        """
         self._bot = AvaBot(hwnd, self._thresholds())
         self._bot.tiles_seen.connect(self._on_tiles_seen)
         self._bot.error.connect(lambda e: self._log.add_log(e, level="error"))
         self._bot.start()
         self._start_speedup_watch(hwnd)
         self._start_leave_watch(hwnd)
+        self._start_gameover_watch(hwnd)
 
         self._status_dot.set_running()
-        self._log.add_log("Бот запущен", level="success")
-        if self.parent_overlay:
-            self.parent_overlay.add_log("Ava Dancers: бот запущен")
+        if announce:
+            self._log.add_log("Бот запущен", level="success")
+            self._log_to_helper("бот запущен")
 
-    def _stop_bot(self):
+    def _stop_playing_threads(self):
+        """Stop the detector and the reward watch — everything that plays
+        the round and decides when to leave it.
+
+        GameOverWatch is deliberately left running: _finish_run calls this
+        before it starts mashing keys to force the round to end, and the
+        banner that mashing causes is exactly what GameOverWatch is still up
+        to catch.
+        """
         if self._bot:
             self._bot.stop_bot()
             if not self._bot.wait(600):
@@ -389,11 +413,25 @@ class AvaDancersWindow(ModuleWindow):
             self._bot = None
         self._stop_speedup_watch()
         self._stop_leave_watch()
-        # Stopping by hand mid-exit means "stop everything" — the click chain
-        # and the mash are both part of the run, not separate machinery.
-        # (_finish_run stops the bot before it arms either, so this cannot
-        # cancel the very sequence that triggered it.)
+
+    def _stop_round_threads(self):
+        """Tear down everything about the current round, GameOverWatch and
+        the finish mash included.
+
+        Split out from _stop_bot so _on_game_over can clear it all before
+        the exit click-chain without the button, status dot or log reading
+        as "stopped" — the whole point of not switching the bot off between
+        rounds.
+        """
+        self._stop_playing_threads()
         self._stop_finish_spam()
+        self._stop_gameover_watch()
+
+    def _stop_bot(self):
+        self._bot_active = False   # also stops a pending auto-restart, if any
+        self._stop_round_threads()
+        # Stopping by hand mid-exit means "stop everything" — the click
+        # chain is part of the run, not separate machinery.
         self._stop_exit_flow()
         self._stop_entry_flow()
 
@@ -403,13 +441,24 @@ class AvaDancersWindow(ModuleWindow):
         for dot in self._tile_dots:
             dot.set_offline()
         self._log.add_log("Бот остановлен")
-        if self.parent_overlay:
-            self.parent_overlay.add_log("Ava Dancers: бот остановлен")
+        self._log_to_helper("бот остановлен")
+
+    def _log_to_helper(self, message: str):
+        """Only session-level events go to the helper's own log — [Ava
+        Dancers] marking whose line it is, the same convention Садовник и
+        Уборщик use. Callers pass the message lowercase; capitalised here
+        so every line reads the same regardless of how it was written."""
+        if not self.parent_overlay:
+            return
+        self.parent_overlay.add_log_segments(
+            [("[Ava Dancers] - ", theme.VW_MAGENTA),
+             (message[:1].upper() + message[1:], theme.TEXT_SECONDARY)],
+            level="plain")
 
     # ── Speed-up warnings (04:00 / 06:00 / 07:30 / 09:30 / 11:00) ────────────
-    # These messages live only in the main Avataria Helper log, not this
+    # This message lives only in the main Avataria Helper log, not this
     # module's own — Ava Dancers' log is for tile-by-tile play-by-play, this
-    # is a session-level heads-up, and the two don't need to say it twice.
+    # is a session-level heads-up.
 
     def _start_speedup_watch(self, hwnd: int):
         self._stop_speedup_watch()   # defensive: never leave a prior watcher
@@ -417,16 +466,9 @@ class AvaDancersWindow(ModuleWindow):
                                       # a new one — that alone doubles every
                                       # message it emits.
         self._speedup_watch = SpeedupWatch(hwnd)
-        self._speedup_watch.watch_started.connect(self._on_speedup_watch_started)
         self._speedup_watch.detected.connect(self._on_speedup_detected)
         self._speedup_watch.error.connect(lambda e: self._log.add_log(e, level="error"))
         self._speedup_watch.start()
-
-    def _on_speedup_watch_started(self):
-        if self.parent_overlay:
-            self.parent_overlay.add_log(
-                "Ava Dance — запуск поиска по фото таймера (4:00, 6:00, 7:30, 9:30, 11:00)"
-            )
 
     def _stop_speedup_watch(self):
         if self._speedup_watch:
@@ -436,11 +478,9 @@ class AvaDancersWindow(ModuleWindow):
             self._speedup_watch = None
 
     def _on_speedup_detected(self, label: str, score: float):
-        if self.parent_overlay:
-            self.parent_overlay.add_log(
-                f"Ava Dance — нашёл отметку {label} (похожесть {score:.0%}): "
-                f"скоро волна ускорения"
-            )
+        self._log_to_helper(
+            f"нашёл отметку {label} (похожесть {score:.0%}): скоро волна ускорения"
+        )
         if self._bot and self._bot.isRunning():
             self._bot.setPriority(QThread.TimeCriticalPriority)
             self._bot.boost_poll_rate()
@@ -472,14 +512,19 @@ class AvaDancersWindow(ModuleWindow):
 
     def _on_entry_error(self, message: str):
         """A step that never found its button leaves the bot switched off."""
+        self._bot_active = False
         self._log.add_log(message, level="error")
         self._start_btn.setText(_START_TEXT)
         self._start_btn.set_active(False)
         self._status_dot.set_stopped()
 
-    # ── End-of-run watch (leave_gold / leave_silver) ──────────────────────────
-    # Runs only while the bot does — the reward line can't appear otherwise,
-    # and a once-a-second screen grab has no reason to keep running idle.
+    # ── End of run ───────────────────────────────────────────────────────────
+    # Two watchers, one after the other: LeaveWatch says when the chosen
+    # reward has grown and it is time to force the round to end (_finish_run
+    # mashes the lanes), then GameOverWatch says when that has actually
+    # happened (the ИГРА ОКОНЧЕНА banner) and _on_game_over banks the run.
+    # Both run only while the bot does — neither can appear otherwise, and a
+    # once-a-second screen grab has no reason to keep running idle.
 
     def finish_target(self) -> str:
         stored = getattr(self.config, "finish_on", FINISH_GOLD)
@@ -513,19 +558,21 @@ class AvaDancersWindow(ModuleWindow):
             self._leave_watch = None
 
     def _on_leave_ready(self, label: str, score: float):
-        message = f"{label} набрано ({score:.0%}) — заканчиваю забег"
+        # This one stays local to the module's own log — tile-by-tile
+        # play-by-play, not a helper-log event. The helper only hears about
+        # a run once it is actually over — see _on_game_over.
+        message = f"{label} набрало ({score:.0%}) — заканчиваю забег"
         self._log.add_log(message, level="success")
-        if self.parent_overlay:
-            self.parent_overlay.add_log(f"Ava Dance — {message}")
         self._finish_run()
 
     def _finish_run(self):
-        """Stop playing, then mash every lane until the game drops the run."""
+        """Stop playing well, then mash every lane until the game drops the
+        run — GameOverWatch (left running, see _stop_playing_threads) picks
+        up from there once the banner it causes appears."""
         if self._finish_timer:
             return   # already finishing
         hwnd = self._wm.get_game_hwnd()
-        self._stop_bot()   # stop playing well first, or the detector keeps
-                            # hitting real notes and holds the round open
+        self._stop_playing_threads()
         if not hwnd:
             return
         self._finish_ticks = max(1, _FINISH_SPAM_MS // _FINISH_SPAM_INTERVAL)
@@ -541,8 +588,6 @@ class AvaDancersWindow(ModuleWindow):
         self._finish_ticks -= 1
         if self._finish_ticks <= 0:
             self._stop_finish_spam()
-            self._log.add_log("Забег завершён", level="success")
-            self._start_exit_flow()
 
     def _stop_finish_spam(self):
         if self._finish_timer:
@@ -551,18 +596,69 @@ class AvaDancersWindow(ModuleWindow):
             self._finish_timer = None
         self._finish_ticks = 0
 
-    # ── Exit flow (ОК → Повтор → Старт) ───────────────────────────────────────
+    def _start_gameover_watch(self, hwnd: int):
+        self._stop_gameover_watch()
+        self._gameover_watch = GameOverWatch(hwnd)
+        self._gameover_watch.game_over.connect(self._on_game_over)
+        self._gameover_watch.error.connect(
+            lambda e: self._log.add_log(e, level="error"))
+        self._gameover_watch.start()
 
-    def _start_exit_flow(self):
+    def _stop_gameover_watch(self):
+        if self._gameover_watch:
+            self._gameover_watch.stop_watch()
+            if not self._gameover_watch.wait(1500):
+                self._gameover_watch.terminate()
+            self._gameover_watch = None
+
+    def _on_game_over(self, score: float):
+        """The ИГРА ОКОНЧЕНА banner is up — bank the run, then move on.
+
+        The reward is not read off the screen: the round always pays what
+        the chosen mode promises (2750 silver, plus 30 gold if the mode is
+        gold), so the settings value is enough on its own.
+        """
         hwnd = self._wm.get_game_hwnd()
+        self._stop_round_threads()   # no more tiles to read on this screen
+
+        gold_mode = self.finish_target() == FINISH_GOLD
+        silver, gold = 2750, (30 if gold_mode else 0)
+        if self._stats is not None:
+            self._stats.record_ava_dancers_run(gold=gold, silver=silver)
+            games_played = self._stats.data.ava_dancers.games_played
+        else:
+            games_played = 0
+
+        rewards = []
+        if silver:
+            rewards.append(f"{silver} серебра")
+        if gold:
+            rewards.append(f"{gold} золота")
+        message = f"закончили забег №{games_played} — заработали {' и '.join(rewards)}"
+        self._log.add_log(message, level="success")
+        self._log_to_helper(message)
+
         if not hwnd:
             self._log.add_log("Игровое окно не найдено — выход не нажать",
                               level="error")
+            self._stop_bot()
             return
+
+        if bool(getattr(self.config, "auto_restart", True)):
+            self._start_exit_flow(hwnd)
+        else:
+            self._stop_bot()
+
+    # ── Exit flow (ОК → Повтор → Старт) ───────────────────────────────────────
+    # Only ever started when a new round is about to be picked up — see
+    # _on_game_over. The bot is deliberately left reading as "running" the
+    # whole time it clicks through (see _stop_round_threads), so the button
+    # and status dot never flicker off between rounds.
+
+    def _start_exit_flow(self, hwnd: int):
         self._stop_exit_flow()
-        restart = bool(getattr(self.config, "auto_restart", True))
         # Silent like the entry flow — errors only. See _start_entry_flow.
-        self._exit_flow = ExitFlow(hwnd, restart)
+        self._exit_flow = ExitFlow(hwnd, restart=True)
         self._exit_flow.flow_done.connect(self._on_exit_flow_done)
         self._exit_flow.error.connect(
             lambda e: self._log.add_log(e, level="error"))
@@ -576,22 +672,24 @@ class AvaDancersWindow(ModuleWindow):
             self._exit_flow = None
 
     def _on_exit_flow_done(self):
-        if not bool(getattr(self.config, "auto_restart", True)):
-            self._log.add_log("Вышел из забега", level="success")
-            return
-        self._log.add_log("Новая игра запущена", level="success")
-        QTimer.singleShot(_RESTART_BOT_DELAY_MS, self._restart_bot)
+        QTimer.singleShot(_RESTART_BOT_DELAY_MS, self._resume_after_restart)
 
-    def _restart_bot(self):
+    def _resume_after_restart(self):
         """Pick the new round up where the last one left off.
 
-        Deliberately delayed rather than fired the instant Старт is clicked:
-        the round takes a moment to load, and a detector started against the
-        loading screen is just burning polls on tiles that are not there yet.
+        Deliberately delayed rather than fired the instant Старт is clicked
+        (see _RESTART_BOT_DELAY_MS): the round takes a moment to load, and a
+        detector started against the loading screen is just burning polls on
+        tiles that are not there yet. Goes straight to _begin_round rather
+        than back through _start_bot/_start_entry_flow — the exit flow just
+        clicked Начать itself, so there is nothing left to resume from.
         """
-        if self._running:
-            return   # started by hand while the round was loading
-        self._start_bot()
+        if not self._bot_active:
+            return   # stopped by hand while this was waiting to fire
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd or (self._bot and self._bot.isRunning()):
+            return   # game window gone, or already running somehow
+        self._begin_round(hwnd, announce=False)
 
     def _thresholds(self) -> Thresholds:
         defaults = Thresholds()
@@ -679,51 +777,88 @@ class AvaDancersWindow(ModuleWindow):
               theme.ACCENT_GREEN if enabled else theme.TEXT_PRIMARY)],
             level="plain")
 
-    def _dump_debug_frames(self):
-        """Flush the bot's rolling capture buffer to disk for review.
+    # ── Reward detection (calibration) ────────────────────────────────────────
+    # One-shot match-percentage readout for the reward-line templates — click
+    # to see how well leave_gold.png / leave_silver.png match the current
+    # screen, no action taken beyond logging the number. Searched inside
+    # LeaveWatch's own calibrated region for that currency (see
+    # leave_watch.LEAVE_REGIONS), not the whole monitor — this is meant to
+    # check the same spot the real watcher will actually use.
 
-        Click this right after a miss: the bot is always recording its last
-        few seconds of raw tile frames while it runs, so the moment just
-        happened is still in the buffer.
-        """
-        if not self._bot or not self._bot.isRunning():
-            self._log.add_log("Бот не запущен — нечего сохранять", level="error")
-            return
-        out_dir = self._bot.dump_debug_frames(_PROJECT_ROOT / "debug_frames")
-        if out_dir is None:
-            self._log.add_log("Буфер пуст, кадров нет", level="error")
-            return
-        self._log.add_log(f"Кадры сохранены в {out_dir}", level="success")
-
-    # ── Test screenshot (window-capture check) ────────────────────────────────
-    # Verifies grab_window() actually reads the game's own render output —
-    # not whatever the desktop happens to show — while it is minimised or
-    # covered by another window. See app/core/capture.py.
-
-    def _start_test_screenshot(self):
-        if not self._wm.get_game_hwnd():
-            self._log.add_log("Игровое окно не найдено", level="error")
-            return
-        self._log.add_log(
-            f"Скрин поля через {_SCREENSHOT_DELAY_MS // 1000} сек — "
-            f"можно свернуть игру или переключиться на другое окно"
-        )
-        QTimer.singleShot(_SCREENSHOT_DELAY_MS, self._take_test_screenshot)
-
-    def _take_test_screenshot(self):
+    def _detect_reward(self, key: str, label: str):
         hwnd = self._wm.get_game_hwnd()
         if not hwnd:
             self._log.add_log("Игровое окно не найдено", level="error")
             return
+        filename = LEAVE_TEMPLATES[key]
+        template = load_template(filename)
+        if template is None:
+            self._log.add_log(f"Не найден шаблон: {filename}", level="error")
+            return
+        region = LEAVE_REGIONS.get(key) or primary_monitor_region()
         try:
-            frame = grab_window(hwnd)
-            out_path = _TEMPLATES / "screenshot.png"
-            if not cv2.imwrite(str(out_path), frame):
-                raise RuntimeError("cv2.imwrite вернул False")
+            gray = cv2.cvtColor(grab_window(hwnd, region),
+                                cv2.COLOR_BGR2GRAY)
         except Exception as exc:
             self._log.add_log(f"Скрин не удался: {exc}", level="error")
             return
-        self._log.add_log(f"Скрин сохранён: {out_path}", level="success")
+        score, _ = best_match(gray, template)
+        hit = score >= MATCH_THRESHOLD
+        tag = "✅ найдено" if hit else "— не найдено"
+        self._log.add_log(f"{label}: {score:.1%} {tag}",
+                          level="success" if hit else "plain")
+
+    # ── Rectangle calibration ───────────────────────────────────────────────
+    # Marks out where the reward line actually sits, so the watchers can be
+    # pointed at that one spot instead of scanning the whole screen for it.
+
+    def _toggle_calib(self):
+        """First press: a plain box appears over the game — drag its
+        middle to move it, an edge or corner to resize it. Second press:
+        its bounds go to the log, and it hides."""
+        if self._calib.isVisible():
+            self._log_calib_bounds()
+            self._calib.clear()
+            self._calib_btn.setText(_CALIB_START_TEXT)
+            self._calib_btn.set_active(False)
+            return
+
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd:
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+        rect = self._wm.window_rect_screen(hwnd)
+        if rect is None:
+            self._log.add_log("Не удалось определить положение окна игры",
+                              level="error")
+            return
+
+        ox, oy, w, h = rect
+        box = QRect(ox + (w - _CALIB_DEFAULT_W) // 2,
+                   oy + (h - _CALIB_DEFAULT_H) // 2,
+                   _CALIB_DEFAULT_W, _CALIB_DEFAULT_H)
+        self._calib.show_at(box)
+        self._calib_btn.setText(_CALIB_STOP_TEXT)
+        self._calib_btn.set_active(True)
+        self._log.add_log(
+            "Область — тяните за середину, чтобы подвинуть, за край или "
+            "угол — чтобы изменить размер. Нажмите кнопку ещё раз, чтобы "
+            "записать.",
+            level="plain")
+
+    def _log_calib_bounds(self):
+        box = self._calib.bounds()
+        cx, cy = box.center().x(), box.center().y()
+        self._log.add_log_segments(
+            [("Область — ", theme.TEXT_SECONDARY),
+             ("x", theme.VW_CYAN), (f" {box.left()}", theme.VW_MAGENTA),
+             ("  y", theme.VW_CYAN), (f" {box.top()}", theme.VW_MAGENTA),
+             ("  w", theme.VW_CYAN), (f" {box.width()}", theme.VW_MAGENTA),
+             ("  h", theme.VW_CYAN), (f" {box.height()}", theme.VW_MAGENTA),
+             ("  центр (", theme.TEXT_SECONDARY),
+             (f"{cx}, {cy}", theme.VW_MAGENTA),
+             (")", theme.TEXT_SECONDARY)],
+            level="plain")
 
     # ── Favorite ─────────────────────────────────────────────────────────────
 
@@ -750,12 +885,7 @@ class AvaDancersWindow(ModuleWindow):
     def _teardown(self):
         """Runs on the real close, after the switch-off animation."""
         self._panel.stop_background()
-        self._stop_finish_spam()
         self._stop_exit_flow()
-        if self._bot and self._bot.isRunning():
-            self._bot.stop_bot()
-            if not self._bot.wait(600):
-                self._bot.terminate()
-        self._stop_speedup_watch()
-        self._stop_leave_watch()
+        self._stop_round_threads()
         self._stop_entry_flow()
+        self._calib.clear()
