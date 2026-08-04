@@ -1,32 +1,35 @@
 {
     "overlay": {
-        "x": 97,
-        "y": 76,
-        "width": 572,
-        "height": 573,
+        "x": 169,
+        "y": 102,
+        "width": 678,
+        "height": 569,
         "opacity": 220,
-        "skip_close_confirm": true
+        "skip_close_confirm": true,
+        "background": "",
+        "video_background": false,
+        "show_links": true
     },
     "ava_dancers": {
         "favorite": true,
         "position_saved": true,
-        "x": 115,
-        "y": 713,
-        "width": 529,
+        "x": 165,
+        "y": 718,
+        "width": 478,
         "height": 654,
         "lit_share": 0.008,
         "red_share": 0.03,
         "hue_share": 0.15,
         "background": "",
-        "video_background": true,
+        "video_background": false,
         "finish_on": "silver",
-        "auto_restart": false
+        "auto_restart": true
     },
     "gardener": {
         "favorite": false,
         "position_saved": true,
-        "x": 1881,
-        "y": 747,
+        "x": 985,
+        "y": 174,
         "width": 531,
         "height": 700,
         "show_kind_buttons": false,
@@ -45,29 +48,31 @@
     "snowboard": {
         "favorite": false,
         "position_saved": true,
-        "x": 1841,
-        "y": 72,
+        "x": 1877,
+        "y": 133,
         "width": 472,
         "height": 785,
         "background": "",
-        "video_background": true
+        "video_background": false
     },
     "hockey": {
         "favorite": false,
         "position_saved": true,
-        "x": 903,
-        "y": 539,
+        "x": 1015,
+        "y": 255,
         "width": 755,
         "height": 888,
         "background": "",
-        "video_background": true
+        "video_background": false
     },
     "stats_window": {
         "favorite": false,
         "position_saved": true,
-        "x": 1893,
-        "y": 582,
-        "width": 548,
-        "height": 770
+        "x": 1633,
+        "y": 169,
+        "width": 519,
+        "height": 657,
+        "background": "",
+        "video_background": false
     }
 }

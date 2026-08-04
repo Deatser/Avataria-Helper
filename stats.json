@@ -5,19 +5,19 @@
         "registration_date": "01.08.2026"
     },
     "ava_dancers": {
-        "games_played": 0,
-        "gold_won": 0,
-        "silver_won": 0
+        "games_played": 25,
+        "gold_won": 60,
+        "silver_won": 68750
     },
     "gardener": {
-        "shifts_finished": 4,
+        "shifts_finished": 5,
         "clean_next_time": "0:00:00",
-        "clean_was_time": "2026-08-04T06:23:24.783071"
+        "clean_was_time": "2026-08-04T10:56:31.702138"
     },
     "janitor": {
         "shifts_finished": 0,
         "clean_next_time": "0:00:00",
-        "clean_was_time": "2026-08-04T06:23:24.783830"
+        "clean_was_time": "2026-08-04T10:56:31.702778"
     },
     "snowboard": {
         "games_played": 0,
