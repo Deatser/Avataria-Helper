@@ -31,6 +31,22 @@ class AvaDancersStats:
 
 
 @dataclass
+class SnowboardStats:
+    # Same shape as AvaDancersStats — a run is a run, gold and silver mean
+    # the same thing however it was farmed.
+    games_played: int = 0
+    gold_won: int = 0
+    silver_won: int = 0
+
+
+@dataclass
+class HockeyStats:
+    games_played: int = 0
+    gold_won: int = 0
+    silver_won: int = 0
+
+
+@dataclass
 class GardenerStats:
     shifts_finished: int = 0
     # When the garden next becomes cleanable — personal history, not a
@@ -58,6 +74,8 @@ class AppStats:
     ava_dancers: AvaDancersStats = field(default_factory=AvaDancersStats)
     gardener: GardenerStats = field(default_factory=GardenerStats)
     janitor: JanitorStats = field(default_factory=JanitorStats)
+    snowboard: SnowboardStats = field(default_factory=SnowboardStats)
+    hockey: HockeyStats = field(default_factory=HockeyStats)
 
 
 def shown(value, field_name: str) -> str:
@@ -89,10 +107,20 @@ class StatsManager:
 
     def record_ava_dancers_run(self, gold: int = 0, silver: int = 0):
         """One finished Ava Dancers round and what it paid out."""
-        stats = self.data.ava_dancers
-        stats.games_played += 1
-        stats.gold_won     += max(0, int(gold))
-        stats.silver_won   += max(0, int(silver))
+        self._record_run(self.data.ava_dancers, gold, silver)
+
+    def record_snowboard_run(self, gold: int = 0, silver: int = 0):
+        """One finished Snowboard run and what it paid out."""
+        self._record_run(self.data.snowboard, gold, silver)
+
+    def record_hockey_run(self, gold: int = 0, silver: int = 0):
+        """One finished Hockey round and what it paid out."""
+        self._record_run(self.data.hockey, gold, silver)
+
+    def _record_run(self, entity, gold: int, silver: int):
+        entity.games_played += 1
+        entity.gold_won     += max(0, int(gold))
+        entity.silver_won   += max(0, int(silver))
         self.save()
 
     def record_gardener_cleanup(self):

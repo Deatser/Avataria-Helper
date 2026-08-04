@@ -91,6 +91,20 @@ SB_TEXT        = "#e9eef7"
 SB_BORDER      = "#293957"
 SB_BORDER_DIM  = "#182234"
 
+# ── Ice (Хоккей module) ───────────────────────────────────────────────────────
+# Indoor rink: near-black ice under arena lights, a spark of boards-red
+# against the cold blue — brighter and icier than the Snowboard's overcast
+# steel, the two blues meant to read as clearly different modules.
+HK_BG          = "#04101a"
+HK_SURFACE     = "#0a1c2c"
+HK_ELEVATED    = "#11283d"
+HK_ICE         = "#67d3f5"   # the module accent — same value as ACCENT_ICE
+HK_ICE_SOFT    = "#b3ecfd"
+HK_RINK_RED    = "#c23b4a"   # boards/goal accent — the one warm note
+HK_TEXT        = "#e8f6ff"
+HK_BORDER      = "#1c3550"
+HK_BORDER_DIM  = "#0f2033"
+
 # ── Geometry ─────────────────────────────────────────────────────────────────
 RADIUS  = 8
 PADDING = 14

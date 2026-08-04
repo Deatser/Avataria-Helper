@@ -118,14 +118,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
                 layout.addWidget(btn)
 
         add_modules("top")
-
-        # Placeholder for the one module not implemented yet — Сноуборд
-        # graduated to a real, registered module (see MODULES) and no
-        # longer needs one of its own.
-        hockey = NtButton("Включить мод Хоккей", accent=theme.ACCENT_ICE,
-                          upper=False, outline=True)
-        layout.addWidget(hockey)
-
+        # Хоккей graduated to a real, registered module too (see MODULES)
+        # — no placeholders left here.
         add_modules("bottom")
 
         layout.addSpacing(6)

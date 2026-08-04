@@ -12,11 +12,21 @@
     "gardener": {
         "shifts_finished": 4,
         "clean_next_time": "0:00:00",
-        "clean_was_time": "2026-08-03T16:34:22.906542"
+        "clean_was_time": "2026-08-04T06:23:24.783071"
     },
     "janitor": {
         "shifts_finished": 0,
         "clean_next_time": "0:00:00",
-        "clean_was_time": "2026-08-03T16:34:22.907402"
+        "clean_was_time": "2026-08-04T06:23:24.783830"
+    },
+    "snowboard": {
+        "games_played": 0,
+        "gold_won": 0,
+        "silver_won": 0
+    },
+    "hockey": {
+        "games_played": 0,
+        "gold_won": 0,
+        "silver_won": 0
     }
 }

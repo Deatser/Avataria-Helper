@@ -1,32 +1,32 @@
 {
     "overlay": {
-        "x": 116,
-        "y": 187,
+        "x": 97,
+        "y": 76,
         "width": 572,
-        "height": 640,
+        "height": 573,
         "opacity": 220,
         "skip_close_confirm": true
     },
     "ava_dancers": {
-        "favorite": false,
+        "favorite": true,
         "position_saved": true,
-        "x": 65,
-        "y": 746,
-        "width": 420,
-        "height": 330,
+        "x": 115,
+        "y": 713,
+        "width": 529,
+        "height": 654,
         "lit_share": 0.008,
         "red_share": 0.03,
         "hue_share": 0.15,
         "background": "",
         "video_background": true,
-        "finish_on": "gold",
+        "finish_on": "silver",
         "auto_restart": false
     },
     "gardener": {
         "favorite": false,
         "position_saved": true,
-        "x": 1588,
-        "y": 150,
+        "x": 1881,
+        "y": 747,
         "width": 531,
         "height": 700,
         "show_kind_buttons": false,
@@ -35,8 +35,8 @@
     "janitor": {
         "favorite": false,
         "position_saved": true,
-        "x": 637,
-        "y": 754,
+        "x": 619,
+        "y": 764,
         "width": 621,
         "height": 622,
         "show_kind_buttons": true,
@@ -45,19 +45,29 @@
     "snowboard": {
         "favorite": false,
         "position_saved": true,
-        "x": 139,
-        "y": 592,
+        "x": 1841,
+        "y": 72,
         "width": 472,
         "height": 785,
+        "background": "",
+        "video_background": true
+    },
+    "hockey": {
+        "favorite": false,
+        "position_saved": true,
+        "x": 903,
+        "y": 539,
+        "width": 755,
+        "height": 888,
         "background": "",
         "video_background": true
     },
     "stats_window": {
         "favorite": false,
         "position_saved": true,
-        "x": 737,
-        "y": 39,
-        "width": 504,
-        "height": 558
+        "x": 1893,
+        "y": 582,
+        "width": 548,
+        "height": 770
     }
 }

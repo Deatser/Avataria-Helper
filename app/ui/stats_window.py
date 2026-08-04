@@ -14,7 +14,7 @@ from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.stat_tile import StatTile
 
 _MIN_W = 380
-_MIN_H = 420   # header + player rows + both games' tiles + hint + handle
+_MIN_H = 560   # header + player rows + all four modules' tiles + handle
 
 _COUNTDOWN_MS = 1000
 
@@ -96,6 +96,14 @@ class StatsWindow(ModuleWindow):
 
         layout.addWidget(self._section_label("УБОРЩИК", theme.JN_AMBER))
         layout.addLayout(self._build_janitor_tiles())
+        layout.addSpacing(6)
+
+        layout.addWidget(self._section_label("СНОУБОРД", theme.SB_STEEL))
+        layout.addLayout(self._build_snowboard_tiles())
+        layout.addSpacing(6)
+
+        layout.addWidget(self._section_label("ХОККЕЙ", theme.HK_ICE))
+        layout.addLayout(self._build_hockey_tiles())
         layout.addStretch()
 
         drag = NtDragHandle()
@@ -133,15 +141,33 @@ class StatsWindow(ModuleWindow):
         return header
 
     def _build_tiles(self) -> QGridLayout:
+        grid, self._games_tile, self._gold_tile, self._silver_tile = \
+            self._build_run_tiles(theme.ACCENT)
+        return grid
+
+    def _build_snowboard_tiles(self) -> QGridLayout:
+        grid, self._sb_games_tile, self._sb_gold_tile, self._sb_silver_tile = \
+            self._build_run_tiles(theme.SB_STEEL)
+        return grid
+
+    def _build_hockey_tiles(self) -> QGridLayout:
+        grid, self._hk_games_tile, self._hk_gold_tile, self._hk_silver_tile = \
+            self._build_run_tiles(theme.HK_ICE)
+        return grid
+
+    def _build_run_tiles(self, games_accent: str):
+        """The three-wide games/gold/silver row every "farming run" module
+        gets — same shape, only the "игр сыграно" tile's own accent
+        changes between modules; gold and silver always read in their own
+        colour no matter whose row they are in."""
         grid = QGridLayout()
         grid.setSpacing(theme.SPACING)
-        self._games_tile  = StatTile("игр сыграно", accent=theme.ACCENT)
-        self._gold_tile   = StatTile("золота",  accent=theme.ACCENT_AMBER)
-        self._silver_tile = StatTile("серебра", accent=theme.ACCENT_STEEL)
-        for column, tile in enumerate((self._games_tile, self._gold_tile,
-                                       self._silver_tile)):
+        games_tile  = StatTile("игр сыграно", accent=games_accent)
+        gold_tile   = StatTile("золота",  accent=theme.ACCENT_AMBER)
+        silver_tile = StatTile("серебра", accent=theme.ACCENT_STEEL)
+        for column, tile in enumerate((games_tile, gold_tile, silver_tile)):
             grid.addWidget(tile, 0, column)
-        return grid
+        return grid, games_tile, gold_tile, silver_tile
 
     def _build_gardener_tiles(self) -> QGridLayout:
         """Same three-wide row Ava Dancers gets, but only one number
@@ -244,10 +270,12 @@ class StatsWindow(ModuleWindow):
         self.refresh()
 
     def refresh(self):
-        player   = self._stats.data.player
-        ava      = self._stats.data.ava_dancers
-        gardener = self._stats.data.gardener
-        janitor  = self._stats.data.janitor
+        player    = self._stats.data.player
+        ava       = self._stats.data.ava_dancers
+        gardener  = self._stats.data.gardener
+        janitor   = self._stats.data.janitor
+        snowboard = self._stats.data.snowboard
+        hockey    = self._stats.data.hockey
 
         self._set_value(self._id_value,
                         shown(player.player_id, "player_id"))
@@ -259,6 +287,14 @@ class StatsWindow(ModuleWindow):
         self._games_tile.set_value(str(ava.games_played))
         self._gold_tile.set_value(str(ava.gold_won))
         self._silver_tile.set_value(str(ava.silver_won))
+
+        self._sb_games_tile.set_value(str(snowboard.games_played))
+        self._sb_gold_tile.set_value(str(snowboard.gold_won))
+        self._sb_silver_tile.set_value(str(snowboard.silver_won))
+
+        self._hk_games_tile.set_value(str(hockey.games_played))
+        self._hk_gold_tile.set_value(str(hockey.gold_won))
+        self._hk_silver_tile.set_value(str(hockey.silver_won))
 
         self._cleanup_tile.set_value(str(gardener.shifts_finished))
         self._janitor_cleanup_tile.set_value(str(janitor.shifts_finished))

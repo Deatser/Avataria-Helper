@@ -82,6 +82,18 @@ class SnowboardConfig:
 
 
 @dataclass
+class HockeyConfig:
+    favorite: bool = False
+    position_saved: bool = False
+    x: int = 370
+    y: int = 10
+    width: int = 420
+    height: int = 480
+    background: str = ""            # explicit backdrop path; empty → auto-pick
+    video_background: bool = True   # off → still image instead of the video
+
+
+@dataclass
 class StatsWindowConfig:
     """Geometry and autostart — the numbers themselves live in stats.json."""
     favorite: bool = False      # open together with the helper at startup
@@ -89,7 +101,7 @@ class StatsWindowConfig:
     x: int = 420
     y: int = 60
     width: int = 460
-    height: int = 400
+    height: int = 560
 
 
 @dataclass
@@ -99,6 +111,7 @@ class AppConfig:
     gardener: GardenerConfig = field(default_factory=GardenerConfig)
     janitor: JanitorConfig = field(default_factory=JanitorConfig)
     snowboard: SnowboardConfig = field(default_factory=SnowboardConfig)
+    hockey: HockeyConfig = field(default_factory=HockeyConfig)
     stats_window: StatsWindowConfig = field(default_factory=StatsWindowConfig)
 
 
