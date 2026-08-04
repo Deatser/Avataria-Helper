@@ -14,6 +14,17 @@ class OverlayConfig:
     height: int = 1050
     opacity: int = 220
     skip_close_confirm: bool = False   # "Не спрашивать снова" on the close dialog
+    background: str = ""            # explicit backdrop path; empty → auto-pick
+    # Every window with its own backdrop carries this same field, one per
+    # section — there is no single shared flag. SettingsWindow's own
+    # "Видеофон" switch is what keeps them all in step: it writes this
+    # value into every section at once (see SettingsWindow._toggle_video),
+    # not just this one. A window's own _apply_backdrop() still only ever
+    # reads its own section's copy.
+    video_background: bool = True   # off → still image instead of the video
+    # The wires SettingsWindow's own "Линии между окнами" switch controls —
+    # purely decorative (NodeLinkCanvas), so nothing else reads this.
+    show_links: bool = True
 
 
 @dataclass
@@ -102,6 +113,8 @@ class StatsWindowConfig:
     y: int = 60
     width: int = 460
     height: int = 560
+    background: str = ""            # explicit backdrop path; empty → auto-pick
+    video_background: bool = True   # off → still image instead of the video
 
 
 @dataclass

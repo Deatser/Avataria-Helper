@@ -64,6 +64,7 @@ class NodeLinkCanvas(GameLayer):
     def __init__(self, window_manager=None):
         super().__init__(window_manager)
         self._links: list[_Link] = []
+        self._enabled  = True   # SettingsWindow's own "Линии между окнами"
         self._rect     = QRect()
 
         self._geom: dict[int, QRect] = {}   # window id → last seen rectangle
@@ -76,8 +77,18 @@ class NodeLinkCanvas(GameLayer):
 
     # ── Public API ───────────────────────────────────────────────────────────
 
+    def set_enabled(self, enabled: bool):
+        """Purely cosmetic, so turning it off just means no new wire ever
+        gets drawn — whatever is already on screen is dropped immediately,
+        same as clear(), rather than left to retract on its own."""
+        self._enabled = enabled
+        if not enabled:
+            self.clear()
+
     def connect_windows(self, parent: QWidget, child: QWidget, accent: str):
         """Draw a wire out to a window that has just opened."""
+        if not self._enabled:
+            return
         self.disconnect_window(child, animate=False)
         link = _Link(parent, child, accent or theme.ACCENT)
         link.anim = self._animation(link, 0.0, 1.0, GROW_MS)

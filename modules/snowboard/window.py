@@ -35,7 +35,7 @@ from app.ui.quad_calibration_overlay import QuadCalibrationOverlay
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.nt_status_dot import NtStatusDot
-from app.ui.widgets.nt_switch import NtSwitch
+from app.ui.widgets.log_actions import build_log_actions
 from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
 from modules.snowboard.player_lanes import LANE_COLOURS, LANE_QUADS, LANE_REGIONS
@@ -234,13 +234,6 @@ class SnowboardWindow(ModuleWindow):
         guide_btn.setMinimumHeight(30)
         layout.addWidget(guide_btn)
 
-        self._video_switch = NtSwitch("Видеофон  ·  выключите на слабом ПК",
-                                      accent=theme.SB_STEEL)
-        self._video_switch.set_checked_silently(
-            getattr(self.config, "video_background", True))
-        self._video_switch.toggled.connect(self._toggle_video_background)
-        layout.addWidget(self._video_switch)
-
         # Backdrop: templates/snowboard_sinthwawe.* by default, video
         # first — configured here, still inside _build_ui and so still
         # before the window has ever been shown, since a video decodes
@@ -261,16 +254,6 @@ class SnowboardWindow(ModuleWindow):
         backdrop = getattr(self.config, "background", "") or _default_backdrop(video)
         if backdrop and not self._panel.set_background(backdrop, fade=fade):
             self._log.add_log(f"Фон не загружен: {backdrop}", level="error")
-
-    def _toggle_video_background(self, enabled: bool):
-        self.config.video_background = enabled
-        self.save_fn()
-        self._apply_backdrop()
-        self._log.add_log_segments(
-            [("Фон окна: ", theme.TEXT_SECONDARY),
-             ("видео" if enabled else "фото",
-              theme.SB_STEEL if enabled else theme.TEXT_PRIMARY)],
-            level="plain")
 
     def _crt_open_ready(self) -> bool:
         """Hold the switch-on until the video backdrop has a frame to show."""
@@ -368,21 +351,18 @@ class SnowboardWindow(ModuleWindow):
         block = QVBoxLayout()
         block.setSpacing(4)
 
+        self._log = LogPanel()
+        self._log.setMinimumHeight(_LOG_H)
+
         head = QHBoxLayout()
         title = QLabel("Snowboard Log:")
         title.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         title.setStyleSheet(f"color:{theme.SB_TEXT}; background:transparent;")
-        clear_btn = NtButton("⌫", accent=theme.SB_BORDER)
-        clear_btn.setFixedSize(22, 20)
-        clear_btn.setToolTip("Очистить логи")
-        clear_btn.clicked.connect(lambda: self._log.clear_logs())
         head.addWidget(title)
         head.addStretch()
-        head.addWidget(clear_btn)
+        head.addLayout(build_log_actions(self._log, theme.SB_BORDER))
         block.addLayout(head)
 
-        self._log = LogPanel()
-        self._log.setMinimumHeight(_LOG_H)
         block.addWidget(self._log, stretch=1)
         return block
 

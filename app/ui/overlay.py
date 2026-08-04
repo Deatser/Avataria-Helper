@@ -1,5 +1,7 @@
 # app/ui/overlay.py
 from __future__ import annotations
+from pathlib import Path
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QApplication, QDialog)
 from PySide6.QtCore import Qt, QPoint, QTimer
@@ -7,6 +9,7 @@ from PySide6.QtCore import Qt, QPoint, QTimer
 from app.core.stats import StatsManager
 from app.ui import theme
 from app.ui.crt_power_mixin import CrtPowerMixin
+from app.ui.helper_settings_panel import HelperSettingsPanel
 from app.ui.module_window import _SAVE_DELAY_MS
 from app.ui.drag_mixin import BackgroundDragMixin
 from app.ui.node_links import NodeLinkCanvas
@@ -14,12 +17,31 @@ from app.ui.resize_mixin import ResizeMixin
 from app.ui.stats_window import StatsWindow
 from app.ui.collapse_mixin import CollapseMixin
 from app.ui.widgets.nt_button import NtButton
-from app.ui.widgets.nt_panel import NtPanel
 from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.nt_status_dot import NtStatusDot
+from app.ui.widgets.log_actions import build_log_actions
 from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_confirm_dialog import NtConfirmDialog
+from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
 from app.module_registry import MODULES
+
+# Same auto-pick rule every module's own backdrop uses — see
+# modules.ava_dancers.window._default_backdrop.
+_BACKDROP_STEM  = "AvaHelper"
+_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
+_TEMPLATES      = _PROJECT_ROOT / "templates"
+_STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _default_backdrop(video: bool = True) -> str:
+    """First existing templates/AvaHelper.* file."""
+    moving = VIDEO_SUFFIXES + (".gif",)
+    order  = moving + _STILL_SUFFIXES if video else _STILL_SUFFIXES + moving
+    for suffix in order:
+        candidate = _TEMPLATES / f"{_BACKDROP_STEM}{suffix}"
+        if candidate.is_file():
+            return str(candidate)
+    return ""
 
 
 class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
@@ -33,7 +55,9 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self.wm = window_manager
         self.stats = stats if stats is not None else StatsManager()
         self._stats_window: StatsWindow | None = None
+        self._settings_panel: HelperSettingsPanel | None = None
         self._links = NodeLinkCanvas(window_manager)
+        self._links.set_enabled(getattr(config.data.overlay, "show_links", True))
         self._drag_origin = QPoint()
         self._drag_from   = QPoint()
         self._save_later  = QTimer(self)
@@ -45,7 +69,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._startup_done  = False
         self._game_ok       = None   # tri-state: unknown until first check
         self._pending_logs: list[tuple[list, str]] = []
-        self._panel: NtPanel | None = None
+        self._panel: VwPanel | None = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -64,7 +88,11 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._game_watch.start()
 
     def _build_ui(self):
-        self._panel = NtPanel(self)
+        self._panel = VwPanel(self)
+        # Same tall-and-narrow crop StatsWindow deals with, biased the other
+        # way — just a slight nudge left, not the full swing StatsWindow's
+        # own backdrop needed.
+        self._panel.focus_x = -0.2
         self._panel.setGeometry(0, 0, self.width(), self.height())
         self._panel.setMouseTracking(True)
 
@@ -128,23 +156,20 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         # Clearing moved up here as a small button on the heading row: it is
         # an action on the log itself, and it frees the full-width slot below
         # for something worth pressing often.
+        self.log_panel = LogPanel()
+        self.log_panel.setMinimumHeight(80)
+
         log_head = QHBoxLayout()
         log_label = QLabel("LOG")
         log_label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         log_label.setStyleSheet(
             f"color:{theme.TEXT_PRIMARY}; background:transparent;"
         )
-        clear_btn = NtButton("⌫", accent=theme.BORDER_BRIGHT)
-        clear_btn.setFixedSize(22, 20)
-        clear_btn.setToolTip("Очистить логи")
-        clear_btn.clicked.connect(lambda: self.log_panel.clear_logs())
         log_head.addWidget(log_label)
         log_head.addStretch()
-        log_head.addWidget(clear_btn)
+        log_head.addLayout(build_log_actions(self.log_panel, theme.BORDER_BRIGHT))
         layout.addLayout(log_head)
 
-        self.log_panel = LogPanel()
-        self.log_panel.setMinimumHeight(80)
         layout.addWidget(self.log_panel, stretch=1)
 
         stats_btn = NtButton("Статистика", upper=False,
@@ -156,7 +181,14 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         settings_btn = NtButton("Настройки", accent=theme.ACCENT,
                                 upper=False, filled=True)
         settings_btn.setMinimumHeight(30)
+        settings_btn.clicked.connect(self._toggle_settings)
         layout.addWidget(settings_btn)
+
+        # ── Backdrop: templates/AvaHelper.* by default, video first ──────────
+        self._panel.background_failed.connect(
+            lambda msg: self.add_log(msg, level="error")
+        )
+        self._apply_backdrop(fade=False)
 
         # ── Drag handle ──────────────────────────────────────────────────────
         drag = NtDragHandle()
@@ -164,11 +196,26 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         drag.mouseMoveEvent  = self._drag_move
         layout.addWidget(drag)
 
+    # ── Backdrop ─────────────────────────────────────────────────────────────
+
+    def _apply_backdrop(self, fade: bool = True):
+        cfg      = self.config.data.overlay
+        video    = getattr(cfg, "video_background", True)
+        backdrop = getattr(cfg, "background", "") or _default_backdrop(video)
+        if backdrop and not self._panel.set_background(backdrop, fade=fade):
+            self.add_log(f"Фон не загружен: {backdrop}", level="error")
+
+    def _crt_open_ready(self) -> bool:
+        """Hold the switch-on until the video backdrop has a frame to show."""
+        return self._panel.backdrop_ready
+
     # ── ResizeMixin hooks ────────────────────────────────────────────────────
 
     def _on_resize_panel(self):
         if self._panel is not None:
             self._panel.setGeometry(0, 0, self.width(), self.height())
+        if self._settings_panel is not None:
+            self._settings_panel.keep_inside_host()
 
     def _on_resize_done(self):
         self.config.data.overlay.width  = self.width()
@@ -244,6 +291,13 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             self._pending_logs.append((segments, level))
             return
         self.log_panel.add_log_segments(segments, level)
+
+    # ── Settings ─────────────────────────────────────────────────────────────
+
+    def _toggle_settings(self):
+        if self._settings_panel is None:
+            self._settings_panel = HelperSettingsPanel(self)
+        self._settings_panel.toggle()
 
     # ── Statistics ───────────────────────────────────────────────────────────
 
@@ -381,6 +435,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
     def closeEvent(self, event):
         if getattr(self, "_crt_started", False):
+            self._panel.stop_background()
             QApplication.quit()   # the animation has played; really go now
             event.accept()
             return
