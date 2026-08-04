@@ -22,21 +22,9 @@ def _screen_showing(*templates, size=(1000, 1600)):
     return cv2.cvtColor(scene, cv2.COLOR_GRAY2BGR)
 
 
-class _OneFrameCapture:
-    def __init__(self, frame):
-        self.frame = frame
-
-    def grab(self, _region):
-        return self.frame
-
-
 def _flow_over(monkeypatch, frame):
     """An EntryFlow whose screen is always `frame`, with steps stubbed out."""
-    capture = _OneFrameCapture(frame)
-    monkeypatch.setattr(entry_flow.ScreenCapture, "get",
-                        classmethod(lambda cls: capture))
-    monkeypatch.setattr(click_flow.ScreenCapture, "get",
-                        classmethod(lambda cls: capture))
+    monkeypatch.setattr(click_flow, "grab_window", lambda _hwnd, _region: frame)
     monkeypatch.setattr(entry_flow, "primary_monitor_region", lambda: {})
     monkeypatch.setattr(click_flow, "primary_monitor_region", lambda: {})
 

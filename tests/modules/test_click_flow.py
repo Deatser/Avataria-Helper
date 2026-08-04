@@ -64,13 +64,17 @@ def test_every_template_the_flows_reference_is_on_disk():
 # ── The step loop, driven by a scripted screen ──────────────────────────────
 
 class _ScriptedCapture:
-    """Serves a list of prepared BGR frames, repeating the last one."""
+    """Serves a list of prepared BGR frames, repeating the last one.
+
+    Stands in for grab_window(hwnd, region) — same scripted-frames idea, just
+    a plain callable instead of an object with its own .grab().
+    """
 
     def __init__(self, frames):
         self.frames = frames
         self.taken  = 0
 
-    def grab(self, _region):
+    def __call__(self, _hwnd, _region):
         frame = self.frames[min(self.taken, len(self.frames) - 1)]
         self.taken += 1
         return frame
@@ -105,11 +109,9 @@ def _scene_with_both(first_gray, second_gray, size=(700, 1200)):
 def _run_one_step(monkeypatch, frames, reclick=None, timeout=None,
                   following=None):
     template = load_template(OK_STEP[1])
-    capture  = _ScriptedCapture(frames)
     clicks   = []
 
-    monkeypatch.setattr(click_flow.ScreenCapture, "get",
-                        classmethod(lambda cls: capture))
+    monkeypatch.setattr(click_flow, "grab_window", _ScriptedCapture(frames))
     monkeypatch.setattr(click_flow, "primary_monitor_region", lambda: {})
     monkeypatch.setattr(click_flow, "click_at",
                         lambda hwnd, x, y: clicks.append((x, y)) or True)
@@ -184,8 +186,8 @@ def _run_with_scores(monkeypatch, scores, timeout=2.0):
 
     fed_last = [scores[-1]]
     monkeypatch.setattr(click_flow, "best_match", fake_match)
-    monkeypatch.setattr(click_flow.ScreenCapture, "get",
-                        classmethod(lambda cls: _ScriptedCapture([_empty_scene()])))
+    monkeypatch.setattr(click_flow, "grab_window",
+                        _ScriptedCapture([_empty_scene()]))
     monkeypatch.setattr(click_flow, "primary_monitor_region", lambda: {})
     monkeypatch.setattr(click_flow, "click_at",
                         lambda hwnd, x, y: clicks.append((x, y)) or True)

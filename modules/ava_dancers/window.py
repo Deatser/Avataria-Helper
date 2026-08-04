@@ -2,11 +2,13 @@
 from __future__ import annotations
 from pathlib import Path
 
+import cv2
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
                                QGraphicsDropShadowEffect)
 from PySide6.QtGui import QColor, QFontMetricsF
 from PySide6.QtCore import Qt, QTimer, QThread
 
+from app.core.capture import grab_window
 from app.core.input_sender import press_key
 from app.core.template_match import FINISH_GOLD, FINISH_SILVER
 from app.ui.module_window import ModuleWindow
@@ -43,6 +45,11 @@ _FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
 # Gap between clicking Старт and putting the detector back to work, so it
 # does not spend its first seconds polling a round that is still loading.
 _RESTART_BOT_DELAY_MS = 2_000
+
+# Time before the test shot is actually taken — long enough to alt-tab away
+# from the game or minimise it by hand, to see whether the capture still
+# gets the game and not whatever is on top of it.
+_SCREENSHOT_DELAY_MS = 3_000
 
 # Tile index → on-screen arrow (tiles are ordered A, S, W, D)
 _KEY_LABELS = ["←", "↓", "↑", "→"]
@@ -204,6 +211,11 @@ class AvaDancersWindow(ModuleWindow):
         debug_btn.clicked.connect(self._dump_debug_frames)
         layout.addWidget(debug_btn)
 
+        screenshot_btn = NtButton("📷  Скрин поля (через 3 сек)", accent=theme.VW_PURPLE,
+                                  upper=False)
+        screenshot_btn.clicked.connect(self._start_test_screenshot)
+        layout.addWidget(screenshot_btn)
+
         # ── Tile status row — the main readout, so it gets the room ───────────
         tiles_row = QHBoxLayout()
         self._tiles_row = tiles_row
@@ -361,8 +373,8 @@ class AvaDancersWindow(ModuleWindow):
         self._bot.tiles_seen.connect(self._on_tiles_seen)
         self._bot.error.connect(lambda e: self._log.add_log(e, level="error"))
         self._bot.start()
-        self._start_speedup_watch()
-        self._start_leave_watch()
+        self._start_speedup_watch(hwnd)
+        self._start_leave_watch(hwnd)
 
         self._status_dot.set_running()
         self._log.add_log("Бот запущен", level="success")
@@ -399,12 +411,12 @@ class AvaDancersWindow(ModuleWindow):
     # module's own — Ava Dancers' log is for tile-by-tile play-by-play, this
     # is a session-level heads-up, and the two don't need to say it twice.
 
-    def _start_speedup_watch(self):
+    def _start_speedup_watch(self, hwnd: int):
         self._stop_speedup_watch()   # defensive: never leave a prior watcher
                                       # orphaned and still running underneath
                                       # a new one — that alone doubles every
                                       # message it emits.
-        self._speedup_watch = SpeedupWatch()
+        self._speedup_watch = SpeedupWatch(hwnd)
         self._speedup_watch.watch_started.connect(self._on_speedup_watch_started)
         self._speedup_watch.detected.connect(self._on_speedup_detected)
         self._speedup_watch.error.connect(lambda e: self._log.add_log(e, level="error"))
@@ -485,9 +497,9 @@ class AvaDancersWindow(ModuleWindow):
             level="plain",   # a setting's new value, not an action's outcome
         )
 
-    def _start_leave_watch(self):
+    def _start_leave_watch(self, hwnd: int):
         self._stop_leave_watch()
-        self._leave_watch = LeaveWatch(self.finish_target())
+        self._leave_watch = LeaveWatch(hwnd, self.finish_target())
         self._leave_watch.leave_ready.connect(self._on_leave_ready)
         self._leave_watch.error.connect(
             lambda e: self._log.add_log(e, level="error"))
@@ -682,6 +694,36 @@ class AvaDancersWindow(ModuleWindow):
             self._log.add_log("Буфер пуст, кадров нет", level="error")
             return
         self._log.add_log(f"Кадры сохранены в {out_dir}", level="success")
+
+    # ── Test screenshot (window-capture check) ────────────────────────────────
+    # Verifies grab_window() actually reads the game's own render output —
+    # not whatever the desktop happens to show — while it is minimised or
+    # covered by another window. See app/core/capture.py.
+
+    def _start_test_screenshot(self):
+        if not self._wm.get_game_hwnd():
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+        self._log.add_log(
+            f"Скрин поля через {_SCREENSHOT_DELAY_MS // 1000} сек — "
+            f"можно свернуть игру или переключиться на другое окно"
+        )
+        QTimer.singleShot(_SCREENSHOT_DELAY_MS, self._take_test_screenshot)
+
+    def _take_test_screenshot(self):
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd:
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+        try:
+            frame = grab_window(hwnd)
+            out_path = _TEMPLATES / "screenshot.png"
+            if not cv2.imwrite(str(out_path), frame):
+                raise RuntimeError("cv2.imwrite вернул False")
+        except Exception as exc:
+            self._log.add_log(f"Скрин не удался: {exc}", level="error")
+            return
+        self._log.add_log(f"Скрин сохранён: {out_path}", level="success")
 
     # ── Favorite ─────────────────────────────────────────────────────────────
 

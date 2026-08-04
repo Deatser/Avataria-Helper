@@ -6,7 +6,7 @@ import time
 import cv2
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import ScreenCapture
+from app.core.capture import grab_window
 from app.core.input_sender import click_at
 from app.core.template_match import (best_match, load_template,
                                      primary_monitor_region)
@@ -81,10 +81,7 @@ class ClickFlow(QThread):
 
     def run(self):
         self._stop_event.clear()
-        try:
-            self._execute()
-        finally:
-            ScreenCapture.release()
+        self._execute()
 
     def _execute(self):
         """Overridden where a flow has to decide something before it starts."""
@@ -109,8 +106,8 @@ class ClickFlow(QThread):
 
     # ── One button ───────────────────────────────────────────────────────────
 
-    def grab_gray(self, capture, region):
-        return cv2.cvtColor(capture.grab(region), cv2.COLOR_BGR2GRAY)
+    def grab_gray(self, hwnd, region):
+        return cv2.cvtColor(grab_window(hwnd, region), cv2.COLOR_BGR2GRAY)
 
     def run_step(self, label: str, template, following=None) -> bool:
         """Click one button until the flow has visibly moved past it.
@@ -136,7 +133,6 @@ class ClickFlow(QThread):
         the poll interval.
         """
         self.step_started.emit(label)
-        capture    = ScreenCapture.get()
         region     = primary_monitor_region()
         deadline   = time.monotonic() + self.step_timeout
         h, w       = template.shape[:2]
@@ -154,7 +150,7 @@ class ClickFlow(QThread):
                     f"лучшее совпадение {peak:.0%}")
                 return False
             try:
-                gray = self.grab_gray(capture, region)
+                gray = self.grab_gray(self._hwnd, region)
 
                 if following is not None and not next_useless:
                     next_score, _ = best_match(gray, following)

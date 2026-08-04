@@ -13,7 +13,7 @@ class _FakeMatch:
 
 
 def _fired(target, matches):
-    watch = LeaveWatch(target)
+    watch = LeaveWatch(0, target)
     seen = []
     watch.leave_ready.connect(lambda label, score: seen.append((label, score)))
     watch._check_target(matches)
@@ -35,7 +35,7 @@ def test_the_other_currency_is_ignored_however_well_it_matches():
 
 
 def test_it_fires_once_per_run():
-    watch = LeaveWatch(FINISH_GOLD)
+    watch = LeaveWatch(0, FINISH_GOLD)
     seen = []
     watch.leave_ready.connect(lambda label, score: seen.append(score))
     matches = [_FakeMatch(FINISH_GOLD, 1.0)]
@@ -45,7 +45,7 @@ def test_it_fires_once_per_run():
 
 
 def test_switching_target_re_arms_the_trigger():
-    watch = LeaveWatch(FINISH_GOLD)
+    watch = LeaveWatch(0, FINISH_GOLD)
     seen = []
     watch.leave_ready.connect(lambda label, score: seen.append(score))
     watch._check_target([_FakeMatch(FINISH_GOLD, 1.0)])

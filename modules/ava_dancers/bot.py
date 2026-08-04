@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import ScreenCapture
+from app.core.capture import grab_window
 from app.core.input_sender import press_key
 
 # A thin strip near the top of the tile — wide capture heights and
@@ -325,11 +325,7 @@ class AvaBot(QThread):
         self._stop_event.set()
 
     def run(self):
-        try:
-            self._loop()
-        finally:
-            # This thread dies on every stop — hand its GDI context back
-            ScreenCapture.release()
+        self._loop()
 
     def _loop(self):
         self._stop_event.clear()
@@ -339,11 +335,10 @@ class AvaBot(QThread):
         self._poll_sleep = _POLL_SLEEP
         with self._debug_lock:
             self._debug.clear()
-        capture = ScreenCapture.get()
 
         while not self._stop_event.is_set():
             try:
-                img      = capture.grab(TILE_REGION)
+                img      = grab_window(self._hwnd, TILE_REGION)
                 tiles    = split_tiles(img)
                 readings = [classify_tile(t, self._thresholds_for(i))
                             for i, t in enumerate(tiles)]

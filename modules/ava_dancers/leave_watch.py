@@ -5,7 +5,7 @@ import threading
 import cv2
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import ScreenCapture
+from app.core.capture import grab_window
 from app.core.template_match import (LEAVE_TEMPLATES, MATCH_THRESHOLD, Match,
                                      FINISH_GOLD, primary_monitor_region,
                                      search_screen)
@@ -25,8 +25,9 @@ class LeaveWatch(QThread):
     leave_ready  = Signal(str, float)    # display label, score — time to finish
     error        = Signal(str)
 
-    def __init__(self, target: str = FINISH_GOLD):
+    def __init__(self, game_hwnd: int, target: str = FINISH_GOLD):
         super().__init__()
+        self._hwnd       = game_hwnd
         self._target     = target
         self._stop_event = threading.Event()
         self._fired      = False
@@ -44,20 +45,16 @@ class LeaveWatch(QThread):
         self._stop_event.set()
 
     def run(self):
-        try:
-            self._loop()
-        finally:
-            ScreenCapture.release()
+        self._loop()
 
     def _loop(self):
         self._stop_event.clear()
         self._fired = False
-        capture  = ScreenCapture.get()
         region   = primary_monitor_region()
 
         while not self._stop_event.is_set():
             try:
-                gray = cv2.cvtColor(capture.grab(region), cv2.COLOR_BGR2GRAY)
+                gray = cv2.cvtColor(grab_window(self._hwnd, region), cv2.COLOR_BGR2GRAY)
                 self._check_target(search_screen(LEAVE_TEMPLATES, screen=gray))
 
             except Exception as exc:

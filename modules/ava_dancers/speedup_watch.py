@@ -8,7 +8,7 @@ import cv2
 import mss
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import ScreenCapture
+from app.core.capture import grab_window
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 
@@ -59,38 +59,35 @@ class SpeedupWatch(QThread):
     detected      = Signal(str, float)   # mark label, match score
     error         = Signal(str)
 
-    def __init__(self):
+    def __init__(self, game_hwnd: int):
         super().__init__()
+        self._hwnd        = game_hwnd
         self._stop_event = threading.Event()
 
     def stop_watch(self):
         self._stop_event.set()
 
     def run(self):
-        try:
-            templates = []
-            for label, filename in MARKS:
-                img = cv2.imread(str(_TEMPLATES_DIR / filename), cv2.IMREAD_GRAYSCALE)
-                if img is None:
-                    self.error.emit(f"Не найден шаблон таймера: {filename}")
-                    continue
-                templates.append((label, img))
-            if not templates:
-                return
-            self._loop(templates)
-        finally:
-            ScreenCapture.release()
+        templates = []
+        for label, filename in MARKS:
+            img = cv2.imread(str(_TEMPLATES_DIR / filename), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                self.error.emit(f"Не найден шаблон таймера: {filename}")
+                continue
+            templates.append((label, img))
+        if not templates:
+            return
+        self._loop(templates)
 
     def _loop(self, templates: list[tuple[str, "cv2.Mat"]]):
         self._stop_event.clear()
-        capture = ScreenCapture.get()
         region  = _primary_monitor_region()
         last_match = {label: 0.0 for label, _ in templates}
         self.watch_started.emit()
 
         while not self._stop_event.is_set():
             try:
-                img  = capture.grab(region)
+                img  = grab_window(self._hwnd, region)
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 now  = time.time()
 
