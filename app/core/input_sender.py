@@ -6,6 +6,39 @@ import win32gui
 
 _HOLD_S = 0.02   # WM_KEYDOWN to WM_KEYUP gap
 
+# The game is a Chromium/Electron window: the top-level hwnd (Chrome_WidgetWin_1)
+# only hosts the real input target, this child, which is what actually turns a
+# posted message into a DOM event — and which additionally checks its own idea
+# of focus before doing so, unlike a plain Win32 control.
+_RENDER_CLASS = "Chrome_RenderWidgetHostHWND"
+
+
+def _input_target(hwnd: int) -> int:
+    """The window a message actually has to land on to reach the page.
+
+    Falls back to hwnd itself for anything that isn't this kind of window
+    (or where the child hasn't been found), so plain Win32 targets still work
+    exactly as before.
+    """
+    child = win32gui.FindWindowEx(hwnd, 0, _RENDER_CLASS, None)
+    return child or hwnd
+
+
+def _prime_focus(hwnd: int, target: int):
+    """Tell the page it is focused without touching real OS focus.
+
+    Posted, exactly like the input that follows — never SetFocus/
+    SetForegroundWindow, which would pull focus (and the real cursor) away
+    from whatever the user is actually doing. Chromium only turns a posted
+    key or click into a page event once it believes it is the focused
+    window; nothing here ever tells it otherwise afterwards (that would take
+    a real WM_KILLFOCUS, which only arrives if the window actually had OS
+    focus to lose), so once this sticks it keeps sticking.
+    """
+    win32api.PostMessage(hwnd, win32con.WM_ACTIVATE, win32con.WA_ACTIVE, 0)
+    win32api.PostMessage(target, win32con.WM_SETFOCUS, 0, 0)
+
+
 VK_MAP: dict[str, int] = {
     "a": 0x41, "b": 0x42, "c": 0x43, "d": 0x44, "e": 0x45,
     "f": 0x46, "g": 0x47, "h": 0x48, "i": 0x49, "j": 0x4A,
@@ -34,9 +67,11 @@ def press_key(hwnd: int, key: str) -> bool:
     vk = VK_MAP.get(key.lower())
     if not vk or not hwnd:
         return False
-    win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
+    target = _input_target(hwnd)
+    _prime_focus(hwnd, target)
+    win32api.PostMessage(target, win32con.WM_KEYDOWN, vk, 0)
     threading.Timer(_HOLD_S, win32api.PostMessage,
-                     args=(hwnd, win32con.WM_KEYUP, vk, 0)).start()
+                     args=(target, win32con.WM_KEYUP, vk, 0)).start()
     return True
 
 
@@ -71,14 +106,16 @@ def click_at(hwnd: int, screen_x: int, screen_y: int,
     """
     if not hwnd:
         return False
+    target = _input_target(hwnd)
     try:
-        cx, cy = win32gui.ScreenToClient(hwnd, (int(screen_x), int(screen_y)))
+        cx, cy = win32gui.ScreenToClient(target, (int(screen_x), int(screen_y)))
     except win32gui.error:
         return False
     pos = _lparam(cx, cy)
-    win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, pos)
-    win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, pos)
-    threading.Timer(_HOLD_S, _release, args=(hwnd, pos, give_back)).start()
+    _prime_focus(hwnd, target)
+    win32api.PostMessage(target, win32con.WM_MOUSEMOVE, 0, pos)
+    win32api.PostMessage(target, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, pos)
+    threading.Timer(_HOLD_S, _release, args=(target, pos, give_back)).start()
     return True
 
 
@@ -91,3 +128,62 @@ def _release(hwnd: int, pos: int, give_back: bool):
     except Exception:
         return          # no cursor to hand back to; the click still stands
     win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, _lparam(x, y))
+
+
+def _to_client(hwnd: int, screen_x: int, screen_y: int) -> tuple[int, int] | None:
+    try:
+        return win32gui.ScreenToClient(hwnd, (int(screen_x), int(screen_y)))
+    except win32gui.error:
+        return None
+
+
+def mouse_down_at(hwnd: int, screen_x: int, screen_y: int) -> bool:
+    """Press and hold the left button at a screen point — the opening move
+    of a drag (Хоккей's curved shot: hold, drag left/right, release).
+    Pairs with mouse_move_to (while held) and mouse_up_at (to let go);
+    unlike click_at, nothing here posts its own release on a timer, since a
+    drag's whole point is the button staying down across several moves the
+    caller spaces out itself.
+    """
+    if not hwnd:
+        return False
+    target = _input_target(hwnd)
+    client = _to_client(target, screen_x, screen_y)
+    if client is None:
+        return False
+    pos = _lparam(*client)
+    _prime_focus(hwnd, target)
+    win32api.PostMessage(target, win32con.WM_MOUSEMOVE, 0, pos)
+    win32api.PostMessage(target, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, pos)
+    return True
+
+
+def mouse_move_to(hwnd: int, screen_x: int, screen_y: int) -> bool:
+    """One point along a held drag — WM_MOUSEMOVE carrying MK_LBUTTON, the
+    flag that tells a game a drag is still in progress rather than the
+    pointer just wandering with nothing held."""
+    if not hwnd:
+        return False
+    target = _input_target(hwnd)
+    client = _to_client(target, screen_x, screen_y)
+    if client is None:
+        return False
+    win32api.PostMessage(target, win32con.WM_MOUSEMOVE, win32con.MK_LBUTTON,
+                         _lparam(*client))
+    return True
+
+
+def mouse_up_at(hwnd: int, screen_x: int, screen_y: int,
+                give_back: bool = True) -> bool:
+    """Release the drag mouse_down_at started, at a screen point — the same
+    cursor-restoring courtesy click_at's own release does."""
+    if not hwnd:
+        return False
+    target = _input_target(hwnd)
+    client = _to_client(target, screen_x, screen_y)
+    if client is None:
+        return False
+    pos = _lparam(*client)
+    win32api.PostMessage(target, win32con.WM_MOUSEMOVE, win32con.MK_LBUTTON, pos)
+    _release(target, pos, give_back)
+    return True
