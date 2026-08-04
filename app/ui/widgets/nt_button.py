@@ -183,16 +183,28 @@ class NtButton(QPushButton):
             )
 
         # ── Border ────────────────────────────────────────────────────────────
+        # Every button gets its own accent-tinted border now, not just the
+        # ones passing outline=True — a flat neutral edge only for hover/
+        # active, which already have their own strong solid tint. At rest,
+        # a diagonal gradient (bright corner fading to dim) reads as a
+        # deliberate accent edge rather than flat paint; outline=True just
+        # asks for a brighter version of the same gradient.
         painter.setRenderHint(QPainter.Antialiasing, True)
         if self._active:
             bc = QColor(accent); bc.setAlpha(140)
+            pen = QPen(bc, 1)
         elif self._hovered:
             bc = QColor(accent); bc.setAlpha(80)
-        elif self._outline:
-            bc = QColor(accent); bc.setAlpha(120)
+            pen = QPen(bc, 1)
         else:
-            bc = QColor(theme.BORDER_BRIGHT)
-        painter.setPen(QPen(bc, 1))
+            peak = 150 if self._outline else 90
+            grad = QLinearGradient(0, 0, w, h)
+            c0 = QColor(accent); c0.setAlpha(peak)
+            c1 = QColor(accent); c1.setAlpha(int(peak * 0.35))
+            grad.setColorAt(0.0, c0)
+            grad.setColorAt(1.0, c1)
+            pen = QPen(QBrush(grad), 1)
+        painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
 
