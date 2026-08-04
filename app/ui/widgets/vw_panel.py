@@ -52,6 +52,16 @@ class VwPanel(QWidget):
         self._sink   = None
         self._frame  = None    # latest decoded video frame
 
+        # Where to bias the crop when KeepAspectRatioByExpanding overflows
+        # one axis — e.g. a 16:9 clip in a tall, narrow panel overflows in
+        # width, and by default that overflow is trimmed evenly off both
+        # sides. -1.0 keeps the source's left/top edge in frame, +1.0 keeps
+        # its right/bottom edge, 0.0 is the old centred crop. Public: the
+        # owning window sets it once, right after construction, to whatever
+        # its own backdrop needs — see StatsWindow / Overlay.
+        self.focus_x = 0.0
+        self.focus_y = 0.0
+
         self._fade        = 0.0    # opacity of the outgoing backdrop
         self._fade_pixmap = None
         self._fade_anim = QVariantAnimation(self)
@@ -134,6 +144,15 @@ class VwPanel(QWidget):
         return self._frame is not None
 
     def _on_video_frame(self, frame):
+        # A frame already queued in Qt's event loop when stop_background()
+        # swapped self._sink for a new source (or None) still arrives here —
+        # deleteLater() only schedules the old sink's destruction, it does
+        # not cancel signals already in flight. Without this check that
+        # stale frame would win the race and flash the old backdrop back up
+        # for the one paint before the *next* frame (spamming the video/
+        # photo toggle was the reliable way to catch it).
+        if self.sender() is not self._sink:
+            return
         image = frame.toImage()
         if image.isNull():
             return
@@ -141,6 +160,8 @@ class VwPanel(QWidget):
         self.update()
 
     def _on_video_error(self, error, message: str = ""):
+        if self.sender() is not self._player:
+            return   # a stale error from a player already replaced
         if error == QMediaPlayer.Error.NoError:
             return
         self.stop_background()
@@ -255,10 +276,27 @@ class VwPanel(QWidget):
 
         scaled = source.scaled(w, h, Qt.KeepAspectRatioByExpanding,
                                Qt.SmoothTransformation)
-        painter.drawPixmap((w - scaled.width()) // 2,
-                           (h - scaled.height()) // 2, scaled)
+        x = self._cropped_offset(w, scaled.width(),  self.focus_x)
+        y = self._cropped_offset(h, scaled.height(), self.focus_y)
+        painter.drawPixmap(x, y, scaled)
         painter.fillRect(QRectF(0, 0, w, h), QColor(6, 2, 20, _VEIL_ALPHA))
         return True
+
+    @staticmethod
+    def _cropped_offset(panel_size: int, scaled_size: int, focus: float) -> int:
+        """Where to draw an axis whose scaled media overflows the panel.
+
+        0 at focus=0 (the old centred crop); as focus moves towards ±1 the
+        crop slides towards the source's trailing/leading edge instead,
+        clamped so it can never slide past the point where a gap would open
+        up on one side.
+        """
+        centred = (panel_size - scaled_size) // 2
+        if scaled_size <= panel_size:
+            return centred   # nothing overflows on this axis — focus is moot
+        slack = (scaled_size - panel_size) // 2
+        offset = centred - int(slack * max(-1.0, min(1.0, focus)))
+        return max(panel_size - scaled_size, min(0, offset))
 
     def _draw_scene(self, painter, w, h):
         horizon = h * _HORIZON
