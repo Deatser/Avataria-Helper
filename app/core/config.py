@@ -118,6 +118,30 @@ class StatsWindowConfig:
 
 
 @dataclass
+class PromoConfig:
+    """Geometry same as every other module window, plus where the
+    detector left off — the numbers themselves stay in memory
+    (PromoWatch), only what to resume from is kept here. No favorite
+    flag: unlike the other windows this one has no star button — it is
+    reopened from its own launcher button, not restored at startup."""
+    position_saved: bool = False
+    x: int = 420
+    y: int = 60
+    width: int = 380
+    height: int = 420
+    background: str = ""            # explicit backdrop path; empty → auto-pick
+    video_background: bool = True   # off → still image instead of the video
+    # "Запустить автоматический детект промокодов" — on, PromoWatch polls
+    # the public Telegram channel preview and copies newly posted codes to
+    # the clipboard. Kept here so the button shows the same state after
+    # the window (or the whole helper) is closed and reopened.
+    detect_enabled: bool = False
+    # Post id PromoWatch last acted on — persisted so a restart does not
+    # re-fire on a code that was already handled.
+    last_post_id: str = ""
+
+
+@dataclass
 class AppConfig:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     ava_dancers: AvaDancersConfig = field(default_factory=AvaDancersConfig)
@@ -126,6 +150,7 @@ class AppConfig:
     snowboard: SnowboardConfig = field(default_factory=SnowboardConfig)
     hockey: HockeyConfig = field(default_factory=HockeyConfig)
     stats_window: StatsWindowConfig = field(default_factory=StatsWindowConfig)
+    promo: PromoConfig = field(default_factory=PromoConfig)
 
 
 class ConfigManager:

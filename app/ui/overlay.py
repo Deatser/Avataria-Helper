@@ -6,7 +6,9 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QApplication, QDialog)
 from PySide6.QtCore import Qt, QPoint, QTimer
 
+from app.core.promo_watch import PromoWatch
 from app.core.stats import StatsManager
+from app.ui.promo_window import PromoWindow
 from app.ui import theme
 from app.ui.crt_power_mixin import CrtPowerMixin
 from app.ui.helper_settings_panel import HelperSettingsPanel
@@ -70,6 +72,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._game_ok       = None   # tri-state: unknown until first check
         self._pending_logs: list[tuple[list, str]] = []
         self._panel: VwPanel | None = None
+        self._promo_watch: PromoWatch | None = None
+        self._promo_window: PromoWindow | None = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -86,6 +90,9 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._game_watch.setInterval(2000)
         self._game_watch.timeout.connect(self.refresh_game_status)
         self._game_watch.start()
+
+        self.set_promo_watch_enabled(
+            getattr(config.data.promo, "detect_enabled", False))
 
     def _build_ui(self):
         self._panel = VwPanel(self)
@@ -178,6 +185,12 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         stats_btn.clicked.connect(self._toggle_stats)
         layout.addWidget(stats_btn)
 
+        promo_btn = NtButton("Промокоды", upper=False,
+                             accent=theme.ACCENT_CYAN)
+        promo_btn.setMinimumHeight(30)
+        promo_btn.clicked.connect(self._toggle_promo_window)
+        layout.addWidget(promo_btn)
+
         settings_btn = NtButton("Настройки", accent=theme.ACCENT,
                                 upper=False, filled=True)
         settings_btn.setMinimumHeight(30)
@@ -263,6 +276,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         windows: list[QWidget] = [self, *self._open_windows.values()]
         if self._stats_window is not None:
             windows.append(self._stats_window)
+        if self._promo_window is not None:
+            windows.append(self._promo_window)
         return windows
 
     def on_module_closed(self, module_name: str):
@@ -298,6 +313,63 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         if self._settings_panel is None:
             self._settings_panel = HelperSettingsPanel(self)
         self._settings_panel.toggle()
+
+    # ── Promo codes ──────────────────────────────────────────────────────────
+
+    def _toggle_promo_window(self):
+        if self._promo_window and self._promo_window.isVisible():
+            self._promo_window.close()
+            return
+
+        window = PromoWindow(
+            config          = self.config.data.promo,
+            save_fn         = self.config.save,
+            window_manager  = self.wm,
+            overlay         = self,
+        )
+        window.closed.connect(self._on_promo_window_closed)
+        if self.wm.get_game_hwnd():
+            self.wm.attach_child(int(window.winId()))
+        window.show()
+        self._links.connect_windows(self, window, theme.ACCENT_CYAN)
+        self._promo_window = window
+        self.add_log("Открыты промокоды")
+
+    def _on_promo_window_closed(self):
+        self._promo_window = None
+
+    def set_promo_watch_enabled(self, enabled: bool):
+        running = self._promo_watch is not None
+        if enabled == running:
+            return
+        if enabled:
+            last_id = getattr(self.config.data.promo, "last_post_id", "")
+            watch = PromoWatch(last_post_id=int(last_id) if last_id else 0)
+            watch.code_found.connect(self._on_promo_code_found)
+            watch.armed.connect(self._on_promo_armed)
+            watch.error.connect(self._on_promo_error)
+            self._promo_watch = watch
+            watch.start()
+        else:
+            self._promo_watch.stop_watch()
+            self._promo_watch.wait()
+            self._promo_watch = None
+
+    def _on_promo_code_found(self, code: str, post_id: int):
+        QApplication.clipboard().setText(code)
+        self.config.data.promo.last_post_id = str(post_id)
+        self.config.save()
+        self.add_log_segments(
+            [("Новый промокод скопирован: ", theme.TEXT_SECONDARY),
+             (code, theme.ACCENT_GREEN)])
+
+    def _on_promo_armed(self, post_id: int):
+        self.config.data.promo.last_post_id = str(post_id)
+        self.config.save()
+        self.add_log("Слежу за новыми промокодами в Telegram", level="plain")
+
+    def _on_promo_error(self, message: str):
+        self.add_log(f"Промокоды: {message}", level="error")
 
     # ── Statistics ───────────────────────────────────────────────────────────
 
@@ -453,6 +525,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             self._stats_window.close()
 
         self._links.clear()   # nothing left to connect to
+        self.set_promo_watch_enabled(False)
         self.crt_close_started()
         event.ignore()
 

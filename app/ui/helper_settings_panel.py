@@ -21,7 +21,8 @@ _H = 290
 # Every config section that carries its own video_background field — see
 # the comment on OverlayConfig.video_background for why there is one copy
 # per section rather than a single shared flag.
-_VIDEO_SECTIONS = ("overlay", "ava_dancers", "snowboard", "hockey", "stats_window")
+_VIDEO_SECTIONS = ("overlay", "ava_dancers", "snowboard", "hockey", "stats_window",
+                   "promo")
 
 
 class HelperSettingsPanel(SheetPanel):

@@ -1,8 +1,8 @@
 # app/ui/widgets/log_panel.py
 import random
 from datetime import datetime
-from PySide6.QtWidgets import QTextEdit
-from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QTextEdit
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (QTextCursor, QTextCharFormat, QTextBlockFormat,
                            QColor)
 from app.ui import theme
@@ -21,6 +21,10 @@ _LINE_LAG  = 2
 
 class LogPanel(QTextEdit):
     """Scrolling log area — every message animates with scramble effect."""
+
+    # Emitted for any clicked `<a href="...">` other than a `copy:` one —
+    # the caller decides what the href means (see promo_window.py).
+    anchor_clicked = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -52,12 +56,41 @@ class LogPanel(QTextEdit):
         """)
         # Translucent dark fill: panel traces stay visible, but dimmed
         self.viewport().setAutoFillBackground(True)
+        self.setMouseTracking(True)   # for the hand cursor over copy: anchors
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def add_log(self, message: str, level: str = "info"):
         """Append a log line with scramble animation and status suffix."""
         self.add_log_segments([(message, theme.TEXT_SECONDARY)], level)
+
+    def add_html(self, html: str):
+        """One line of already-formatted HTML — no scramble, no timestamp.
+        For content built with its own styling, like the promo-code
+        listing's `copy:` anchors (see mousePressEvent)."""
+        self.append(html)
+        self._scroll_end()
+
+    # ── copy: anchors ─────────────────────────────────────────────────────────
+    # Any inserted HTML can carry <a href="copy:...">, and clicking it copies
+    # whatever follows "copy:" to the clipboard — a generic hook, not tied to
+    # promo codes specifically.
+
+    def mousePressEvent(self, event):
+        href = self.anchorAt(event.pos())
+        if href.startswith("copy:"):
+            QApplication.clipboard().setText(href[len("copy:"):])
+            return
+        if href:
+            self.anchor_clicked.emit(href)
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        href = self.anchorAt(event.pos())
+        self.viewport().setCursor(
+            Qt.PointingHandCursor if href else Qt.IBeamCursor)
+        super().mouseMoveEvent(event)
 
     def add_log_segments(self, segments: list, level: str = "info"):
         """Same, but the message is built from pre-coloured (text, colour) parts.

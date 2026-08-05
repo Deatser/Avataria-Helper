@@ -187,9 +187,10 @@ class StatsWindow(ModuleWindow):
         layout.setSpacing(theme.SPACING)
 
         layout.addWidget(self._section_label("ИГРОК", theme.ACCENT))
-        self._id_value   = self._add_row(layout, "ID")
-        self._name_value = self._add_row(layout, "Имя")
-        self._date_value = self._add_row(layout, "Регистрация")
+        self._id_value    = self._add_row(layout, "ID")
+        self._name_value  = self._add_row(layout, "Имя")
+        self._date_value  = self._add_row(layout, "Регистрация")
+        self._promo_value = self._add_row(layout, "Автоматическая активация промокодов")
         layout.addSpacing(6)
 
         layout.addLayout(self._build_controls())
@@ -464,6 +465,13 @@ class StatsWindow(ModuleWindow):
                         shown(player.player_name, "player_name"))
         self._set_value(self._date_value,
                         shown(player.registration_date, "registration_date"))
+
+        promo_on = bool(self._overlay and getattr(
+            self._overlay.config.data.promo, "detect_enabled", False))
+        self._promo_value.setText("ВКЛ" if promo_on else "ВЫКЛ")
+        self._promo_value.setStyleSheet(
+            f"color:{theme.ACCENT_GREEN if promo_on else theme.ACCENT_RED}; "
+            f"background:transparent;")
 
         # Loaded once, not once per module: this_month() sums every kept
         # day's own file from disk, and five separate calls to it would
