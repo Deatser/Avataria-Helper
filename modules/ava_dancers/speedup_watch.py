@@ -8,7 +8,7 @@ import cv2
 import mss
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import grab_window
+from app.core.capture import grab_window, release_window_capture
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 
@@ -85,20 +85,23 @@ class SpeedupWatch(QThread):
         last_match = {label: 0.0 for label, _ in templates}
         self.watch_started.emit()
 
-        while not self._stop_event.is_set():
-            try:
-                img  = grab_window(self._hwnd, region)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                now  = time.time()
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    img  = grab_window(self._hwnd, region)
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    now  = time.time()
 
-                for label, template in templates:
-                    result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
-                    _, score, _, _ = cv2.minMaxLoc(result)
-                    if score >= MATCH_THRESHOLD and now - last_match[label] >= RETRIGGER_COOLDOWN:
-                        last_match[label] = now
-                        self.detected.emit(label, score)
+                    for label, template in templates:
+                        result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+                        _, score, _, _ = cv2.minMaxLoc(result)
+                        if score >= MATCH_THRESHOLD and now - last_match[label] >= RETRIGGER_COOLDOWN:
+                            last_match[label] = now
+                            self.detected.emit(label, score)
 
-            except Exception as exc:
-                self.error.emit(str(exc))
+                except Exception as exc:
+                    self.error.emit(str(exc))
 
-            self._stop_event.wait(SEARCH_INTERVAL)
+                self._stop_event.wait(SEARCH_INTERVAL)
+        finally:
+            release_window_capture()

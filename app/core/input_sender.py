@@ -1,10 +1,67 @@
 # app/core/input_sender.py
+import heapq
 import threading
+import time
 import win32api
 import win32con
 import win32gui
 
-_HOLD_S = 0.02   # WM_KEYDOWN to WM_KEYUP gap
+_HOLD_S = 0.02   # KEYDOWN to KEYUP gap
+
+# AvaDancers' isolated HSV-threshold test tool (testlogs/test#16-33.json)
+# spent a long stretch chasing keys that logged as sent but didn't register
+# in the game — a focus-settle delay, then SendInput with a forced real
+# OS-focus switch, neither one actually more reliable there than plain
+# PostMessage. The one mechanism confirmed to reliably land real presses,
+# across full AvaDancers runs, start to finish, without ever needing real
+# OS focus on the game at all, is this one, exactly as it already was —
+# so whatever the test tool's own problem is, it isn't this function.
+
+
+class _DelayedCalls:
+    """Runs KEYUP/mouse-release callbacks off one background thread instead
+    of a fresh threading.Timer (== a fresh OS thread) per call. A finish-run
+    mash posts up to ~266 delayed releases in 4 seconds — that many short-
+    lived threads spun up back to back visibly loads the OS scheduler right
+    when press timing matters most, so one persistent thread with a small
+    priority queue replaces all of them.
+    """
+
+    def __init__(self):
+        self._heap: list[tuple[float, int, callable, tuple]] = []
+        self._counter = 0
+        self._cv = threading.Condition()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def call_later(self, delay: float, func, *args):
+        fire_at = time.monotonic() + delay
+        with self._cv:
+            self._counter += 1
+            heapq.heappush(self._heap, (fire_at, self._counter, func, args))
+            self._cv.notify()
+
+    def _run(self):
+        with self._cv:
+            while True:
+                if not self._heap:
+                    self._cv.wait()
+                    continue
+                fire_at, _, func, args = self._heap[0]
+                remaining = fire_at - time.monotonic()
+                if remaining <= 0:
+                    heapq.heappop(self._heap)
+                    self._cv.release()
+                    try:
+                        func(*args)
+                    except Exception:
+                        pass
+                    finally:
+                        self._cv.acquire()
+                else:
+                    self._cv.wait(remaining)
+
+
+_delayed = _DelayedCalls()
 
 # The game is a Chromium/Electron window: the top-level hwnd (Chrome_WidgetWin_1)
 # only hosts the real input target, this child, which is what actually turns a
@@ -70,8 +127,8 @@ def press_key(hwnd: int, key: str) -> bool:
     target = _input_target(hwnd)
     _prime_focus(hwnd, target)
     win32api.PostMessage(target, win32con.WM_KEYDOWN, vk, 0)
-    threading.Timer(_HOLD_S, win32api.PostMessage,
-                     args=(target, win32con.WM_KEYUP, vk, 0)).start()
+    _delayed.call_later(_HOLD_S, win32api.PostMessage,
+                        target, win32con.WM_KEYUP, vk, 0)
     return True
 
 
@@ -115,7 +172,7 @@ def click_at(hwnd: int, screen_x: int, screen_y: int,
     _prime_focus(hwnd, target)
     win32api.PostMessage(target, win32con.WM_MOUSEMOVE, 0, pos)
     win32api.PostMessage(target, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, pos)
-    threading.Timer(_HOLD_S, _release, args=(target, pos, give_back)).start()
+    _delayed.call_later(_HOLD_S, _release, target, pos, give_back)
     return True
 
 

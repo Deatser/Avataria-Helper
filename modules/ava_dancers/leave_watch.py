@@ -5,7 +5,7 @@ import threading
 import cv2
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import grab_window
+from app.core.capture import grab_window, release_window_capture
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
                                      load_template, primary_monitor_region)
 
@@ -64,26 +64,29 @@ class LeaveWatch(QThread):
         self._stop_event.clear()
         self._fired = False
 
-        while not self._stop_event.is_set():
-            try:
-                # Re-read every poll, not cached before the loop: set_target()
-                # can switch currency mid-run, from another thread, and each
-                # currency has its own region.
-                filename = LEAVE_TEMPLATES[self._target]
-                region = LEAVE_REGIONS.get(self._target) or primary_monitor_region()
-                template = load_template(filename)
-                if template is None:
-                    self.error.emit(f"Не найден шаблон: {filename}")
-                else:
-                    gray = cv2.cvtColor(grab_window(self._hwnd, region),
-                                        cv2.COLOR_BGR2GRAY)
-                    score, _ = best_match(gray, template)
-                    self._check_score(score)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    # Re-read every poll, not cached before the loop: set_target()
+                    # can switch currency mid-run, from another thread, and each
+                    # currency has its own region.
+                    filename = LEAVE_TEMPLATES[self._target]
+                    region = LEAVE_REGIONS.get(self._target) or primary_monitor_region()
+                    template = load_template(filename)
+                    if template is None:
+                        self.error.emit(f"Не найден шаблон: {filename}")
+                    else:
+                        gray = cv2.cvtColor(grab_window(self._hwnd, region),
+                                            cv2.COLOR_BGR2GRAY)
+                        score, _ = best_match(gray, template)
+                        self._check_score(score)
 
-            except Exception as exc:
-                self.error.emit(str(exc))
+                except Exception as exc:
+                    self.error.emit(str(exc))
 
-            self._stop_event.wait(SEARCH_INTERVAL)
+                self._stop_event.wait(SEARCH_INTERVAL)
+        finally:
+            release_window_capture()
 
     def _check_score(self, score: float):
         """Fire once the match clears the bar, then stay quiet."""

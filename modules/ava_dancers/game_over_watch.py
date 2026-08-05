@@ -5,7 +5,7 @@ import threading
 import cv2
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import grab_window
+from app.core.capture import grab_window, release_window_capture
 from app.core.template_match import best_match, load_template, primary_monitor_region
 
 # Once a second is plenty: this only answers "has the round ended yet", a
@@ -50,16 +50,19 @@ class GameOverWatch(QThread):
             return
         region = primary_monitor_region()
 
-        while not self._stop_event.is_set():
-            try:
-                gray = cv2.cvtColor(grab_window(self._hwnd, region), cv2.COLOR_BGR2GRAY)
-                score, _ = best_match(gray, template)
-                self._check_score(score)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    gray = cv2.cvtColor(grab_window(self._hwnd, region), cv2.COLOR_BGR2GRAY)
+                    score, _ = best_match(gray, template)
+                    self._check_score(score)
 
-            except Exception as exc:
-                self.error.emit(str(exc))
+                except Exception as exc:
+                    self.error.emit(str(exc))
 
-            self._stop_event.wait(SEARCH_INTERVAL)
+                self._stop_event.wait(SEARCH_INTERVAL)
+        finally:
+            release_window_capture()
 
     def _check_score(self, score: float):
         """Fire once the banner clears the match bar, then stay quiet."""

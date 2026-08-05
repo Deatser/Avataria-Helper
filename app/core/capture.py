@@ -1,7 +1,6 @@
 # app/core/capture.py
 from __future__ import annotations
 import ctypes
-import os
 import threading
 import time
 from threading import Lock
@@ -10,7 +9,6 @@ import mss.exception
 import numpy as np
 import cv2
 import win32gui
-import win32process
 import win32ui
 
 _RETRIES     = 3      # BitBlt can fail transiently — a retry usually succeeds
@@ -84,76 +82,13 @@ class ScreenCapture:
         return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
 
-def _own_descendant_rects(hwnd: int) -> list[tuple[int, int, int, int]]:
-    """Screen rects of every descendant of hwnd that belongs to this process.
-
-    attach_child/attach_overlay (see window_manager.py) make our own module
-    windows real WS_CHILD windows of the game, which is what lets them move
-    and minimise with it — but PW_RENDERFULLCONTENT renders a window's whole
-    child tree, ours included, so without this a helper panel dragged over
-    the game gets baked into the very capture the bot reads back as the game.
-    An unrelated app on top is never in this tree at all (it is a sibling in
-    the desktop's own stacking order, not a child of hwnd), which is why only
-    our own windows ever caused this.
-    """
-    own_pid = os.getpid()
-    rects: list[tuple[int, int, int, int]] = []
-
-    def visit(child_hwnd, _):
-        _, pid = win32process.GetWindowThreadProcessId(child_hwnd)
-        if pid == own_pid and win32gui.IsWindowVisible(child_hwnd):
-            rects.append(win32gui.GetWindowRect(child_hwnd))
-        return True
-
-    try:
-        win32gui.EnumChildWindows(hwnd, visit, None)
-    except win32gui.error:
-        pass   # no children right now — nothing to blank out
-    return rects
-
-
-def _blank_own_windows(img: np.ndarray, abs_left: int, abs_top: int, hwnd: int):
-    """Paint over any of our own windows caught inside img, in place.
-
-    Tried patching these spots back in from a real screen grab instead of
-    blanking them, on the theory that WDA_EXCLUDEFROMCAPTURE (no_capture.py)
-    would make that grab skip straight past our own window to the game
-    underneath — confirmed live that the flag itself does work on this
-    machine (a plain top-level probe window vanished from an mss capture as
-    expected), but not for these specific windows: attach_child/attach_overlay
-    (window_manager.py) make them real WS_CHILD windows of the game, and DWM
-    does not seem to honour the flag at that granularity — the patch just
-    painted the mod window's own pixels straight back in.
-
-    Blank is the safe fallback: every detector this codebase has reads "very
-    dark" as background/empty (AvaBot's own _IDLE_V, the gardener/janitor
-    template matchers all fail closed on a blank crop), so a lane genuinely
-    covered by one of our own windows reads as nothing happening there rather
-    than as some wrong, confidently-misread colour.
-
-    Coordinates come back from Windows in absolute screen space; img's own
-    origin is (abs_left, abs_top), so each rect is shifted by that before it
-    can be used to slice img.
-    """
-    height, width = img.shape[:2]
-    for left, top, right, bottom in _own_descendant_rects(hwnd):
-        rel_left   = max(0, left - abs_left)
-        rel_top    = max(0, top - abs_top)
-        rel_right  = min(width, right - abs_left)
-        rel_bottom = min(height, bottom - abs_top)
-        if rel_right > rel_left and rel_bottom > rel_top:
-            img[rel_top:rel_bottom, rel_left:rel_right] = 0
-
-
 def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
     """Capture hwnd's own content, wherever it sits in the window stack.
 
     ScreenCapture.grab reads the screen, which only ever shows whatever is
     drawn on top — alt-tab to something else and it starts describing that
     instead of the game. PrintWindow renders the window itself into an
-    off-screen bitmap, unaffected by whatever else is in front of it. Our own
-    windows attached to hwnd get blanked back out afterwards — see
-    _blank_own_windows.
+    off-screen bitmap, unaffected by whatever else is in front of it.
 
     region, if given, is in the same absolute screen coordinates every
     other region in this codebase uses; it is converted to window-relative
@@ -170,22 +105,72 @@ def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
             break
         except Exception as exc:
             last_error = exc
+            _release_thread_cache()   # cached DC/bitmap may be the cause — drop it and retry clean
             time.sleep(_RETRY_DELAY)
     else:
         raise last_error
 
     if region is None:
-        crop, abs_left, abs_top = img, left, top
-    else:
-        rel_left = region["left"] - left
-        rel_top  = region["top"] - top
-        crop = np.ascontiguousarray(
-            img[rel_top:rel_top + region["height"],
-               rel_left:rel_left + region["width"]])
-        abs_left, abs_top = region["left"], region["top"]
+        return img
 
-    _blank_own_windows(crop, abs_left, abs_top, hwnd)
-    return crop
+    rel_left = region["left"] - left
+    rel_top  = region["top"] - top
+    return np.ascontiguousarray(
+        img[rel_top:rel_top + region["height"],
+           rel_left:rel_left + region["width"]])
+
+
+# One PrintWindow target (window DC + memory DC + bitmap) per calling thread,
+# reused across polls instead of recreated every call. AvaDancers' detector
+# and its watcher threads call grab_window many times a second each; creating
+# and tearing down a GDI bitmap on every single call was the single biggest
+# cost in that loop. Keyed by thread, not shared: a DC handed to a second
+# thread while the first is still using it is a straight race on the same
+# GDI object, so each thread gets its own via threading.local instead of a
+# lock around a shared one.
+_tls = threading.local()
+
+
+def _thread_cache(hwnd: int, width: int, height: int):
+    cache = getattr(_tls, "cache", None)
+    if cache is not None and cache[0] == hwnd and cache[-2] == width and cache[-1] == height:
+        return cache
+    if cache is not None:
+        _release_thread_cache()
+
+    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    src_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+    mem_dc = src_dc.CreateCompatibleDC()
+    bitmap = win32ui.CreateBitmap()
+    bitmap.CreateCompatibleBitmap(src_dc, width, height)
+    mem_dc.SelectObject(bitmap)
+
+    cache = (hwnd, hwnd_dc, src_dc, mem_dc, bitmap, width, height)
+    _tls.cache = cache
+    return cache
+
+
+def _release_thread_cache():
+    """Free this thread's cached DC/bitmap, if any — call before the calling
+    thread exits (each AvaDancers worker is a fresh QThread per round) so the
+    GDI handles don't outlive it."""
+    cache = getattr(_tls, "cache", None)
+    if cache is None:
+        return
+    hwnd, hwnd_dc, src_dc, mem_dc, bitmap, _, _ = cache
+    try:
+        mem_dc.DeleteDC()
+        src_dc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwnd_dc)
+        win32gui.DeleteObject(bitmap.GetHandle())
+    except Exception:
+        pass
+    _tls.cache = None
+
+
+def release_window_capture():
+    """Public entry point for a worker thread to call right before it exits."""
+    _release_thread_cache()
 
 
 def _print_window(hwnd: int) -> tuple[np.ndarray, int, int]:
@@ -195,27 +180,16 @@ def _print_window(hwnd: int) -> tuple[np.ndarray, int, int]:
     if width <= 0 or height <= 0:
         raise RuntimeError("Окно игры свёрнуто")
 
-    hwnd_dc = win32gui.GetWindowDC(hwnd)
-    src_dc = win32ui.CreateDCFromHandle(hwnd_dc)
-    mem_dc = src_dc.CreateCompatibleDC()
-    bitmap = win32ui.CreateBitmap()
-    bitmap.CreateCompatibleBitmap(src_dc, width, height)
-    mem_dc.SelectObject(bitmap)
-    try:
-        ok = ctypes.windll.user32.PrintWindow(
-            hwnd, mem_dc.GetSafeHdc(), _PW_RENDERFULLCONTENT)
-        if not ok:
-            raise RuntimeError("Не удалось отрисовать окно игры")
+    _, _, _, mem_dc, bitmap, _, _ = _thread_cache(hwnd, width, height)
+    ok = ctypes.windll.user32.PrintWindow(
+        hwnd, mem_dc.GetSafeHdc(), _PW_RENDERFULLCONTENT)
+    if not ok:
+        raise RuntimeError("Не удалось отрисовать окно игры")
 
-        info = bitmap.GetInfo()
-        bits = bitmap.GetBitmapBits(True)
-        img = np.frombuffer(bits, dtype=np.uint8).reshape(
-            info["bmHeight"], info["bmWidth"], 4)[:, :, :3]
-        img = np.ascontiguousarray(img)
-    finally:
-        mem_dc.DeleteDC()
-        src_dc.DeleteDC()
-        win32gui.ReleaseDC(hwnd, hwnd_dc)
-        win32gui.DeleteObject(bitmap.GetHandle())
+    info = bitmap.GetInfo()
+    bits = bitmap.GetBitmapBits(True)
+    img = np.frombuffer(bits, dtype=np.uint8).reshape(
+        info["bmHeight"], info["bmWidth"], 4)[:, :, :3]
+    img = np.ascontiguousarray(img)
 
     return img, left, top
