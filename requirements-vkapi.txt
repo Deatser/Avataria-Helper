@@ -1,0 +1,4 @@
+# Только для сборщика (vkapi.py) — он крутится на GitHub Actions отдельно
+# от самого хелпера, и тащить туда PySide6/OpenCV незачем.
+requests
+python-dotenv

@@ -4,6 +4,10 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Секреты: токен ВК для vkapi.py. На GitHub он живёт в Actions secrets,
+# в репозиторий не попадает никогда.
+.env
+
 # Virtual envs
 .venv/
 venv/
