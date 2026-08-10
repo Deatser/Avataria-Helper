@@ -43,11 +43,18 @@ class TrackingOverlay(GameLayer):
     calibration/marker overlay here — the boxes themselves are what moves,
     not the widget."""
 
-    def __init__(self, window_manager=None, reference=None):
+    def __init__(self, window_manager=None, reference=None,
+                 fill: QColor | None = None, border: QColor | None = None):
         super().__init__(window_manager, click_through=True)
         self._reference = reference
         self._boxes: list[_Box] = []
         self._anim_timer = None
+        # Two of these can be on screen at once — Хоккей draws where each
+        # defender is *now* and, in a second colour, where its own model
+        # says it will be when a shot would arrive — so the colours are per
+        # instance rather than module-wide.
+        self._fill   = fill   or _FILL
+        self._border = border or _BORDER
 
     def update_targets(self, rects: list[QRect]):
         """`rects` — the latest detections, screen coordinates. Every call
@@ -118,8 +125,8 @@ class TrackingOverlay(GameLayer):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(_BORDER, _BORDER_W))
-        painter.setBrush(_FILL)
+        painter.setPen(QPen(self._border, _BORDER_W))
+        painter.setBrush(self._fill)
         for box in self._boxes:
             painter.drawRect(box.current)
         painter.end()

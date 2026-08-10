@@ -25,6 +25,12 @@ class OverlayConfig:
     # The wires SettingsWindow's own "Линии между окнами" switch controls —
     # purely decorative (NodeLinkCanvas), so nothing else reads this.
     show_links: bool = True
+    # Scramble reveal and split-flap wipe in every log panel. Off → lines
+    # appear whole and clearing is instant; the animation is per-character
+    # on a timer, so this is the switch to reach for when the UI drags.
+    # One flag for the whole app, unlike video_background — see
+    # app/ui/widgets/log_panel.py.
+    log_animation: bool = True
 
 
 @dataclass
@@ -99,9 +105,109 @@ class HockeyConfig:
     x: int = 370
     y: int = 10
     width: int = 420
-    height: int = 480
+    height: int = 620
     background: str = ""            # explicit backdrop path; empty → auto-pick
     video_background: bool = True   # off → still image instead of the video
+
+    # ── Rink geometry, absolute screen coordinates ───────────────────────
+    # Seeded from the hand calibration of 2026-08-03 (780x666 at 891,385)
+    # and the fractions modules/hockey/rink_area.py used to hardcode. Every
+    # one of these is meant to be corrected with the module's own
+    # "Область экрана" button rather than edited by hand — the buttons write
+    # here directly.
+    rink_left:   int = 891
+    rink_top:    int = 385
+    rink_width:  int = 780
+    rink_height: int = 666
+
+    # Rows the defenders patrol, kept sorted top to bottom so a row's index
+    # always means "how far up the rink it is":
+    #   [{"y": strip centre, "height": ..., "wall_left": ..., "wall_right": ...,
+    #     "body_w": ..., "body_h": ..., "body_dy": ...}]
+    # body_* is the defender's whole outline, marked by hand: what gets
+    # detected is the helmet, but what blocks a shot is the body under it.
+    # body_dy is where that outline starts relative to the row's own line,
+    # so it can be hung off a helmet wherever the helmet turns up. 0 width
+    # means it has never been marked and goalie_half_w stands in.
+    # The walls are per row because each row's defender turns round at its
+    # own place (confirmed 2026-08-09) — one pair of boards for the whole
+    # rink was simply wrong. A row without them falls back to the two below.
+    # Empty until "Найти ряды" has run or rows are marked by hand; discovery
+    # *adds* rather than replacing, because level 1 only ever shows one
+    # defender and the rest are only learnable on a level that has them.
+    lanes: list = field(default_factory=list)
+
+    # Fallback walls for a row that has none of its own — a seed, not the
+    # truth: see the per-row values above.
+    wall_left:  int = 941
+    wall_right: int = 1621
+
+    # Where the puck starts — bottom-centre of the rink, a little short of
+    # the very edge.
+    shooter_x: int = 1281
+    shooter_y: int = 984
+
+    # The goal mouth: a line, not a point — the shot has to land between
+    # goal_left and goal_right at goal_y.
+    goal_y:     int = 452
+    goal_left:  int = 1141
+    goal_right: int = 1421
+
+    # What actually blocks a shot is the defender's body and stick, while
+    # what gets detected is the helmet — so this is deliberately wider than
+    # any helmet blob.
+    goalie_half_w: int = 50
+    puck_radius:   int = 10
+
+    # ── Helmet detection ─────────────────────────────────────────────────
+    # The one thing every defender has in common whatever their avatar
+    # looks like is a red helmet (confirmed 2026-08-08), so detection is a
+    # red blob inside a row's own strip rather than a sprite match.
+    red_sat_min:   int = 120   # below this a red-ish pixel is washed-out ice
+    red_val_min:   int = 80    # below this it is shadow, not a helmet
+    blob_area_min: int = 150   # below this it is a speck, not a helmet
+    # No upper bound here on purpose: the rink is drawn in perspective, so
+    # what counts as "too big" depends on the row, and a fixed ceiling set
+    # by guess (4000) turned out to reject the near rows' own helmets. The
+    # sanity ceiling lives in detect.py, and shape and the photo score do
+    # the actual discriminating.
+
+    # Red alone catches things that are not defenders, so a candidate is
+    # also scored against templates/hockey_player*.png and dropped below
+    # this. Kept low because those photos are three specific avatars and a
+    # fourth player is not going to look like any of them — the score is
+    # here to reject red scenery, not to insist on a known face. 0 turns
+    # the check off entirely.
+    player_match_min: float = 0.30
+
+    # Strip height for a row entry that has none of its own — hand-marked
+    # rows carry the height of the box they were drawn with, so this only
+    # covers a row hand-edited into the file without one.
+    lane_height: int = 56
+
+    # Mask out rink pixels that are red in every single frame. Markings
+    # being mistaken for a helmet outright is already handled by shape, so
+    # what this actually buys is that a helmet passing *over* a red line
+    # does not merge with it into one long blob and vanish for exactly as
+    # long as it overlaps. Off by default: it costs an 80-frame warm-up, and
+    # whether this rink has red lines at all is still unconfirmed — switch it
+    # on if "Тест детекции" shows defenders blinking out mid-run.
+    static_mask: bool = False
+
+    # Draw the prediction for *now* instead of for the moment a shot would
+    # arrive. A checking mode, not a working one: at zero the box has to
+    # ride exactly on its defender, so leading or lagging is obvious at a
+    # glance in a way it never is at a second and a half. Shooting is
+    # refused while it is on — the model's own accuracy check compares a
+    # prediction against the same instant it was made for, which at zero is
+    # true by construction and proves nothing.
+    predict_now: bool = False
+
+    # Whether the watch narrates itself: the head count it takes before
+    # calibrating, the per-row accuracy while it settles, the breakdown of a
+    # refused shot. Off leaves the log with the shots themselves and the
+    # errors. On by default — the numbers are how the model is judged.
+    verbose_log: bool = True
 
 
 @dataclass
@@ -119,11 +225,9 @@ class StatsWindowConfig:
 
 @dataclass
 class PromoConfig:
-    """Geometry same as every other module window, plus where the
-    detector left off — the numbers themselves stay in memory
-    (PromoWatch), only what to resume from is kept here. No favorite
-    flag: unlike the other windows this one has no star button — it is
-    reopened from its own launcher button, not restored at startup."""
+    """Geometry same as every other module window. No favorite flag:
+    unlike the other windows this one has no star button — it is reopened
+    from its own launcher button, not restored at startup."""
     position_saved: bool = False
     x: int = 420
     y: int = 60
@@ -131,14 +235,15 @@ class PromoConfig:
     height: int = 420
     background: str = ""            # explicit backdrop path; empty → auto-pick
     video_background: bool = True   # off → still image instead of the video
-    # "Запустить автоматический детект промокодов" — on, PromoWatch polls
-    # the public Telegram channel preview and copies newly posted codes to
-    # the clipboard. Kept here so the button shows the same state after
-    # the window (or the whole helper) is closed and reopened.
+    # "Запустить автодетект промокодов" — on, PromoAutoLoop re-reads the
+    # open Firebase base (filled by vkapi.py) once a minute and plays
+    # through the in-game activation screen for whatever is pending (see
+    # promo_activate.is_pending). Kept here so the button shows the same
+    # state after the window (or the whole helper) is closed and reopened.
+    # No "last seen" bookmark is needed: each cycle re-reads the base
+    # fresh, and activated_promo_log is what actually keeps a code from
+    # being submitted twice.
     detect_enabled: bool = False
-    # Post id PromoWatch last acted on — persisted so a restart does not
-    # re-fire on a code that was already handled.
-    last_post_id: str = ""
 
 
 @dataclass
