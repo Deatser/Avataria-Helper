@@ -625,3 +625,362 @@ def test_a_stander_outlives_being_hidden_far_longer_than_a_patrol():
 
     assert [round(x) for x in row.report(0).standing] == [1200]
     assert row.positions(t + _HORIZON) == [1200.0]
+
+
+# ── A row too crowded to follow anybody through ──────────────────────────
+
+def test_a_patrol_crossing_two_standers_is_timed_by_its_turns():
+    """Row 3 of the real game: two defenders standing and a third crossing
+    them both. Every track in the row comes apart — one followed out of
+    three (2026-08-10) — but the ice past the last stander holds nobody
+    else, and the patrol runs out of it and turns round once a cycle.
+    """
+    low, high, period = 1047.0, 1498.0, 3.4
+    standing = [1180.0, 1300.0]
+    row = RowMotion(_HORIZON)
+    row.watch_zone(1334.0, high, toward_right=True, far=low)
+
+    t = 0.0
+    while t < 40:
+        seen = sorted([_triangle(t, period, low, high), *standing])
+        merged = []
+        for x in seen:                   # the detector merges what overlaps
+            if merged and x - merged[-1] < 55:
+                merged[-1] = (merged[-1] + x) / 2
+            else:
+                merged.append(x)
+        row.feed(t, merged)
+        t += _TICK
+
+    assert row.struggling() is True                    # tracking did fail
+    assert row.by_board_ready() is True
+    assert abs(row.board_patrol().period - period) < 0.1
+    assert [round(x) for x in row.standing_spots()] == [1180, 1300]
+
+    worst = 0.0
+    for ahead in [x * 0.2 for x in range(1, 18)]:
+        guess = row.positions(t + ahead)
+        truth = sorted([_triangle(t + ahead, period, low, high), *standing])
+        assert guess is not None
+        worst = max(worst, max(abs(g - r) for g, r in zip(guess, truth)))
+    assert worst < 12
+
+
+def test_the_zone_is_the_free_end_of_the_row_not_the_middle():
+    """A middle stretch would show the patrol crossing and say nothing about
+    when — there is no board in it to turn at. Of the two ends, the wider.
+
+    And only for a row that is actually stuck: where the trackers are
+    coping, they are the better answer and nothing is chosen.
+    """
+    from modules.hockey.motion import MotionModel
+
+    low, high, standing = 1047.0, 1498.0, [1180.0, 1300.0]
+
+    class _Lane:
+        index, y, height = 0, 636, 51
+
+    class _Geom:
+        lanes = [_Lane()]
+        left, width, top = 0, 2000, 0
+
+        def centre_bounds(self, lane):
+            return low, high
+
+        def half_width(self, lane):
+            return 30
+
+    model = MotionModel(_Geom(), _HORIZON)
+    row = model._rows[0]
+    t = 0.0
+    while t < 25:
+        seen = sorted([_triangle(t, 3.4, low, high), *standing])
+        merged = []
+        for x in seen:
+            if merged and x - merged[-1] < 55:
+                merged[-1] = (merged[-1] + x) / 2
+            else:
+                merged.append(x)
+        row.feed(t, merged)
+        t += _TICK
+    assert row.struggling() is True
+
+    chosen = model.choose_zones()
+
+    assert 0 in chosen
+    zone_low, zone_high, toward_right = chosen[0]
+    assert toward_right is True          # 168px of ice against 103 on the left
+    assert zone_high > high              # open at the board end
+    assert zone_low > max(standing)      # and starts past the last stander
+
+
+def test_and_nothing_is_chosen_for_a_row_the_trackers_can_follow():
+    from modules.hockey.motion import MotionModel
+
+    class _Lane:
+        index, y, height = 0, 100, 40
+
+    class _Geom:
+        lanes = [_Lane()]
+        left, width, top = 0, 2000, 0
+
+        def centre_bounds(self, lane):
+            return 1000.0, 1500.0
+
+        def half_width(self, lane):
+            return 30
+
+    model = MotionModel(_Geom(), _HORIZON)
+    t = 0.0
+    while t < 20:
+        model._rows[0].feed(t, [1100.0, _triangle(t, 3.0, 1200, 1500)])
+        t += _TICK
+
+    assert model.choose_zones() == {}
+
+
+def test_a_zone_the_patrol_crosses_too_fast_claims_nothing():
+    """Row 5: a patrol at ~690px/s against the ~13 frames a second this rink
+    manages crosses a zone in two or three frames. Read a frame at a time,
+    every wobble was a turn and the period flickered between 1.21, 1.31 and
+    3.63 seconds while the row missed by 45 to 167 pixels (2026-08-10).
+    Demanding frames either side of the turn settles it: nothing qualifies,
+    so nothing is claimed, and the row falls back on saying it does not
+    know."""
+    from modules.hockey.motion import _Zone
+
+    tick = 0.077                     # what the real scan rate manages
+    board = _Zone(1047.0, 1110.0, toward_right=False, far=1498.0)
+    t = 0.0
+    while t < 40:
+        x = _triangle(t, 1.31, 1047, 1498)
+        board.feed(t, [x] if 1047 <= x <= 1110 else [])
+        t += tick
+
+    assert board.bounces == 0
+    assert board.period is None
+
+
+def test_the_check_compares_against_what_was_seen_not_against_the_tracks():
+    """The tracks are the thing being checked, and in a row where they have
+    come apart they are also the thing that came apart. A row predicting
+    itself to 8px was condemned at 38 by its own broken trackers
+    (2026-08-10)."""
+    row = RowMotion(_HORIZON)
+    t = 0.0
+    while t < 10:
+        row.feed(t, [1200.0, 1400.0])
+        t += _TICK
+
+    seen = row._seen_at(t - _TICK)
+
+    assert sorted(round(x) for x in seen) == [1200, 1400]
+    assert row._seen_at(t + 5.0) == []       # nothing was seen then at all
+
+
+def _board_row(turns: int):
+    """A row whose zone has watched `turns` turns go by, evenly spaced."""
+    row = RowMotion(_HORIZON)
+    row.watch_zone(1047.0, 1222.0, toward_right=False, far=1498.0)
+    for turn in range(turns):
+        row.board_patrol()._turns.append((turn * 2.0, 1050.0, 250.0))
+    row._errors.extend([80.0] * 30)          # nowhere near holding
+    return row
+
+
+def test_the_board_timing_is_thrown_away_when_it_stops_holding():
+    """Being wrong is allowed; going on being wrong without noticing is
+    not."""
+    row = _board_row(turns=4)
+    assert row.by_board_ready() is True      # so those misses are its own
+
+    row._doubt_the_board()
+
+    assert row.board_patrol().bounces == 0
+
+
+def test_but_not_over_misses_that_were_never_its_own():
+    """Two turns are not a period, so the row is still being predicted by
+    its trackers — and it was throwing its timing away over their errors
+    before it had answered a single question (2026-08-10)."""
+    row = _board_row(turns=2)
+    assert row.by_board_ready() is False
+
+    row._doubt_the_board()
+
+    assert row.board_patrol().bounces == 2
+
+
+def test_a_row_that_will_not_calibrate_gets_a_zone_even_with_nobody_standing():
+    """Standing defenders are what carve a zone out of a crowded row, but a
+    row can simply refuse to settle with nothing standing in it at all.
+    After ten seconds the trackers have had their chance, and counting turns
+    alongside them costs nothing — the timing is only ever used while they
+    are still failing."""
+    from modules.hockey.motion import MotionModel
+
+    low, high = 1050.0, 1500.0
+
+    class _Lane:
+        index, y, height = 0, 400, 50
+
+    class _Geom:
+        lanes = [_Lane()]
+        left, width, top = 0, 2000, 0
+
+        def centre_bounds(self, lane):
+            return low, high
+
+        def half_width(self, lane):
+            return 30
+
+    def feed(row, until, t):
+        step = 0
+        while t < until:
+            # A patrol, plus red that turns up somewhere different every
+            # time: the head count says two, one track holds, and nothing
+            # stands still long enough to carve a zone out of.
+            row.feed(t, [_triangle(t, 3.0, low, high),
+                         low + (step * 137) % (high - low)])
+            t += _TICK
+            step += 1
+        return t
+
+    model = MotionModel(_Geom(), _HORIZON)
+    row = model._rows[0]
+    t = feed(row, 9.0, 0.0)
+    assert row.standing_spots() == []
+    assert row.ready() is False
+    assert model.choose_zones() == {}          # still inside its ten seconds
+
+    t = feed(row, 12.0, t)
+
+    chosen = model.choose_zones()
+
+    assert 0 in chosen
+    zone_low, zone_high, toward_right = chosen[0]
+    assert toward_right is True
+    assert zone_high >= high                   # open past the end of the ice
+    assert low < zone_low < high                # and is a share of it, not all
+
+
+def test_but_never_for_a_row_that_has_already_settled():
+    from modules.hockey.motion import MotionModel
+
+    class _Lane:
+        index, y, height = 0, 400, 50
+
+    class _Geom:
+        lanes = [_Lane()]
+        left, width, top = 0, 2000, 0
+
+        def centre_bounds(self, lane):
+            return 1050.0, 1500.0
+
+        def half_width(self, lane):
+            return 30
+
+    model = MotionModel(_Geom(), _HORIZON)
+    t = 0.0
+    while t < 25:
+        model._rows[0].feed(t, [_triangle(t, 3.0, 1050, 1500)])
+        t += _TICK
+
+    assert model._rows[0].ready() is True
+    assert model.choose_zones() == {}
+
+
+# ── Orange mode: every row by its board zone alone ───────────────────────
+
+def _orange_model(rows: list, seconds: float = 70.0, tick: float = 0.077):
+    """One model in orange mode, fed `rows` — each a list of ("stand", x) or
+    ("move", period). Detections merge when they come within 55px, the way
+    the detector really reports them."""
+    from modules.hockey.motion import MotionModel
+
+    low, high = 1047.0, 1498.0
+
+    class _Lane:
+        def __init__(self, index):
+            self.index, self.y, self.height = index, 400 + index * 60, 50
+
+    class _Geom:
+        lanes = [_Lane(i) for i in range(len(rows))]
+        left, width, top = 0, 2000, 0
+
+        def centre_bounds(self, lane):
+            return low, high
+
+        def half_width(self, lane):
+            return 30
+
+    class _Hit:
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+    model = MotionModel(_Geom(), _HORIZON, orange=True)
+    t = 0.0
+    while t < seconds:
+        found = {}
+        for index, crew in enumerate(rows):
+            xs = sorted(value if kind == "stand"
+                        else _triangle(t, value, low, high)
+                        for kind, value in crew)
+            merged = []
+            for x in xs:
+                if merged and x - merged[-1] < 55:
+                    merged[-1] = (merged[-1] + x) / 2
+                else:
+                    merged.append(x)
+            found[index] = [_Hit(x, 400 + index * 60) for x in merged]
+        model.feed(found, t)
+        model.choose_zones()
+        t += tick
+    return model, t
+
+
+def test_orange_mode_measures_a_row_by_its_board_zone_alone():
+    """No tracking, no autocorrelation: a stretch of ice at one end, and the
+    gap between two turns in it is the period."""
+    model, _t = _orange_model([[("move", 3.4)]])
+
+    report = model.reports()[0]
+
+    assert len(report.zone_patrols) == 1
+    period, speed = report.zone_patrols[0]
+    assert abs(period - 3.4) < 0.1
+    assert abs(speed - 2 * (1498 - 1047) / 3.4) < 40
+    assert report.error < 12
+    assert report.ready is True
+
+
+def test_and_standers_are_kept_out_of_the_zone_and_counted_instead():
+    """A standing defender inside the zone would sit there for ever and no
+    chain would ever end, so no turn could be read at all."""
+    model, _t = _orange_model([[("stand", 1180.0), ("stand", 1300.0),
+                                ("move", 3.0)]])
+
+    report = model.reports()[0]
+
+    assert len(report.zone_patrols) == 1
+    assert abs(report.zone_patrols[0][0] - 3.0) < 0.1
+    assert report.error < 12
+    assert report.ready is True
+
+
+def test_and_two_patrols_sharing_a_board_are_told_apart_by_their_clocks():
+    """Their turns arrive interleaved and half of them are lost to merging,
+    so building a patrol turn by turn fixes a period belonging to nobody —
+    6.74s where the truth was 2.1 and 3.4 (2026-08-11). Every pair of turns
+    proposes a period instead, and the one the most others agree with wins.
+    """
+    model, _t = _orange_model([[("move", 3.4), ("move", 2.1)]])
+
+    report = model.reports()[0]
+
+    assert len(report.zone_patrols) == 2
+    periods = sorted(period for period, _speed in report.zone_patrols)
+    assert abs(periods[0] - 2.1) < 0.1
+    assert abs(periods[1] - 3.4) < 0.1
+    assert report.error < 12
+    assert report.ready is True

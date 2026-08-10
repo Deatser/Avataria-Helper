@@ -209,6 +209,42 @@ class HockeyConfig:
     # errors. On by default — the numbers are how the model is judged.
     verbose_log: bool = True
 
+    # Consider pulls between the three that were measured — 0.15, 0.35 and
+    # so on — by scaling the measured arc. Off by default because it is the
+    # one thing in the shot that is interpolated rather than seen: the arc's
+    # shape is measured, how it grows with the pull is assumed linear.
+    fine_aim: bool = False
+
+    # Cut the log down to what a run is actually doing: the level, the head
+    # count, one line per row as it is calibrated, and the shot. Everything
+    # still happens — the running commentary just stops being printed. Only
+    # means anything while verbose_log is on.
+    light_log: bool = False
+
+    # Stop drawing the boxes and zones over the game. They keep being
+    # computed and used; they are simply not painted, for playing over.
+    hide_overlays: bool = False
+
+    # Predict every row from its board zone and nothing else — no tracking,
+    # no autocorrelation. Each row gets a stretch of ice at one end, every
+    # defender that turns round in it is timed separately, and the gap
+    # between two of his turns is his period. The same method for every row
+    # whatever is standing in it and however many are moving.
+    orange_mode: bool = False
+
+    # Shoot as soon as every row is calibrated, without waiting for the
+    # button. The same plan the button would draw up — nothing about the
+    # refusals or the thresholds changes, only who presses.
+    auto_shot: bool = False
+
+    # The nine cells of the progress strip above the rink, left to right, as
+    # {"left","top","width","height"} in screen coordinates. Each one holds
+    # templates/hockey_nice.png or hockey_bad.png once its level has been
+    # played, so the count of filled ones is the level you are on minus one:
+    # nine cells are exactly enough to tell levels 1 through 10 apart.
+    # Marked by hand with the module's own button.
+    level_cells: list = field(default_factory=list)
+
 
 @dataclass
 class StatsWindowConfig:

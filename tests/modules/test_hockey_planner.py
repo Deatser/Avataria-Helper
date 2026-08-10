@@ -289,3 +289,39 @@ def test_a_crossing_is_checked_all_the_way_through():
     # Every release whose crossing spans that instant has to be rejected.
     assert found is None or not (found.release_at + 0.5
                                  <= 100.90 <= found.release_at + 1.5)
+
+
+class _Shaky(_Motion):
+    """The same stand-in, with a track record of missing by `slack`."""
+
+    def __init__(self, where, slack: float):
+        super().__init__(where)
+        self._slack = slack
+
+    def slack(self, _row):
+        return self._slack
+
+
+def test_a_row_has_to_be_cleared_by_its_own_error_as_well():
+    """The half widths and the puck's radius are what a collision *is*; the
+    row's own worst measured miss is what the collision is being predicted
+    *with*. Leaving less room than that is planning inside the error bar —
+    the shot that lost level 8 was given 2px of clearance on a row whose
+    worst miss that minute was 40 (2026-08-10)."""
+    geom = from_config(_config())
+    # The defender parked 80px left of the puck's line: 30 of body and 10 of
+    # puck leave 40px of room, which is a shot until the model admits it
+    # could be 45px out.
+    steady = _Shaky(lambda t: [1120.0], slack=0.0)
+    shaky  = _Shaky(lambda t: [1120.0], slack=45.0)
+
+    assert plan(geom, steady, {0.0: _timing()}, now=100.0) is not None
+    assert plan(geom, shaky, {0.0: _timing()}, now=100.0) is None
+
+
+def test_and_a_model_that_keeps_no_record_is_taken_at_face_value():
+    """The diagnostics and the tests call in with plain stand-ins."""
+    geom = from_config(_config())
+
+    assert plan(geom, _Motion(lambda t: [1120.0]),
+                {0.0: _timing()}, now=100.0) is not None

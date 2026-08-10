@@ -479,6 +479,76 @@ def mirror_fill(geom, timings: dict) -> list[tuple[float, int]]:
     return filled
 
 
+# The pull the two side shots were measured at, and how finely the pulls
+# between them are stepped when the fine aim is switched on. 0.05 is 40px of
+# goal mouth — finer than that is below what the release timing can hold
+# anyway, and every extra aim is another sweep of the whole search.
+_FULL_AIM  = 0.5
+_AIM_STEP  = 0.05
+
+
+def blend(straight: list[RowTiming], full: list[RowTiming],
+          aim: float) -> list[RowTiming]:
+    """One row table for a pull somewhere between nothing and the full one.
+
+    The arc's shape is measured, not modelled: a straight shot holds x to
+    within half a pixel over the whole flight, and the two full pulls
+    deviate from it by mirror-image amounts at every moment — 7px of
+    disagreement against an 84px swing, correlated 0.978 (2026-08-10). One
+    shape, then, signed by which way the pull went and scaled by how hard.
+
+    Scaled *linearly*, because with measurements at nothing and at full
+    there is nothing in the data to justify any other curve through them.
+    That is an assumption, and the honest place for it: everything else here
+    is measured, and this is behind a switch.
+    """
+    share = abs(aim) / _FULL_AIM
+    by_row = {timing.row: timing for timing in full}
+    blended = []
+    for base in straight:
+        other = by_row.get(base.row)
+        if other is None:
+            continue          # a row one of the two never reached
+        blended.append(RowTiming(
+            row=base.row,
+            shots=min(base.shots, other.shots),
+            t_enter=base.t_enter + share * (other.t_enter - base.t_enter),
+            t_exit=base.t_exit + share * (other.t_exit - base.t_exit),
+            x_enter=base.x_enter + share * (other.x_enter - base.x_enter),
+            x_exit=base.x_exit + share * (other.x_exit - base.x_exit),
+            spread=max(base.spread, other.spread),
+            mirrored=base.mirrored or other.mirrored))
+    return blended
+
+
+def spread_aims(timings: dict, step: float = _AIM_STEP) -> dict:
+    """The three measured tables, plus one for every pull between them.
+
+    A shot has a whole range of pulls available and only three of them have
+    ever been fired; the ones in between are where most of the windows are.
+    Returns the measured tables untouched — an aim that was really measured
+    is never replaced by an interpolation of itself.
+    """
+    straight = timings.get(0.0)
+    if not straight:
+        return dict(timings)
+
+    dense = dict(timings)
+    for side in (-_FULL_AIM, _FULL_AIM):
+        full = timings.get(side)
+        if not full:
+            continue
+        steps = int(round(_FULL_AIM / step))
+        for i in range(1, steps):
+            aim = round(side * i / steps, 3)
+            if aim in dense:
+                continue
+            rows = blend(straight, full, aim)
+            if rows:
+                dense[aim] = rows
+    return dense
+
+
 def arrived(geom, track: ShotTrack) -> bool:
     """Whether the puck was followed all the way to the goal.
 

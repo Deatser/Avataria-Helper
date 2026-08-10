@@ -28,8 +28,11 @@ from PySide6.QtCore import Qt, QRect, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout
 
+import cv2
+
 from app.core.capture import grab_window
 from app.core.input_sender import mouse_down_at, mouse_move_to, mouse_up_at
+from app.core.template_match import best_match, load_template
 from app.ui import theme
 from app.ui.calibration_overlay import CalibrationOverlay
 from app.ui.module_window import ModuleWindow
@@ -44,16 +47,19 @@ from app.ui.widgets.vw_panel import VIDEO_SUFFIXES, VwPanel
 from app.ui.zones_overlay import ZonesOverlay
 from modules.hockey import debug_frame, trajectory
 from modules.hockey.detect import NO_LANE, HelmetDetector
+from modules.hockey.level_strip import LevelStrip
+from modules.hockey.motion import _MIN_BOUNCES as _MIN_BOUNCES_SHOWN
 from modules.hockey.motion import MotionModel
 from modules.hockey.planner import _MIN_CLEARANCE_PX as _MIN_CLEARANCE_SHOWN
 from modules.hockey.planner import _MIN_WINDOW_S as _MIN_WINDOW_SHOWN
 from modules.hockey.planner import best_effort as best_effort_shot
+from modules.hockey.planner import best_effort_each
 from modules.hockey.planner import plan as plan_shot
 from modules.hockey.planner import why_not as why_not_shot
 from modules.hockey.rink_area import from_config
 from modules.hockey.settings_panel import HockeySettingsPanel
 
-_BACKDROP_STEM  = "hockey_frost"
+_BACKDROP_STEM  = "snowboard_sinthwawe"
 _PROJECT_ROOT   = Path(__file__).resolve().parents[2]
 _TEMPLATES      = _PROJECT_ROOT / "templates"
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
@@ -74,6 +80,36 @@ _CALIB_STOP_TEXT  = "📐  Записать область"
 _FIELD_TEXT = "🥅  Показать поле"
 _ROW_TEXT   = "👁  Показать ряд"
 _TEST_TEXT   = "🔬  Тест детекции"
+
+# The progress strip above the rink: nine cells, each of which fills with a
+# tick or a cross once its level has been played. Nine is exactly enough to
+# tell ten levels apart — none filled is level 1, all nine filled is level
+# 10. Marked one at a time, the button naming whichever comes next.
+_LEVEL_CELLS = 9
+_LEVEL_TOTAL = 10
+_LEVEL_ICONS = {"nice": "hockey_nice.png", "bad": "hockey_bad.png"}
+_LEVEL_MATCH_MIN = 0.55     # a cell scoring under this is still empty
+_LEVEL_EVERY_S = 1.0        # how often the counter re-reads the strip
+
+# Readings in a row that must agree before the level is taken as changed. A
+# level lasts a minute; a cell failing to match lasts a frame.
+_LEVEL_CONFIRM = 3
+
+# Shown until the strip has been marked and read. The convention for a value
+# that has no reading yet, the same one stats.py uses.
+_LEVEL_UNKNOWN = "Уровень %уровень%/10"
+
+# The box a level cell starts at before it has ever been marked.
+_LEVEL_BOX = 40
+
+# Slack around each marked cell when it is read. The icons are 43x43 and
+# 41x39 while the cells were marked 40x40, and a template larger than the
+# patch it is searched in scores zero — so every cell read as empty and the
+# counter sat on level 1 for ever (2026-08-10). Padding costs nothing: the
+# cells are far enough apart that a few pixels cannot reach the next one.
+_LEVEL_PAD = 8
+
+_LEVEL_CHECK_TEXT = "🏅  Проверить уровни"
 _REPORT_TEXT = "📊  Отчёт по модели"
 # One button per aim rather than one that cycles: a calibration shot costs
 # a level, so which one is about to be fired should never be a matter of
@@ -82,6 +118,19 @@ _SHOT_BUTTONS = [("🎯  Центр", 0.0),
                  ("🎯  Лево", -0.5),
                  ("🎯  Право", 0.5)]
 _AIM_NAMES = {0.0: "центр ворот", -0.5: "левая штанга", 0.5: "правая штанга"}
+# The same three, short enough to put all of them on one line.
+_AIM_SHORT = {-0.5: "лево", 0.0: "центр", 0.5: "право"}
+
+
+def _aim_name(aim: float) -> str:
+    """What to call a pull. The three measured ones have names; the ones in
+    between have only their number, and the number is what matters — it is
+    the thing that was chosen and the thing to check a miss against."""
+    named = _AIM_NAMES.get(round(aim, 3))
+    if named:
+        return named
+    side = "влево" if aim < 0 else "вправо"
+    return f"натяжение {abs(aim):.2f} {side}"
 
 _FIRE_TEXT  = "💥  Сделать бросок"
 # Same preconditions, thresholds ignored. Its own button rather than a
@@ -102,6 +151,34 @@ _PULL_LEAD_S = 0.35
 # whole run where being late cannot be taken back.
 _RELEASE_FINE_MS   = 3
 _RELEASE_COARSE_S  = 0.05
+
+# What the pull itself takes from the moment a plan exists — _DRAG_STEPS at
+# _DRAG_STEP_MS plus the press, rounded up. A plan whose moment is nearer
+# than this cannot be acted on at all.
+_GESTURE_S = 0.20
+
+# Slack added when a plan has to be drawn up again because the first one
+# aimed at a moment that had already passed, and how many attempts are worth
+# making before calling it off.
+_PLAN_MARGIN_S = 0.10
+_PLAN_TRIES    = 3
+
+# And the soonest a shot may be planned for. Well past what the gesture
+# needs: a third of a second leaves nothing between the plan and the release
+# for anything to go slightly slower than it did while the plan was drawn
+# up, and waiting costs nothing here — the game does not hurry a shot, and
+# the next window along is as good as this one.
+_MIN_DELAY_S = 1.00
+
+# How long a level may be spent calibrating before what has been measured
+# so far has to do. The level ends whether or not a shot is taken, so a row
+# still arguing with itself has cost the attempt as surely as a miss.
+_FORCE_AFTER_S = 60.0
+
+# How long planning is expected to take, before it has been timed. Only the
+# opening guess: the real cost of the last attempt is what the next one
+# budgets with.
+_PLAN_COST_S = 0.45
 
 # How long a shot takes to reach the goal. Everything the motion model is
 # judged on is judged over exactly this stretch, because it is the only
@@ -125,8 +202,13 @@ _PREDICT_BORDER = QColor(255, 0, 208, 230)
 # all — he is measured, and he will be in that spot whenever the puck gets
 # there — so it would be misleading to paint him the colour that means "this
 # is where the model thinks somebody will have got to".
-_STAND_FILL   = QColor(0, 0, 0, 60)
-_STAND_BORDER = QColor(0, 0, 0, 230)
+_STAND_FILL   = QColor(0, 0, 0, 225)
+_STAND_BORDER = QColor(0, 0, 0, 255)
+
+# The stretch of ice a crowded row is being timed in — see
+# MotionModel.choose_zones. Orange because nothing else on the rink is, and
+# because it is a working aid rather than part of the plan.
+_ZONE_COLOUR = QColor(255, 150, 30)
 
 # What the box drawn by "Отметить область" describes. "Борт" is singular on
 # purpose: each row's defender turns round in its own place (2026-08-09), so
@@ -309,6 +391,17 @@ class HockeyWindow(ModuleWindow):
         self._burst: _Burst | None = None
         self._counted_at: float | None = None
         self._counted = False
+        self._level_slot = 0
+        self._level_shown: int | None = None
+        self._level_seen: int | None = None
+        self._level_held = 0
+        self._zone_boxes: dict[int, QRect] = {}
+        self._plan_cost = _PLAN_COST_S
+        self._settled_rows: set[int] = set()
+        self._fired_this_level = False
+        self._forced = False
+        self._forcing = False
+        self._started_at: float | None = None
         self._scan_failures = 0
         self._field_shown = False
         self._row_shown   = False
@@ -404,7 +497,7 @@ class HockeyWindow(ModuleWindow):
                               upper=False)
         report_btn.clicked.connect(self._model_report)
         layout.addLayout(self._button_row(self._shelve(detect_btn),
-                                          report_btn))
+                                          self._shelve(report_btn)))
 
         layout.addWidget(self._shelve(self._section_label("БРОСОК С ЗАМЕРОМ")))
         shots = QHBoxLayout()
@@ -421,10 +514,33 @@ class HockeyWindow(ModuleWindow):
         self._fire_btn.clicked.connect(self._fire)
         layout.addWidget(self._fire_btn)
 
+        # Hidden: "Сделать бросок" no longer refuses, so there is nothing
+        # left for a second button to override. The code stays — see _force.
         self._force_btn = NtButton(_FORCE_TEXT, accent=theme.ACCENT_AMBER,
                                    upper=False)
         self._force_btn.clicked.connect(self._force)
-        layout.addWidget(self._force_btn)
+        layout.addWidget(self._shelve(self._force_btn))
+
+        # Marked once and hidden, like the rest of the calibration tools.
+        self._level_btn = NtButton(self._level_btn_text(),
+                                   accent=theme.HK_ICE_SOFT, upper=False)
+        self._level_btn.clicked.connect(self._toggle_level_calib)
+        layout.addWidget(self._shelve(self._level_btn))
+
+        check_btn = NtButton(_LEVEL_CHECK_TEXT, accent=theme.HK_ICE_SOFT,
+                             upper=False)
+        check_btn.clicked.connect(self._check_levels)
+        layout.addWidget(self._shelve(check_btn))
+
+        self._levels = LevelStrip()
+        layout.addWidget(self._levels)
+
+        # The strip is watched whether or not a watch is running: a level
+        # ends when the puck lands, not when tracking is switched off, and
+        # the cell that fills is the only thing on screen that says so.
+        self._level_timer = QTimer(self)
+        self._level_timer.timeout.connect(self._refresh_level)
+        self._level_timer.start(int(_LEVEL_EVERY_S * 1000))
 
         layout.addLayout(self._build_log(), stretch=1)
 
@@ -591,7 +707,7 @@ class HockeyWindow(ModuleWindow):
         # the checking mode shows an honest error figure as well as a box
         # that should ride its defender.
         self._detector = HelmetDetector(geom, self.config)
-        self._motion = MotionModel(geom, _PUCK_TRAVEL_S)
+        self._motion = MotionModel(geom, _PUCK_TRAVEL_S, orange=self._orange())
         self._scan_failures = 0
         self._status_at = 0.0
         self._announced_ready = False
@@ -599,34 +715,48 @@ class HockeyWindow(ModuleWindow):
         # button press: the window has to find the game and grab it first.
         self._counted_at = None
         self._counted = False
+        self._fired_this_level = False
+        self._forced = False
+        self._forcing = False
+        # From the first frame that arrives, not from the button press —
+        # the same reason as _counted_at.
+        self._started_at = None
         self._running = True
         self._start_btn.setText(_STOP_TEXT)
         self._start_btn.set_active(True)
         self._status_dot.set_running()
-        self._log.add_log_segments(
+        self._settled_rows = set()
+        self._announce_level()
+        self._chatter(
             [("Слежение запущено — ", theme.TEXT_SECONDARY),
              (f"{len(geom.lanes)} ряд(ов), такт {_SCAN_MS} мс", theme.HK_ICE),
              (f".  Сначала {_CENSUS_S:.0f} с считаю состав — сколько вратарей "
-              f"в каждом ряду и кто из них едет.", theme.TEXT_SECONDARY)],
-            level="plain")
+              f"в каждом ряду и кто из них едет.", theme.TEXT_SECONDARY)])
+        if self._orange():
+            self._chatter(
+                [("Режим полосы у борта — ", theme.ACCENT_AMBER),
+                 ("каждому ряду достаётся полоса у борта, и скорость каждого "
+                  "вратаря берётся из времени между его разворотами в ней. "
+                  "Слежение по трекам в предсказании не участвует; проверка "
+                  "на 1.5 с прежняя.", theme.TEXT_SECONDARY)])
         if self._checking():
-            self._log.add_log_segments(
+            self._chatter(
                 [("Режим проверки — ", theme.ACCENT_AMBER),
                  ("малиновая рамка рисуется там, где вратарь ", theme.TEXT_SECONDARY),
                  ("прямо сейчас", theme.HK_ICE),
                  (".  Она обязана ехать ровно по нему: отстаёт или "
                   "обгоняет — видно сразу. Точность в логе при этом "
                   "по-прежнему меряется на 1.5 с. Бросок запрещён.",
-                  theme.TEXT_SECONDARY)], level="plain")
+                  theme.TEXT_SECONDARY)])
         else:
-            self._log.add_log_segments(
+            self._chatter(
                 [("Малиновые рамки — ", theme.TEXT_SECONDARY),
                  (f"где модель ждёт вратаря целиком через "
                   f"{_PUCK_TRAVEL_S:.1f} с", theme.HK_ICE),
                  (f".  Каждые {_STATUS_EVERY_S:.0f} с в лог будет падать, на "
                   f"сколько пикселей предсказание промахнулось — на глаз это "
                   f"не проверить, а модель меряет ровно это.",
-                  theme.TEXT_SECONDARY)], level="plain")
+                  theme.TEXT_SECONDARY)])
 
         self._scan_timer = QTimer(self)
         self._scan_timer.timeout.connect(lambda: self._scan_tick(geom))
@@ -642,6 +772,8 @@ class HockeyWindow(ModuleWindow):
         # after a watch has been stopped, not only during one.
         self._predicted.clear()
         self._standing.clear()
+        self._zones.clear()
+        self._zone_boxes.clear()
         self._start_btn.setText(_START_TEXT)
         self._start_btn.set_active(False)
         self._status_dot.set_stopped()
@@ -668,8 +800,20 @@ class HockeyWindow(ModuleWindow):
         found = self._detector.scan(frame, self._motion.expectations(now))
         self._motion.feed(found, now)
         moving, fixed = self._predicted_boxes(geom, now)
-        self._predicted.update_targets(moving)
-        self._standing.update_targets(fixed)
+        if self._hidden():
+            # Still computed, just not painted: the boxes are a way of
+            # showing the plan, not part of making it.
+            self._predicted.clear()
+            self._standing.clear()
+            self._zones.clear()
+        else:
+            self._predicted.update_targets(moving)
+            self._standing.update_targets(fixed)
+
+        if self._counted:
+            for index, zone in self._motion.choose_zones().items():
+                self._announce_zone(geom, index, zone)
+
 
         if not self._counted:
             # Head count first. Nothing is calibrated and nothing is
@@ -684,10 +828,68 @@ class HockeyWindow(ModuleWindow):
                     self._log_census()
             return
 
+        if self._started_at is None:
+            self._started_at = now
+        if (not self._forced and not self._motion.ready()
+                and now - self._started_at >= _FORCE_AFTER_S):
+            self._settle_for_now()
+
         if now - self._status_at >= _STATUS_EVERY_S:
             self._status_at = now
             if self._verbose():
                 self._log_watch_status()
+
+    def _announce_zone(self, geom, index: int, zone: tuple):
+        """Say which stretch of ice a crowded row is being timed in, and
+        draw it, so the choice can be argued with rather than guessed at."""
+        low, high, toward_right = zone
+        lane = {l.index: l for l in geom.lanes}.get(index)
+        if lane is None:
+            return
+        top, bottom = geom.lane_rows(lane)
+        self._zone_boxes[index] = QRect(int(low), top + geom.top,
+                                        int(high - low), bottom - top)
+        if not self._hidden():
+            self._zones.show_zones([(box, _ZONE_COLOUR)
+                                    for box in self._zone_boxes.values()])
+        self._chatter(
+            [(f"Ряд {index + 1} — ", theme.HK_ICE_SOFT),
+             ("не даётся обычным слежением. ", theme.ACCENT_AMBER),
+             (f"Считаю развороты у {'правого' if toward_right else 'левого'}"
+              f" борта в полосе {low:.0f}…{high:.0f}: промежуток между двумя "
+              f"из них и есть период, кто бы ни мешал смотреть.",
+              theme.TEXT_SECONDARY)])
+
+    def _announce_level(self):
+        """The level, once, at the top of its own run. In light mode this is
+        the heading everything below belongs to."""
+        if not self._light():
+            return
+        self._rule()
+        level = self._levels.level
+        self._log.add_log_segments(
+            [(f"Уровень {level}/{_LEVEL_TOTAL}" if level else "Новый уровень",
+              theme.HK_ICE)], level="plain")
+        self._rule()
+
+    def _announce_settled(self):
+        """One line per row as it comes good, in the order they manage it.
+
+        The number a row is at while it is still working is only interesting
+        to somebody debugging the model; that it is *done* is what a run is
+        waiting for.
+        """
+        if not self._light() or self._motion is None:
+            return
+        for report in self._motion.reports():
+            if report.empty or report.index in self._settled_rows:
+                continue
+            if not report.ready:
+                continue
+            self._settled_rows.add(report.index)
+            self._log.add_log_segments(
+                [(f"Ряд {report.index + 1} ", theme.HK_ICE_SOFT),
+                 ("откалиброван", theme.ACCENT_GREEN)], level="plain")
 
     def _log_census(self):
         """Who is in each row, before anything is calibrated.
@@ -701,6 +903,12 @@ class HockeyWindow(ModuleWindow):
             self._log.add_log_segments(
                 [(f"Ряд {index + 1} — ", theme.HK_ICE_SOFT)]
                 + _census_words(still, moving), level="plain")
+        self._rule()
+        if self._light():
+            self._log.add_log_segments(
+                [("Идёт калибровка рядов", theme.TEXT_SECONDARY)],
+                level="plain")
+            return
         self._log.add_log_segments(
             [("Состав посчитан — ", theme.ACCENT_GREEN),
              ("начинаю калибровку скорости. Стоящие обведены чёрным и "
@@ -724,6 +932,7 @@ class HockeyWindow(ModuleWindow):
         """
         if self._announced_ready:
             return
+        self._announce_settled()
         reports = [r for r in self._motion.reports() if not r.empty]
         if not reports:
             return
@@ -744,7 +953,45 @@ class HockeyWindow(ModuleWindow):
                 # Nobody has been classified yet, so "стоит" would be a
                 # claim rather than a reading.
                 segments.append(("присматриваюсь", theme.TEXT_DIM))
-            elif report.tracked < report.occupants:
+            elif self._orange():
+                # Only the zone is answering, so only the zone is worth
+                # reporting: what it has timed, and whether it holds.
+                if not report.has_mover and report.ready:
+                    segments.append(("стоит", theme.TEXT_SECONDARY))
+                elif not report.zone_patrols:
+                    segments.append((f"жду разворотов у борта "
+                                     f"({report.bounces} из "
+                                     f"{_MIN_BOUNCES_SHOWN})", theme.TEXT_DIM))
+                else:
+                    kinds = " · ".join(
+                        f"{period:.2f} с / {speed:.0f} px/с"
+                        for period, speed in report.zone_patrols)
+                    if report.error is None:
+                        segments.append((kinds, theme.TEXT_DIM))
+                    else:
+                        segments.append((f"{report.error:.1f} px",
+                                         theme.ACCENT_AMBER))
+                        segments.append((f"  ({kinds})", theme.TEXT_DIM))
+            elif report.tracked != report.occupants and report.bounces:
+                # Being timed by its turns at the board instead. The period
+                # alone says nothing about whether the prediction lands, so
+                # the error goes first once there is one — that is the
+                # question, and the period is the working.
+                if report.bounce_period and report.error is not None:
+                    segments.append((f"{report.error:.1f} px",
+                                     theme.ACCENT_AMBER))
+                    segments.append(
+                        (f" по отскокам, период {report.bounce_period:.2f} с",
+                         theme.TEXT_DIM))
+                elif report.bounce_period:
+                    segments.append(
+                        (f"период {report.bounce_period:.2f} с — жду проверок",
+                         theme.TEXT_DIM))
+                else:
+                    segments.append((f"жду разворотов у борта "
+                                     f"({report.bounces} из 3)",
+                                     theme.TEXT_DIM))
+            elif report.tracked != report.occupants:
                 segments.append((f"вижу {report.occupants}, просчитываю "
                                  f"{report.tracked} — не стреляю",
                                  theme.ACCENT_RED))
@@ -768,16 +1015,69 @@ class HockeyWindow(ModuleWindow):
                 segments.append(("присматриваюсь", theme.TEXT_DIM))
             else:
                 segments.append((f"{report.error:.1f} px", theme.ACCENT_AMBER))
-        self._log.add_log_segments(segments, level="plain")
+        self._chatter(segments)
 
         if self._motion.ready() and not self._announced_ready:
             self._announced_ready = True
-            self._log.add_log_segments(
-                [("Все ряды откалиброваны — ", theme.ACCENT_GREEN),
-                 ("скорость каждого вратаря найдена и проверена, "
-                  "броски разрешены. Дальше эти скорости уже не "
-                  "пересчитываются: они свойство уровня, а не съёмки.",
-                  theme.TEXT_SECONDARY)], level="plain")
+            self._rule()
+            if self._light():
+                self._log.add_log_segments(
+                    [("Все ряды откалиброваны", theme.ACCENT_GREEN)],
+                    level="plain")
+            else:
+                self._log.add_log_segments(
+                    [("Все ряды откалиброваны — ", theme.ACCENT_GREEN),
+                     ("скорость каждого вратаря найдена и проверена, "
+                      "броски разрешены. Дальше эти скорости уже не "
+                      "пересчитываются: они свойство уровня, а не съёмки.",
+                      theme.TEXT_SECONDARY)], level="plain")
+            if self._auto_shot():
+                self._take_the_shot()
+            elif self._light():
+                self._log_plan()
+
+    def _settle_for_now(self):
+        """Stop waiting for the rows that will not settle, and take what
+        they have.
+
+        A level ends whether or not a shot is taken, so a row still arguing
+        with itself after a minute has cost the attempt exactly as surely as
+        a miss would. The bar comes down — an unconfident period is used, a
+        zone that timed one of two patrols is used for the one, a track with
+        neither is carried on its last speed — and the row says so.
+        """
+        self._forced = True
+        rows = self._motion.settle_for_now()
+        if not rows:
+            return
+        names = ", ".join(str(index + 1) for index in rows)
+        self._log.add_log_segments(
+            [(f"Минута вышла — ", theme.ACCENT_AMBER),
+             (f"ряды {names} так и не сошлись. Беру по ним то, что уже "
+              f"измерено: скорость приблизительная, но лучше неё ничего не "
+              f"будет, а уровень кончится в любом случае.",
+              theme.TEXT_SECONDARY)], level="plain")
+
+    def _take_the_shot(self):
+        """Fire without waiting to be asked.
+
+        Exactly the shot the button would take — same plan, same thresholds,
+        same refusals. Once per level: the game allows one attempt, and the
+        watch is torn down and rebuilt when the next one starts, which is
+        what arms this again.
+        """
+        if self._fired_this_level:
+            return
+        self._fired_this_level = True
+        self._log.add_log_segments(
+            [("Автоудар — ", theme.ACCENT_AMBER),
+             ("бью в ближайшее окно; чистого нет — бью в самое просторное",
+              theme.TEXT_SECONDARY)], level="plain")
+        self._forcing = True
+        try:
+            self._fire()
+        finally:
+            self._forcing = False
 
     def _checking(self) -> bool:
         """Read every time it is needed rather than latched at start, so
@@ -785,11 +1085,51 @@ class HockeyWindow(ModuleWindow):
         needs a restart to show anything is a setting that looks broken."""
         return bool(getattr(self.config, "predict_now", False))
 
+    def _fine_aim(self) -> bool:
+        """Whether pulls between the measured three are on the table. Read
+        live, like the other switches."""
+        return bool(getattr(self.config, "fine_aim", False))
+
     def _verbose(self) -> bool:
         """Whether the watch narrates itself. Read live, for the same reason
         as _checking. Shots and errors are never suppressed: those are
         events, not commentary."""
         return bool(getattr(self.config, "verbose_log", True))
+
+    def _light(self) -> bool:
+        """Whether the narration is cut back to what is happening — the
+        level, who is in each row, each row as it is calibrated, the shot."""
+        return self._verbose() and bool(getattr(self.config, "light_log",
+                                                False))
+
+    def _hidden(self) -> bool:
+        return bool(getattr(self.config, "hide_overlays", False))
+
+    def _auto_shot(self) -> bool:
+        """Whether the bot presses its own button once the model is ready."""
+        return bool(getattr(self.config, "auto_shot", False))
+
+    def _orange(self) -> bool:
+        """Whether every row is measured by its board zone alone. Read at
+        the start of a watch rather than live: switching method halfway
+        through would leave half the rows judged one way and half the
+        other."""
+        return bool(getattr(self.config, "orange_mode", False))
+
+    def _chatter(self, segments):
+        """A line of running commentary: how far along a row is, why an aim
+        was refused, what the model is chewing on. Dropped in light mode,
+        where the point is to see what happened rather than what is being
+        thought about."""
+        if self._verbose() and not self._light():
+            self._log.add_log_segments(segments, level="plain")
+
+    def _rule(self):
+        """A divider, in light mode only — it is there to separate the few
+        lines that survive, and among many it would be noise."""
+        if self._light():
+            self._log.add_log_segments([("─" * 38, theme.TEXT_DIM)],
+                                       level="plain")
 
     def _predicted_boxes(self, geom, now: float
                          ) -> tuple[list[QRect], list[QRect]]:
@@ -868,11 +1208,11 @@ class HockeyWindow(ModuleWindow):
                    for aim in aims}
         timings = {aim: rows for aim, rows in timings.items() if rows}
         for aim, row in trajectory.mirror_fill(geom, timings):
-            self._log.add_log_segments(
+            self._chatter(
                 [(f"Ряд {row + 1} на прицеле {aim:+.2f} ", theme.TEXT_DIM),
                  ("взят зеркально с противоположного", theme.ACCENT_AMBER),
                  (" — его так и не удалось промерить напрямую",
-                  theme.TEXT_SECONDARY)], level="plain")
+                  theme.TEXT_SECONDARY)])
         if not timings:
             self._log.add_log_segments(
                 [("Плана нет — ", theme.ACCENT_AMBER),
@@ -880,26 +1220,42 @@ class HockeyWindow(ModuleWindow):
                   "«Право»", theme.TEXT_SECONDARY)], level="plain")
             return
 
+        if self._fine_aim():
+            timings = trajectory.spread_aims(timings)
         found = plan_shot(geom, self._motion, timings, time.monotonic())
         if found is None:
-            self._log.add_log_segments(
-                [("Бросать нельзя — ", theme.ACCENT_RED),
-                 ("чистого окна нет ни при одном прицеле:",
-                  theme.TEXT_SECONDARY)], level="plain")
-            if self._verbose():
+            # "No window" on its own is unactionable. The nearest line there
+            # is, and what it would clip, says whether this is a rink full
+            # of defenders or an outline marked a few pixels too wide.
+            nearest = best_effort_shot(geom, self._motion, timings,
+                                       time.monotonic())
+            if nearest is None:
+                self._log.add_log_segments(
+                    [("Чистого окна нет — ", theme.ACCENT_RED),
+                     ("ни один прицел не удалось просчитать целиком",
+                      theme.TEXT_SECONDARY)], level="plain")
+            else:
+                short = max(0.0, -nearest.clearance)
+                self._log.add_log_segments(
+                    [("Чистого окна нет — ", theme.ACCENT_AMBER),
+                     ("ближайший вариант ", theme.TEXT_SECONDARY),
+                     (_aim_name(nearest.aim), theme.HK_ICE),
+                     ((f", не хватает {short:.0f} px" if short > 0
+                       else ", но окно слишком узкое"),
+                      theme.ACCENT_RED)], level="plain")
+            if self._verbose() and not self._light():
                 self._log_why_not(geom, timings)
             return
 
         self._log.add_log_segments(
-            [("Бросок был бы — ", theme.ACCENT_GREEN),
-             (_AIM_NAMES.get(found.aim, f"прицел {found.aim:+.2f}"),
-              theme.HK_ICE),
-             (f"  через {found.release_at - time.monotonic():.2f} с",
-              theme.TEXT_SECONDARY),
+            [("Удар был бы через ", theme.TEXT_SECONDARY),
+             (f"{found.release_at - time.monotonic():.2f} с", theme.HK_ICE),
+             (", окно ", theme.TEXT_SECONDARY),
+             (f"{found.window * 1000:.0f} мс", theme.HK_ICE),
+             (", в ", theme.TEXT_SECONDARY),
+             (_aim_name(found.aim), theme.HK_ICE),
              ("   запас ", theme.HK_ICE_SOFT),
-             (f"{found.clearance:.0f} px", theme.HK_ICE),
-             ("   окно ", theme.HK_ICE_SOFT),
-             (f"{found.window * 1000:.0f} мс", theme.HK_ICE)], level="plain")
+             (f"{found.clearance:.0f} px", theme.HK_ICE)], level="plain")
 
     def _log_why_not(self, geom, timings: dict):
         """Name the row and the shortfall for every aim.
@@ -911,7 +1267,7 @@ class HockeyWindow(ModuleWindow):
         """
         for verdict in why_not_shot(geom, self._motion, timings,
                                     time.monotonic(), lead=_PULL_LEAD_S):
-            name = _AIM_NAMES.get(verdict.aim, f"прицел {verdict.aim:+.2f}")
+            name = _aim_name(verdict.aim)
             if verdict.best_clearance is None:
                 self._log.add_log_segments(
                     [(f"  {name} — ", theme.HK_ICE_SOFT),
@@ -992,7 +1348,9 @@ class HockeyWindow(ModuleWindow):
                 ("    ошибка предсказания ", theme.TEXT_SECONDARY),
                 (error, verdict_colour),
                 (f"  (худшая {worst})", theme.TEXT_SECONDARY),
-                (f"  по {report.checks} проверкам", theme.TEXT_SECONDARY)]
+                (f"  по {report.checks} проверкам", theme.TEXT_SECONDARY),
+                # What a plan has to leave clear on this row because of it.
+                (f"  →  запас {report.slack:.0f} px", theme.HK_ICE_SOFT)]
             if (report.live_error is not None and report.error is not None
                     and report.live_error > report.error + 1.0):
                 accuracy.append(
@@ -1368,6 +1726,297 @@ class HockeyWindow(ModuleWindow):
               "изменить размер, потом нажмите ещё раз.",
               theme.TEXT_SECONDARY)], level="plain")
 
+    # ── The level counter ────────────────────────────────────────────────
+
+    def _level_btn_text(self) -> str:
+        return f"🏅  Отметить ячейку {self._level_slot + 1}/{_LEVEL_CELLS}"
+
+    def _toggle_level_calib(self):
+        """Mark one cell of the progress strip, then move on to the next.
+
+        Nine presses, nine cells, left to right. Same box as every other
+        calibration — drag the middle to move it, an edge to resize — and
+        the bounds land in config.json the moment the second press comes.
+        """
+        if self._calib.isVisible():
+            box = self._calib.bounds()
+            self._calib.clear()
+            self._write_level_cell(self._level_slot, box)
+            self._level_slot = (self._level_slot + 1) % _LEVEL_CELLS
+            self._level_btn.setText(self._level_btn_text())
+            self._level_btn.set_active(False)
+            return
+
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd:
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+        rect = self._wm.window_rect_screen(hwnd)
+        if rect is None:
+            self._log.add_log("Не удалось определить положение окна игры",
+                              level="error")
+            return
+
+        ox, oy, w, _h = rect
+        stored = self._level_cell(self._level_slot)
+        if stored is not None:
+            box = QRect(stored["left"], stored["top"],
+                        stored["width"], stored["height"])
+        else:
+            # A small box near the top of the game window, which is where
+            # the strip lives — closer to the answer than the middle.
+            box = QRect(ox + w // 2 - _LEVEL_BOX // 2, oy + 40,
+                        _LEVEL_BOX, _LEVEL_BOX)
+        self._calib.show_at(box)
+        self._level_btn.setText(_CALIB_STOP_TEXT)
+        self._level_btn.set_active(True)
+        self._log.add_log_segments(
+            [("Отмечаем — ", theme.TEXT_SECONDARY),
+             (f"ячейка уровня {self._level_slot + 1}", theme.HK_ICE),
+             (".  Тяните за середину, чтобы подвинуть, за край — чтобы "
+              "изменить размер, потом нажмите ещё раз.",
+              theme.TEXT_SECONDARY)], level="plain")
+
+    def _check_levels(self):
+        """Read the strip once and say, level by level, what it holds.
+
+        The counter shows a single number and cannot say why it is that
+        number. This says it out loud for all ten, with the match scores
+        beside each, so a cell that reads wrong can be told from a cell that
+        reads right.
+        """
+        cells = [self._level_cell(i) for i in range(_LEVEL_CELLS)]
+        if not any(cells):
+            self._log.add_log("Полоса уровней не размечена", level="error")
+            return
+        detail = self._cell_detail(cells)
+        if detail is None:
+            self._log.add_log("Полоса уровней не снимается — игра на месте?",
+                              level="error")
+            return
+
+        states = [state for state, _scores in detail]
+        level = next((i + 1 for i, state in enumerate(states)
+                      if state is None), _LEVEL_TOTAL)
+        for number in range(1, _LEVEL_TOTAL + 1):
+            if number == level:
+                word, colour = "Текущий", theme.ACCENT_AMBER
+            elif number > _LEVEL_CELLS:
+                word, colour = "—", theme.TEXT_DIM
+            elif states[number - 1] == "nice":
+                word, colour = "Пройден", theme.ACCENT_GREEN
+            elif states[number - 1] == "bad":
+                word, colour = "Не пройден", theme.ACCENT_RED
+            else:
+                word, colour = "ещё не сыгран", theme.TEXT_DIM
+            line = [(f"Уровень {number} — ", theme.HK_ICE_SOFT),
+                    (word, colour)]
+            if number <= _LEVEL_CELLS:
+                scores = detail[number - 1][1]
+                line.append((f"   ✓ {scores.get('nice', 0) * 100:.0f}%"
+                             f"   ✗ {scores.get('bad', 0) * 100:.0f}%"
+                             f"   (порог {_LEVEL_MATCH_MIN * 100:.0f}%)",
+                             theme.TEXT_DIM))
+            self._log.add_log_segments(line, level="plain")
+
+    def _cell_detail(self, cells: list) -> list | None:
+        """(state, scores) per cell — what _read_cells decides, plus the
+        numbers it decided on."""
+        marked = [cell for cell in cells if cell]
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd or not marked:
+            return None
+        left = min(cell["left"] for cell in marked) - _LEVEL_PAD
+        top = min(cell["top"] for cell in marked) - _LEVEL_PAD
+        right = max(cell["left"] + cell["width"] for cell in marked) + _LEVEL_PAD
+        bottom = max(cell["top"] + cell["height"]
+                     for cell in marked) + _LEVEL_PAD
+        try:
+            strip = grab_window(hwnd, {"left": left, "top": top,
+                                       "width": right - left,
+                                       "height": bottom - top})
+        except Exception:
+            return None
+        if strip is None or strip.size == 0:
+            return None
+
+        gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        detail = []
+        for cell in cells:
+            if cell is None:
+                detail.append((None, {}))
+                continue
+            patch = self._crop(gray, cell, left, top)
+            scores = self._cell_scores(patch)
+            best = max(scores, key=scores.get, default=None)
+            state = (best if best is not None
+                     and scores[best] >= _LEVEL_MATCH_MIN else None)
+            detail.append((state, scores))
+        return detail
+
+    def _level_cell(self, slot: int) -> dict | None:
+        cells = getattr(self.config, "level_cells", None) or []
+        if slot < len(cells) and cells[slot]:
+            return cells[slot]
+        return None
+
+    def _write_level_cell(self, slot: int, box: QRect):
+        cells = list(getattr(self.config, "level_cells", None) or [])
+        while len(cells) < _LEVEL_CELLS:
+            cells.append(None)
+        cells[slot] = {"left": box.left(), "top": box.top(),
+                       "width": box.width(), "height": box.height()}
+        self.config.level_cells = cells
+        self.save_fn()
+        marked = sum(1 for cell in cells if cell)
+        self._log.add_log_segments(
+            [(f"Ячейка {slot + 1} — ", theme.ACCENT_GREEN),
+             (f"{box.width()}×{box.height()} @ ({box.left()}, {box.top()})",
+              theme.HK_ICE),
+             (f"   отмечено {marked} из {_LEVEL_CELLS}",
+              theme.TEXT_SECONDARY)], level="plain")
+
+    def _refresh_level(self):
+        """Read the strip and put the level, and how it has gone, on screen.
+
+        One grab of the whole strip rather than nine of its cells: a window
+        capture costs tens of milliseconds and the cells sit side by side.
+
+        The level is the *first cell that is still empty*, not the count of
+        the filled ones. Those agree while the strip fills left to right,
+        and only the first empty cell is still true if it ever does not.
+        """
+        cells = [self._level_cell(i) for i in range(_LEVEL_CELLS)]
+        if not any(cells):
+            self._levels.set_reading([], None)
+            return
+        states = self._read_cells(cells)
+        if states is None:
+            return          # the game is gone or the grab failed; keep the
+                            # last reading rather than blank it
+
+        level = next((i + 1 for i, state in enumerate(states)
+                      if state is None), _LEVEL_TOTAL)
+        self._levels.set_reading(states, level)
+        if not self._level_holds(level):
+            return
+
+        if level != self._level_shown:
+            if self._level_shown is not None and level > self._level_shown:
+                done = states[level - 2] if level >= 2 else None
+                self._log.add_log_segments(
+                    [(f"Уровень {level - 1} ", theme.HK_ICE_SOFT),
+                     ("пройден" if done == "nice" else "провален",
+                      theme.ACCENT_GREEN if done == "nice"
+                      else theme.ACCENT_RED),
+                     (f" — идёт {level}-й из {_LEVEL_TOTAL}",
+                      theme.TEXT_SECONDARY)], level="plain")
+                self._new_level()
+            self._level_shown = level
+
+    def _level_holds(self, level: int) -> bool:
+        """Whether a reading has been the same long enough to act on.
+
+        One cell failing to match for a single frame drops the level by one;
+        it reads as a step *back*, so nothing is announced, and the next
+        good frame reads as a step forward and restarts the whole watch on
+        the level already being played (2026-08-11, 00:04:35). A level lasts
+        a minute or more and a misread lasts a frame, so agreeing with
+        itself three times running tells them apart with room to spare.
+        """
+        if level != self._level_seen:
+            self._level_seen = level
+            self._level_held = 1
+            return False
+        self._level_held += 1
+        return self._level_held >= _LEVEL_CONFIRM
+
+    def _new_level(self):
+        """Stop and start the watch, exactly as a hand would.
+
+        Speeds are drawn afresh for every level — a row that patrolled
+        slowly last time can be the quickest thing on the ice this time — so
+        nothing measured before is worth keeping: not the periods, not the
+        head count, not where anybody stood. Rather than reset the pieces
+        one by one and hope none was missed, the whole watch goes down and
+        comes back up, which is what was being done by hand between levels
+        anyway.
+        """
+        if not self._running:
+            return
+        self._stop_running()
+        self._motion = None
+        self._toggle_running()
+
+    def _read_cells(self, cells: list) -> list | None:
+        """"nice", "bad" or None for each marked cell; None for the lot when
+        the strip could not be read at all."""
+        marked = [cell for cell in cells if cell]
+        hwnd = self._wm.get_game_hwnd()
+        if not hwnd or not marked:
+            return None
+
+        left = min(cell["left"] for cell in marked) - _LEVEL_PAD
+        top = min(cell["top"] for cell in marked) - _LEVEL_PAD
+        right = max(cell["left"] + cell["width"] for cell in marked) + _LEVEL_PAD
+        bottom = max(cell["top"] + cell["height"]
+                     for cell in marked) + _LEVEL_PAD
+        try:
+            strip = grab_window(hwnd, {"left": left, "top": top,
+                                       "width": right - left,
+                                       "height": bottom - top})
+        except Exception:
+            return None     # a transient capture failure costs one reading
+        if strip is None or strip.size == 0:
+            return None
+
+        gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        return [None if cell is None else
+                self._cell_state(self._crop(gray, cell, left, top))
+                for cell in cells]
+
+    @staticmethod
+    def _crop(gray, cell: dict, left: int, top: int):
+        """One cell out of the strip, with slack round it — see _LEVEL_PAD."""
+        y = cell["top"] - top - _LEVEL_PAD
+        x = cell["left"] - left - _LEVEL_PAD
+        return gray[max(0, y):y + cell["height"] + 2 * _LEVEL_PAD,
+                    max(0, x):x + cell["width"] + 2 * _LEVEL_PAD]
+
+    @staticmethod
+    def _cell_scores(patch) -> dict:
+        """How much this cell looks like each icon, 0..1.
+
+        The icon is shrunk to fit when the marked cell is smaller than it —
+        a template bigger than what it is searched in scores zero, which is
+        not "no match" but "could not look".
+        """
+        scores = {}
+        for state, name in _LEVEL_ICONS.items():
+            icon = load_template(name)
+            if icon is None or patch.size == 0:
+                scores[state] = 0.0
+                continue
+            ph, pw = patch.shape[:2]
+            ih, iw = icon.shape[:2]
+            if ih > ph or iw > pw:
+                factor = min(ph / ih, pw / iw)
+                icon = cv2.resize(icon, (max(4, int(iw * factor)),
+                                         max(4, int(ih * factor))),
+                                  interpolation=cv2.INTER_AREA)
+            scores[state], _corner = best_match(patch, icon)
+        return scores
+
+    @classmethod
+    def _cell_state(cls, patch) -> str | None:
+        """Whether the level behind this cell was won, lost, or has not been
+        played yet — "nice", "bad" or None."""
+        scores = cls._cell_scores(patch)
+        best = max(scores, key=scores.get, default=None)
+        if best is None or scores[best] < _LEVEL_MATCH_MIN:
+            return None
+        return best
+
     def _target_name(self) -> str:
         target = self._target.active()
         name   = _TARGETS[target]
@@ -1467,6 +2116,93 @@ class HockeyWindow(ModuleWindow):
 
     # ── The real shot ────────────────────────────────────────────────────
 
+    def _plan_in_time(self, geom, timings, planner):
+        """A plan for a moment that has not happened yet.
+
+        Drawing one up takes a few hundred milliseconds, and the pull a
+        couple of hundred more. A plan made for `now + lead` can therefore be
+        for a moment already past by the time anything can act on it — the
+        release then fires at once and lands half a second late, which at
+        patrol speed is a hundred pixels of defender and a certain miss
+        (2026-08-10, "удар будет через -0.31 с").
+
+        So: plan for no sooner than _MIN_DELAY_S away, budgeting for what
+        the last plan actually cost to draw up, and if the moment chosen has
+        come too close anyway, do it again from further out. Two or three
+        passes settle it; if none do, that is a refusal, not a reason to
+        fire in a hurry. Waiting is free — the next window is as good.
+
+        Hands back (plan, in_time). `(None, True)` is an honest "no window";
+        `(None, False)` is "there may be one, but not one I can still hit".
+        """
+        # An automatic shot has a level running out on it, so it settles for
+        # a moment it can merely still act on rather than a comfortable one.
+        soonest = _GESTURE_S if self._forcing else _MIN_DELAY_S
+        lead = self._plan_cost + _MIN_DELAY_S + _PLAN_MARGIN_S
+        for _ in range(_PLAN_TRIES):
+            started = time.monotonic()
+            found = planner(geom, self._motion, timings, started, lead=lead)
+            self._plan_cost = time.monotonic() - started
+            if found is None:
+                return None, True
+            if found.release_at - time.monotonic() >= soonest:
+                return found, True
+            lead = self._plan_cost + _MIN_DELAY_S + _PLAN_MARGIN_S
+        self._log.add_log_segments(
+            [("Не успеваю — ", theme.ACCENT_RED),
+             (f"расчёт идёт дольше, чем остаётся до выбранного момента "
+              f"(упреждение дошло до {lead:.2f} с). Стрелять с опозданием "
+              f"хуже, чем не стрелять.", theme.TEXT_SECONDARY)],
+            level="plain")
+        return None, False
+
+    def _least_bad(self, geom, timings):
+        """The line that misses by least, when none of them misses by none.
+
+        The refusal used to be the whole safety story here and forcing a
+        shot had its own button. It does not survive contact with the game:
+        a level ends whether or not a shot is taken, so declining costs the
+        attempt just the same, and eight pixels of overlap against a body
+        outline drawn by hand is not a miss anybody can be sure of. So the
+        shot goes out, and what it is short by goes in the log — all three
+        lines, so the choice can be checked rather than trusted.
+        """
+        per_aim = {}
+
+        def pick(geometry, motion, tables, now, lead):
+            nonlocal per_aim
+            per_aim = best_effort_each(geometry, motion, tables, now,
+                                       lead=lead)
+            return max(per_aim.values(), key=lambda plan: plan.clearance,
+                       default=None)
+
+        found, in_time = self._plan_in_time(geom, timings, pick)
+        if found is None:
+            if in_time:
+                self._log.add_log_segments(
+                    [("Не из чего выбирать — ", theme.ACCENT_RED),
+                     ("ни один прицел не удалось просчитать целиком:",
+                      theme.TEXT_SECONDARY)], level="plain")
+                self._log_why_not(geom, timings)
+            return None
+
+        # The three measured lines always, and the interpolated ones only
+        # when one of them is what got picked — twenty-one entries on a log
+        # line is not something anybody reads.
+        shown = sorted(set(_AIM_SHORT) & set(per_aim) | {found.aim},
+                       reverse=True)
+        shortfalls = []
+        for aim in shown:
+            short = max(0.0, -per_aim[aim].clearance)
+            shortfalls.append(f"{_AIM_SHORT.get(round(aim, 3), f'{aim:+.2f}')}"
+                              f" {short:.0f} px")
+        self._chatter(
+            [("Чистого окна нет — ", theme.ACCENT_AMBER),
+             (f"не хватает пикселей ({' · '.join(shortfalls)}), выбираю ",
+              theme.TEXT_SECONDARY),
+             (_aim_name(found.aim), theme.HK_ICE)])
+        return found
+
     def _fire(self):
         """Work out when every row can be cleared, say so once, and shoot."""
         setup = self._shot_setup()
@@ -1474,28 +2210,30 @@ class HockeyWindow(ModuleWindow):
             return
         hwnd, geom, timings = setup
 
-        found = plan_shot(geom, self._motion, timings, time.monotonic(),
-                          lead=_PULL_LEAD_S)
+        found, in_time = self._plan_in_time(geom, timings, plan_shot)
+        if found is None and in_time:
+            found = self._least_bad(geom, timings)
         if found is None:
-            self._log.add_log_segments(
-                [("Не бросаю — ", theme.ACCENT_RED),
-                 ("чистого окна нет ни при одном прицеле:",
-                  theme.TEXT_SECONDARY)], level="plain")
-            if self._verbose():
-                self._log_why_not(geom, timings)
-            return
+            return              # already said why
 
         delay = found.release_at - time.monotonic()
-        self._log.add_log_segments(
-            [("Удар будет через ", theme.ACCENT_GREEN),
-             (f"{delay:.2f} с", theme.HK_ICE),
-             ("  —  ", theme.TEXT_DIM),
-             (_AIM_NAMES.get(found.aim, f"прицел {found.aim:+.2f}"),
-              theme.HK_ICE),
-             ("   запас ", theme.HK_ICE_SOFT),
-             (f"{found.clearance:.0f} px", theme.HK_ICE),
-             ("   окно ", theme.HK_ICE_SOFT),
-             (f"{found.window * 1000:.0f} мс", theme.HK_ICE)], level="plain")
+        if self._light():
+            self._log.add_log_segments(
+                [("Делаем удар через ", theme.ACCENT_GREEN),
+                 (f"{delay:.2f} с", theme.HK_ICE),
+                 (" — ", theme.TEXT_SECONDARY),
+                 (_aim_name(found.aim), theme.HK_ICE)], level="plain")
+        else:
+            self._log.add_log_segments(
+                [("Удар будет через ", theme.ACCENT_GREEN),
+                 (f"{delay:.2f} с", theme.HK_ICE),
+                 ("  —  ", theme.TEXT_DIM),
+                 (_aim_name(found.aim), theme.HK_ICE),
+                 ("   запас ", theme.HK_ICE_SOFT),
+                 (f"{found.clearance:.0f} px", theme.HK_ICE),
+                 ("   окно ", theme.HK_ICE_SOFT),
+                 (f"{found.window * 1000:.0f} мс", theme.HK_ICE)],
+                level="plain")
         self._pull_and_hold(hwnd, geom, found)
 
     def _force(self):
@@ -1512,9 +2250,10 @@ class HockeyWindow(ModuleWindow):
             return
         hwnd, geom, timings = setup
 
-        found = best_effort_shot(geom, self._motion, timings,
-                                 time.monotonic(), lead=_PULL_LEAD_S)
+        found, in_time = self._plan_in_time(geom, timings, best_effort_shot)
         if found is None:
+            if not in_time:
+                return          # already said why
             self._log.add_log_segments(
                 [("Не из чего выбирать — ", theme.ACCENT_RED),
                  ("ни один прицел не удалось просчитать целиком:",
@@ -1528,7 +2267,7 @@ class HockeyWindow(ModuleWindow):
             [("Принудительный удар через ", theme.ACCENT_AMBER),
              (f"{delay:.2f} с", theme.HK_ICE),
              ("  —  ", theme.TEXT_DIM),
-             (_AIM_NAMES.get(found.aim, f"прицел {found.aim:+.2f}"),
+             (_aim_name(found.aim),
               theme.HK_ICE),
              ("   лучший запас ", theme.HK_ICE_SOFT),
              (f"{found.clearance:.0f} px", theme.HK_ICE),
@@ -1585,17 +2324,24 @@ class HockeyWindow(ModuleWindow):
                    for aim in sorted({round(t.aim, 2) for t in measured})}
         timings = {aim: rows for aim, rows in timings.items() if rows}
         for aim, row in trajectory.mirror_fill(geom, timings):
-            self._log.add_log_segments(
+            self._chatter(
                 [(f"Ряд {row + 1} на прицеле {aim:+.2f} ", theme.TEXT_DIM),
                  ("взят зеркально с противоположного", theme.ACCENT_AMBER),
                  (" — его так и не удалось промерить напрямую",
-                  theme.TEXT_SECONDARY)], level="plain")
+                  theme.TEXT_SECONDARY)])
         if not timings:
             self._log.add_log_segments(
                 [("Не бросаю — ", theme.ACCENT_RED),
                  ("ни один прицел не промерен: нажмите «Центр», «Лево», "
                   "«Право»", theme.TEXT_SECONDARY)], level="plain")
             return
+        if self._fine_aim():
+            measured_count = len(timings)
+            timings = trajectory.spread_aims(timings)
+            self._chatter(
+                [("Промежуточные натяжения включены — ", theme.ACCENT_AMBER),
+                 (f"рассматриваю {len(timings)} прицелов вместо "
+                  f"{measured_count}", theme.HK_ICE)])
         return hwnd, geom, timings
 
     def _pull_and_hold(self, hwnd: int, geom, found):
@@ -1645,10 +2391,9 @@ class HockeyWindow(ModuleWindow):
                               level="plain")
             return
         late = (time.monotonic() - found.release_at) * 1000
-        self._log.add_log_segments(
+        self._chatter(
             [("Бросок сделан", theme.ACCENT_GREEN),
-             (f"  (отпустил с задержкой {late:+.0f} мс)", theme.TEXT_DIM)],
-            level="plain")
+             (f"  (отпустил с задержкой {late:+.0f} мс)", theme.TEXT_DIM)])
 
     # ── Measuring the flight ─────────────────────────────────────────────
 

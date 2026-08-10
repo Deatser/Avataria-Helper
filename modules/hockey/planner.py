@@ -29,14 +29,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# The band of release moments searched, and how finely. A tenth of a second
-# ahead is the earliest worth considering — anything sooner cannot be
-# arranged — and eight seconds covers two full cycles of the slowest patrol
-# measured (3.6s), so a window that exists at all is inside it. Waiting is
-# free: the game does not hurry a shot.
+# The band of release moments searched, and how finely.
+#
+# The caller sets where it starts — the window module keeps a shot at least
+# a second away, and pays for however long planning itself takes — so the
+# end has to leave a full cycle of the slowest patrol measured (3.6s) beyond
+# that. A patrol repeats: a window that does not exist inside one cycle does
+# not exist in the next either.
+#
+# It used to run to eight seconds and the search cost five seconds of wall
+# clock — long enough that the plan was for a moment already past by the
+# time it existed (2026-08-10).
 _LOOKAHEAD_FROM = 0.10
-_LOOKAHEAD_TO   = 8.00
+_LOOKAHEAD_TO   = 6.00
 _STEP           = 0.02
+
+# Positions are asked for on a grid this fine and cached. The same instant
+# comes up over and over — every release moment sampled crosses the same
+# rows — and re-deriving it each time was most of the search's cost. 5ms is
+# under 3px even for the fastest patrol measured.
+_CACHE_S = 0.005
 
 # How far clear of a defender the puck has to pass, on top of the
 # defender's own half width and the puck's radius.
@@ -82,6 +94,7 @@ def plan(geom, motion, timings: dict, now: float,
     bad".
     """
     best: Plan | None = None
+    motion = _Remembered(motion)
     for aim, rows in timings.items():
         if not rows:
             continue
@@ -93,6 +106,34 @@ def plan(geom, motion, timings: dict, now: float,
                                                               best.clearance):
             best = found
     return best
+
+
+class _Remembered:
+    """A motion model that answers the same question only once.
+
+    The search asks where a row's defenders will be at some thousands of
+    moments, and the moments repeat: every release instant considered sends
+    the puck through the same rows, so the absolute times pile up on top of
+    each other. Reading the model afresh each time was most of what made a
+    plan take five seconds to draw up (2026-08-10).
+    """
+
+    def __init__(self, motion):
+        self._motion = motion
+        self._seen: dict[tuple[int, int], list | None] = {}
+        self._slack: dict[int, float] = {}
+
+    def positions(self, index: int, t: float):
+        key = (index, round(t / _CACHE_S))
+        if key not in self._seen:
+            self._seen[key] = self._motion.positions(index, t)
+        return self._seen[key]
+
+    def slack(self, index: int) -> float:
+        if index not in self._slack:
+            getter = getattr(self._motion, "slack", None)
+            self._slack[index] = getter(index) if getter else 0.0
+        return self._slack[index]
 
 
 @dataclass
@@ -126,6 +167,7 @@ def why_not(geom, motion, timings: dict, now: float,
     """
     lanes = {lane.index: lane for lane in geom.lanes}
     steps = int((_LOOKAHEAD_TO - lead) / _STEP)
+    motion = _Remembered(motion)
     found = []
     for aim, rows in timings.items():
         best, blamed, unjudged = None, None, None
@@ -166,12 +208,28 @@ def best_effort(geom, motion, timings: dict, now: float,
     of a window, because there is no window: what is being asked for is the
     best instant that exists.
     """
+    per_aim = best_effort_each(geom, motion, timings, now, lead)
+    return max(per_aim.values(), key=lambda plan: plan.clearance, default=None)
+
+
+def best_effort_each(geom, motion, timings: dict, now: float,
+                     lead: float = _LOOKAHEAD_FROM) -> dict:
+    """The least-bad shot for every aim, in one sweep.
+
+    Separate from best_effort because the caller wants both halves of the
+    same answer: which line to take, and by how much each of the three
+    misses. Running the search once for the choice and again for the
+    numbers would cost the plan its own moment — the whole sweep is several
+    hundred milliseconds.
+    """
     lanes = {lane.index: lane for lane in geom.lanes}
     steps = int((_LOOKAHEAD_TO - lead) / _STEP)
-    best = None
+    motion = _Remembered(motion)
+    found = {}
     for aim, rows in timings.items():
         if not rows:
             continue
+        best = None
         for i in range(steps + 1):
             release = now + lead + i * _STEP
             clearance, _row = _tightest(geom, motion, lanes, rows, release)
@@ -180,7 +238,9 @@ def best_effort(geom, motion, timings: dict, now: float,
             if best is None or clearance > best.clearance:
                 best = Plan(aim=aim, release_at=release,
                             clearance=clearance, window=0.0)
-    return best
+        if best is not None:
+            found[aim] = best
+    return found
 
 
 def _best_window(geom, motion, rows: list, aim: float, now: float,
@@ -194,7 +254,8 @@ def _best_window(geom, motion, rows: list, aim: float, now: float,
     run_start, run_worst = None, None
     for i in range(steps + 1):
         release = now + lead + i * _STEP
-        clearance = _clearance(geom, motion, lanes, rows, release)
+        clearance = _clearance(geom, motion, lanes, rows, release,
+                               floor=min_clearance)
         if clearance is not None and clearance >= min_clearance:
             if run_start is None:
                 run_start, run_worst = i, clearance
@@ -221,14 +282,25 @@ def _best_window(geom, motion, rows: list, aim: float, now: float,
     return Plan(aim=aim, release_at=middle, clearance=worst, window=width)
 
 
+def _slack_of(motion, index: int) -> float:
+    """This row's own worst measured miss, or nothing when the model does
+    not keep one — the diagnostics call in with plain stand-ins."""
+    getter = getattr(motion, "slack", None)
+    return float(getter(index)) if getter else 0.0
+
+
 def _clearance(geom, motion, lanes: dict, rows: list,
-               release: float) -> float | None:
-    return _tightest(geom, motion, lanes, rows, release)[0]
+               release: float, floor: float | None = None) -> float | None:
+    return _tightest(geom, motion, lanes, rows, release, floor)[0]
 
 
-def _tightest(geom, motion, lanes: dict, rows: list,
-              release: float) -> tuple[float | None, int | None]:
+def _tightest(geom, motion, lanes: dict, rows: list, release: float,
+              floor: float | None = None) -> tuple[float | None, int | None]:
     """How much room the tightest moment of this shot has, in pixels.
+
+    `floor` stops the search the moment the answer is known to be below it.
+    Most release instants are blocked by the first defender they meet, and
+    finishing the sweep only to confirm it was the bulk of the work.
 
     None means *this shot cannot be judged*, and there are two ways to get
     there. A row may have no honest prediction of where its defenders will
@@ -249,7 +321,14 @@ def _tightest(geom, motion, lanes: dict, rows: list,
                 return None, lane.index
             continue
 
-        margin = geom.half_width(lane) + geom.puck_radius
+        # The defender's own half width, the puck's own radius, and how far
+        # this row's model has been known to miss by. The first two are what
+        # a collision is; the third is what the collision is being predicted
+        # with, and leaving less room than that is planning inside the error
+        # bar (2026-08-10 — 2px of clearance on a row whose worst miss that
+        # minute was 40).
+        margin = (geom.half_width(lane) + geom.puck_radius
+                  + _slack_of(motion, lane.index))
         for k in range(_CROSSING_SAMPLES + 1):
             share = k / _CROSSING_SAMPLES
             moment = timing.t_enter + share * (timing.t_exit - timing.t_enter)
@@ -261,4 +340,6 @@ def _tightest(geom, motion, lanes: dict, rows: list,
                 room = abs(puck_x - defender_x) - margin
                 if worst is None or room < worst:
                     worst, blamed = room, lane.index
+                    if floor is not None and worst < floor:
+                        return worst, blamed
     return worst, blamed

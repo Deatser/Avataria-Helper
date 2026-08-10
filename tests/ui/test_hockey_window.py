@@ -131,7 +131,9 @@ def test_the_window_has_its_tools_and_a_log(tmp_path, monkeypatch, app):
                       "🔬  Тест детекции", "📊  Отчёт по модели",
                       "🎯  Центр", "🎯  Лево", "🎯  Право",
                       "💥  Сделать бросок",
-                      "⚠  Сделать принудительный бросок",
+                      "⚠  Сделать принудительный бросок",   # hidden
+                      "🏅  Отметить ячейку 1/9",            # hidden
+                      "🏅  Проверить уровни",               # hidden
                       "⧉", "×",                       # copies / clears the log
                       "Гайд"]
     assert window._log is not None
@@ -1095,5 +1097,429 @@ def test_a_watch_counts_heads_before_it_calibrates_anything(
     counted = next(i for i, line in enumerate(lines) if "Состав" in line)
     accuracy = next(i for i, line in enumerate(lines) if "Точность" in line)
     assert accuracy > counted
+    window._toggle_running()
+    window.close()
+
+
+# ── The level counter ────────────────────────────────────────────────────
+
+def test_marking_the_level_cells_walks_through_all_nine(
+        tmp_path, monkeypatch, app):
+    """Nine cells, one press each way, and the button says which is next."""
+    window, config = _window(tmp_path, monkeypatch)
+    _with_game(monkeypatch, window)
+    lines = _capture_log(monkeypatch, window)
+
+    for slot in range(9):
+        assert window._level_btn.text().endswith(f"{slot + 1}/9")
+        window._toggle_level_calib()                 # box appears
+        window._calib.show_at(QRect(100 + slot * 30, 40, 24, 24))
+        window._toggle_level_calib()                 # and is written
+
+    assert len(config.data.hockey.level_cells) == 9
+    assert config.data.hockey.level_cells[0] == {
+        "left": 100, "top": 40, "width": 24, "height": 24}
+    assert _said(lines, "Ячейка 9 —")
+    assert window._level_btn.text().endswith("1/9")   # wrapped round
+    window.close()
+
+
+def test_the_level_is_unknown_until_the_strip_is_marked(
+        tmp_path, monkeypatch, app):
+    """A number nobody has read is not a number — no chip is lit rather than
+    level 1 being claimed."""
+    window, _config = _window(tmp_path, monkeypatch)
+
+    window._refresh_level()
+
+    assert window._levels.level is None
+    window.close()
+
+
+def _with_strip(monkeypatch, window, states: list):
+    """The nine cells marked, and reading them gives `states`."""
+    window.config.level_cells = [
+        {"left": 10 + i * 30, "top": 10, "width": 24, "height": 24}
+        for i in range(9)]
+    _with_game(monkeypatch, window)
+    monkeypatch.setattr(window, "_read_cells", lambda cells: list(states))
+
+
+def test_the_level_is_the_first_cell_still_empty(tmp_path, monkeypatch, app):
+    """Nine cells hold levels 1 to 9; the one being played is the first that
+    carries neither a tick nor a cross."""
+    window, _config = _window(tmp_path, monkeypatch)
+    _with_strip(monkeypatch, window,
+                ["nice", "bad", "nice"] + [None] * 6)
+
+    window._refresh_level()
+
+    assert window._levels.level == 4
+
+
+def test_the_strip_keeps_how_every_played_level_went(
+        tmp_path, monkeypatch, app):
+    """All ten numbers are on screen from the start, so it reads as a route
+    rather than a counter: the ones behind carry their verdict, the one being
+    played is lit, the rest wait."""
+    from modules.hockey.level_strip import _look
+
+    window, _config = _window(tmp_path, monkeypatch)
+    _with_strip(monkeypatch, window,
+                ["nice", "bad", "nice"] + [None] * 6)
+
+    window._refresh_level()
+
+    assert window._levels.level == 4
+    assert [_look(s, False) for s in window._levels._states[:3]] == [
+        (theme.ACCENT_GREEN, "tick"),
+        (theme.ACCENT_RED, "cross"),
+        (theme.ACCENT_GREEN, "tick")]
+    assert _look(None, True) == (theme.HK_ICE, "dot")    # the one in progress
+    assert _look(None, False) == (theme.TEXT_DIM, "")    # and the ones ahead
+
+
+def test_a_full_strip_reads_as_the_last_level(tmp_path, monkeypatch, app):
+    window, _config = _window(tmp_path, monkeypatch)
+    _with_strip(monkeypatch, window, ["nice"] * 9)
+
+    window._refresh_level()
+
+    assert window._levels.level == 10
+
+
+def test_a_cell_filling_is_announced_once(tmp_path, monkeypatch, app):
+    """The cell filling is the only thing on screen that says a level
+    ended — so it is worth a line, and exactly one."""
+    window, _config = _window(tmp_path, monkeypatch)
+    _with_strip(monkeypatch, window, ["nice"] + [None] * 8)
+    for _ in range(3):
+        window._refresh_level()
+    lines = _capture_log(monkeypatch, window)
+
+    _with_strip(monkeypatch, window, ["nice", "bad"] + [None] * 7)
+    for _ in range(4):
+        window._refresh_level()
+
+    assert sum("Уровень 2 провален" in line for line in lines) == 1
+    assert _said(lines, "идёт 3-й из 10")
+
+
+def test_the_level_check_says_what_every_cell_holds(
+        tmp_path, monkeypatch, app):
+    """The counter shows one number and cannot say why it is that number.
+    This says it for all ten, with the scores it decided on."""
+    window, _config = _window(tmp_path, monkeypatch)
+    _with_strip(monkeypatch, window, ["nice", "bad"] + [None] * 7)
+    monkeypatch.setattr(
+        window, "_cell_detail",
+        lambda cells: [("nice", {"nice": 0.9, "bad": 0.1}),
+                       ("bad", {"nice": 0.1, "bad": 0.9})]
+        + [(None, {"nice": 0.2, "bad": 0.2})] * 7)
+    lines = _capture_log(monkeypatch, window)
+
+    window._check_levels()
+
+    assert _said(lines, "Уровень 1 — Пройден")
+    assert _said(lines, "Уровень 2 — Не пройден")
+    assert _said(lines, "Уровень 3 — Текущий")
+    assert _said(lines, "Уровень 10 — ")
+    assert _said(lines, "порог")             # the numbers behind the verdict
+    window.close()
+
+
+def test_an_icon_bigger_than_its_cell_is_still_matched(
+        tmp_path, monkeypatch, app):
+    """The icons are 43x43 and 41x39, the cells were marked 40x40, and a
+    template bigger than what it is searched in scores zero — which is not
+    "no match" but "could not look". Every cell read empty and the counter
+    sat on level 1 for ever (2026-08-10)."""
+    from app.core.template_match import TEMPLATES_DIR
+    import cv2 as _cv2
+
+    window, _config = _window(tmp_path, monkeypatch)
+    icon = _cv2.imread(str(TEMPLATES_DIR / "hockey_nice.png"),
+                       _cv2.IMREAD_GRAYSCALE)
+    assert icon is not None
+    # A patch the size of a marked cell, smaller than the icon itself.
+    patch = _cv2.resize(icon, (40, 40), interpolation=_cv2.INTER_AREA)
+
+    scores = window._cell_scores(patch)
+
+    assert scores["nice"] > 0.55
+    assert scores["nice"] > scores["bad"]
+    window.close()
+
+
+def test_a_shot_short_of_room_goes_out_anyway_and_says_by_how_much(
+        tmp_path, monkeypatch, app):
+    """Declining costs the attempt just the same — a level ends whether or
+    not a shot is taken — and a few pixels of overlap against a body
+    outline drawn by hand is not a miss anybody can be sure of. So the shot
+    goes out and the shortfall goes in the log, all three lines of it.
+    """
+    from modules.hockey.planner import Plan
+
+    window, _config = _window(tmp_path, monkeypatch)
+    lines = _capture_log(monkeypatch, window)
+    pressed = []
+    monkeypatch.setattr(window, "_shot_setup", lambda: (1, object(), {}))
+    monkeypatch.setattr(window, "_pull_and_hold",
+                        lambda hwnd, geom, found: pressed.append(found))
+    monkeypatch.setattr(window_module, "plan_shot",
+                        lambda *a, **kw: None)      # no clean window at all
+    monkeypatch.setattr(
+        window_module, "best_effort_each",
+        lambda geom, motion, timings, now, lead=0.0: {
+            -0.5: Plan(-0.5, now + 2.0, clearance=-12.0, window=0.0),
+            0.0:  Plan(0.0,  now + 2.0, clearance=-3.0,  window=0.0),
+            0.5:  Plan(0.5,  now + 2.0, clearance=-21.0, window=0.0)})
+
+    window._fire()
+
+    assert len(pressed) == 1
+    assert pressed[0].aim == 0.0                    # the least-bad line
+    assert _said(lines, "не хватает пикселей")
+    assert _said(lines, "лево 12 px")
+    assert _said(lines, "центр 3 px")
+    assert _said(lines, "право 21 px")
+    assert _said(lines, "выбираю центр ворот")
+    window.close()
+
+
+def test_a_shot_is_never_planned_for_less_than_a_second_away(
+        tmp_path, monkeypatch, app):
+    """A third of a second leaves nothing between the plan and the release
+    for anything to run slightly slower than it did while the plan was being
+    drawn up. Waiting costs nothing — the next window is as good."""
+    from modules.hockey.planner import Plan
+
+    window, _config = _window(tmp_path, monkeypatch)
+    lines = _capture_log(monkeypatch, window)
+    pressed = []
+    monkeypatch.setattr(window, "_shot_setup", lambda: (1, object(), {}))
+    monkeypatch.setattr(window, "_pull_and_hold",
+                        lambda hwnd, geom, found: pressed.append(found))
+    leads = []
+
+    def too_soon(geom, motion, timings, now, lead=0.0, **kw):
+        leads.append(lead)
+        return Plan(0.0, now + 0.2, clearance=40.0, window=0.5)
+
+    monkeypatch.setattr(window_module, "plan_shot", too_soon)
+    monkeypatch.setattr(window_module, "best_effort_each",
+                        lambda *a, **kw: {})
+
+    window._fire()
+
+    assert pressed == []                      # nothing fired that close
+    assert len(leads) == 3                    # it did try again, further out
+    # Every attempt asks for at least the minimum, plus whatever the last
+    # plan cost to draw up — here nothing, since the planner is a stub.
+    assert all(lead >= window_module._MIN_DELAY_S for lead in leads)
+    assert _said(lines, "Не успеваю")
+    window.close()
+
+
+def test_a_new_level_throws_the_old_defenders_away(tmp_path, monkeypatch, app):
+    """Speeds are drawn afresh every level — a row that patrolled slowly
+    last time can be the quickest thing on the ice this time — so a period
+    carried across is not an old measurement but a wrong one. The latch that
+    makes a row's verdict permanent is sound only inside one level, and the
+    cell filling is what releases it."""
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
+    window._toggle_running()
+    monkeypatch.setattr(window_module, "time", _Clock())
+    for _ in range(400):
+        window._scan_tick(window._geometry())
+    assert window._motion.ready() is True
+    assert window._counted is True
+    lines = _capture_log(monkeypatch, window)
+
+    _with_strip(monkeypatch, window, ["nice"] + [None] * 8)
+    for _ in range(3):                        # level 1 done, level 2 begins
+        window._refresh_level()
+    _with_strip(monkeypatch, window, ["nice", "bad"] + [None] * 7)
+    for _ in range(3):
+        window._refresh_level()
+
+    # The watch goes down and comes back up, exactly as a hand would do it.
+    assert _said(lines, "Слежение запущено")
+    assert window._running is True
+    assert window._counted is False           # the head count starts over
+    assert window._motion.ready() is False    # and nothing is trusted
+    window._toggle_running()
+    window.close()
+
+
+# ── The light log ────────────────────────────────────────────────────────
+
+def test_the_light_log_keeps_only_what_happened(tmp_path, monkeypatch, app):
+    """The level, who is in each row, one line per row as it comes good, and
+    the shot. Everything else still happens — it just stops being printed."""
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    config.data.hockey.light_log = True
+    _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
+    lines = _capture_log(monkeypatch, window)
+    window._toggle_running()
+    monkeypatch.setattr(window_module, "time", _Clock())
+
+    for _ in range(400):
+        window._scan_tick(window._geometry())
+
+    assert _said(lines, "Ряд 1 — найден 1 вратарь")
+    assert _said(lines, "Идёт калибровка рядов")
+    assert _said(lines, "Ряд 1 откалиброван")
+    assert _said(lines, "Все ряды откалиброваны")
+    assert any("─" in line for line in lines)          # the dividers
+    # And none of the running commentary.
+    assert not _said(lines, "Точность —")
+    assert not _said(lines, "Малиновые рамки")
+    assert not _said(lines, "Слежение запущено")
+    window._toggle_running()
+    window.close()
+
+
+def test_and_the_full_log_still_says_everything(tmp_path, monkeypatch, app):
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    config.data.hockey.light_log = False
+    _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
+    lines = _capture_log(monkeypatch, window)
+    window._toggle_running()
+    monkeypatch.setattr(window_module, "time", _Clock())
+
+    for _ in range(400):
+        window._scan_tick(window._geometry())
+
+    assert _said(lines, "Слежение запущено")
+    assert _said(lines, "Точность —")
+    assert not any("─" * 10 in line for line in lines)
+    window._toggle_running()
+    window.close()
+
+
+def test_hiding_the_overlays_leaves_the_plan_alone(tmp_path, monkeypatch, app):
+    """They are a way of showing the plan, not part of making it."""
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    config.data.hockey.hide_overlays = True
+    _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
+    window._toggle_running()
+    monkeypatch.setattr(window_module, "time", _Clock())
+
+    for _ in range(120):
+        window._scan_tick(window._geometry())
+
+    assert window._predicted._boxes == []
+    assert window._standing._boxes == []
+    # ...and the model is no worse off for it.
+    assert window._motion.reports()[0].ready is True
+    window._toggle_running()
+    window.close()
+
+
+def test_no_window_still_names_the_nearest_line(tmp_path, monkeypatch, app):
+    """"No window" on its own is unactionable. The nearest line there is,
+    and what it would clip, says whether this is a rink full of defenders or
+    an outline marked a few pixels too wide."""
+    from modules.hockey.planner import Plan
+
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.light_log = True
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    class _Track:
+        aim = 0.0
+
+    monkeypatch.setattr(window_module.trajectory, "load", lambda: [_Track()])
+    monkeypatch.setattr(window_module.trajectory, "averaged",
+                        lambda geom, tracks, aim: ["row"])
+    monkeypatch.setattr(window_module.trajectory, "mirror_fill",
+                        lambda geom, timings: [])
+    monkeypatch.setattr(window_module, "plan_shot", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        window_module, "best_effort_shot",
+        lambda *a, **kw: Plan(-0.35, 0.0, clearance=-8.0, window=0.0))
+    lines = _capture_log(monkeypatch, window)
+
+    window._log_plan()
+
+    assert _said(lines, "Чистого окна нет")
+    assert _said(lines, "натяжение 0.35 влево")
+    assert _said(lines, "не хватает 8 px")
+    window.close()
+
+
+def test_the_auto_shot_fires_itself_once_the_model_is_ready(
+        tmp_path, monkeypatch, app):
+    """Exactly the shot the button would take — same plan, same thresholds,
+    same refusals. Once per level: the game allows one attempt."""
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    config.data.hockey.auto_shot = True
+    _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
+    fired = []
+    monkeypatch.setattr(window, "_fire", lambda: fired.append(1))
+    lines = _capture_log(monkeypatch, window)
+    window._toggle_running()
+    monkeypatch.setattr(window_module, "time", _Clock())
+
+    for _ in range(500):
+        window._scan_tick(window._geometry())
+
+    assert fired == [1]                      # and not once per status line
+    assert _said(lines, "Автоудар")
+    window._toggle_running()
+    window.close()
+
+
+def test_and_waits_for_the_button_when_it_is_off(tmp_path, monkeypatch, app):
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    config.data.hockey.auto_shot = False
+    _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
+    fired = []
+    monkeypatch.setattr(window, "_fire", lambda: fired.append(1))
+    window._toggle_running()
+    monkeypatch.setattr(window_module, "time", _Clock())
+
+    for _ in range(500):
+        window._scan_tick(window._geometry())
+
+    assert window._motion.ready() is True
+    assert fired == []
+    window._toggle_running()
+    window.close()
+
+
+def test_a_row_that_will_not_settle_is_settled_for_after_a_minute(
+        tmp_path, monkeypatch, app):
+    """A level ends whether or not a shot is taken, so a row still arguing
+    with itself has cost the attempt as surely as a miss. The bar comes down
+    rather than the answer being invented."""
+    window, config = _window(tmp_path, monkeypatch)
+    config.data.hockey.lanes = [{"y": 200, "height": 56}]
+    _with_game(monkeypatch, window)
+    window._toggle_running()
+    clock = _Clock()
+    monkeypatch.setattr(window_module, "time", clock)
+    monkeypatch.setattr(window._motion, "ready", lambda: False)
+    settled = []
+    monkeypatch.setattr(window._motion, "settle_for_now",
+                        lambda: settled.append(1) or [0])
+    lines = _capture_log(monkeypatch, window)
+
+    for _ in range(300):                      # nine seconds of model time
+        window._scan_tick(window._geometry())
+    assert settled == []
+
+    clock.t += 60
+    window._scan_tick(window._geometry())
+
+    assert settled == [1]
+    assert _said(lines, "Минута вышла")
     window._toggle_running()
     window.close()

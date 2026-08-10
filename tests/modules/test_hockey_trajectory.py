@@ -514,3 +514,53 @@ def test_a_mangled_file_costs_the_history_not_the_run(tmp_path):
     path.write_text("{ this is not json", encoding="utf-8")
 
     assert load(path) == []
+
+
+# ── Pulls between the measured ones ──────────────────────────────────────
+
+def test_a_pull_between_two_measured_ones_scales_the_arc():
+    """A straight shot holds its x to within half a pixel over the whole
+    flight, and the two full pulls deviate from it by mirror-image amounts
+    at every moment — 7px of disagreement against an 84px swing, correlated
+    0.978 (2026-08-10). One shape, then, scaled by how hard the pull was."""
+    from modules.hockey.trajectory import RowTiming, blend
+
+    straight = [RowTiming(row=0, shots=3, t_enter=1.0, t_exit=1.1,
+                          x_enter=1280.0, x_exit=1280.0, spread=0.01)]
+    full = [RowTiming(row=0, shots=3, t_enter=1.04, t_exit=1.16,
+                      x_enter=1360.0, x_exit=1340.0, spread=0.02)]
+
+    half = blend(straight, full, 0.25)[0]
+
+    assert half.x_enter == 1320.0          # half of the 80px swing
+    assert half.x_exit == 1310.0
+    assert abs(half.t_enter - 1.02) < 1e-9
+    assert blend(straight, full, 0.5)[0].x_enter == 1360.0
+    assert blend(straight, full, 0.0)[0].x_enter == 1280.0
+
+
+def test_the_in_between_pulls_never_replace_a_measured_one():
+    from modules.hockey.trajectory import RowTiming, spread_aims
+
+    def rows(x):
+        return [RowTiming(row=0, shots=3, t_enter=1.0, t_exit=1.1,
+                          x_enter=x, x_exit=x, spread=0.01)]
+
+    measured = {-0.5: rows(1200.0), 0.0: rows(1280.0), 0.5: rows(1360.0)}
+
+    dense = spread_aims(measured)
+
+    assert len(dense) == 21
+    assert dense[0.0] is measured[0.0]
+    assert dense[0.5] is measured[0.5]
+    assert round(dense[0.25][0].x_enter) == 1320
+    assert round(dense[-0.25][0].x_enter) == 1240
+
+
+def test_and_nothing_is_spread_without_a_straight_shot_to_spread_from():
+    from modules.hockey.trajectory import RowTiming, spread_aims
+
+    only_side = {0.5: [RowTiming(row=0, shots=1, t_enter=1.0, t_exit=1.1,
+                                 x_enter=1360.0, x_exit=1360.0, spread=0.0)]}
+
+    assert spread_aims(only_side) == only_side

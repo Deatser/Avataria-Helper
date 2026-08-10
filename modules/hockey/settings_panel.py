@@ -32,7 +32,12 @@ _DEFAULT_PHOTO = 1
 
 _MASK_TEXT  = "Маска разметки катка"
 _CLEAR_TEXT = "Сбросить все ряды"
-_LOG_TEXT   = "Писать логи"
+_LOG_TEXT     = "Писать логи"
+_LIGHT_TEXT   = "Лёгкие логи"
+_OVERLAY_TEXT = "Скрыть рамки поверх игры"
+_FINE_TEXT    = "Промежуточные натяжения (тест)"
+_ORANGE_TEXT  = "Только по полосе у борта"
+_AUTO_TEXT    = "Бить самому, как только готов"
 
 # Where the prediction boxes are drawn for. "Сейчас" is a checking mode: the
 # box has to ride exactly on its defender, so leading or lagging shows up at
@@ -121,7 +126,53 @@ class HockeySettingsPanel(SheetPanel):
             "проще перезаписать нужный ряд поверх: выберите его номер, "
             "цель «Ряд» и отметьте заново.")))
 
-        # The one control left standing.
+        layout.addWidget(self.caption("Замер вратарей"))
+        self._orange_switch = NtSwitch(_ORANGE_TEXT, accent=theme.HK_ICE)
+        self._orange_switch.set_checked_silently(self.orange_mode)
+        self._orange_switch.toggled.connect(self._on_orange_mode)
+        layout.addWidget(self._orange_switch)
+        layout.addWidget(self.hint(
+            "Каждому ряду даётся полоса у борта, и скорость каждого вратаря "
+            "берётся из времени между его разворотами в ней: два размаха "
+            "ряда, делённые на период. Ни слежения, ни автокорреляции — "
+            "один и тот же способ для всех рядов, сколько бы вратарей там "
+            "ни стояло и ни ездило. Проверка честности та же: предсказание "
+            "на 1.5 с сверяется с тем, что вышло."))
+
+        layout.addWidget(self.caption("Бросок"))
+        self._auto_switch = NtSwitch(_AUTO_TEXT, accent=theme.HK_ICE)
+        self._auto_switch.set_checked_silently(self.auto_shot)
+        self._auto_switch.toggled.connect(self._on_auto_shot)
+        layout.addWidget(self._auto_switch)
+        layout.addWidget(self.hint(
+            "Как только все ряды откалиброваны — удар в ближайшее окно, без "
+            "нажатия кнопки. План тот же, что построила бы кнопка: отказы и "
+            "пороги не меняются, меняется только кто нажимает. Один удар на "
+            "уровень; следующий — после смены уровня."))
+
+        self._fine_switch = NtSwitch(_FINE_TEXT, accent=theme.HK_ICE)
+        self._fine_switch.set_checked_silently(self.fine_aim)
+        self._fine_switch.toggled.connect(self._on_fine_aim)
+        layout.addWidget(self._fine_switch)
+        layout.addWidget(self.hint(
+            "Замерены три натяжения: ноль и обе штанги. С этим переключателем "
+            "рассматриваются и промежуточные — 0.15, 0.35 и так далее, — "
+            "форма дуги берётся измеренная, а её размах считается растущим "
+            "пропорционально натяжению. Вариантов становится в семь раз "
+            "больше, и окно находится чаще. Это единственное место, где "
+            "число не измерено, а выведено: выключите, если броски начнут "
+            "мазать."))
+
+        layout.addWidget(self.caption("Экран"))
+        self._overlay_switch = NtSwitch(_OVERLAY_TEXT, accent=theme.HK_ICE)
+        self._overlay_switch.set_checked_silently(self.hide_overlays)
+        self._overlay_switch.toggled.connect(self._on_hide_overlays)
+        layout.addWidget(self._overlay_switch)
+        layout.addWidget(self.hint(
+            "Малиновые рамки предсказания, чёрные стоящих и оранжевые полосы "
+            "замера. Бот пользуется ими по-прежнему — они просто перестают "
+            "рисоваться поверх игры."))
+
         layout.addWidget(self.caption("Лог"))
         self._log_switch = NtSwitch(_LOG_TEXT, accent=theme.HK_ICE)
         self._log_switch.set_checked_silently(self.verbose_log)
@@ -131,6 +182,17 @@ class HockeySettingsPanel(SheetPanel):
             "Подробности слежения: перепись состава, точность предсказания "
             "по каждому ряду, разбор отказа от броска. Выключите, и в логе "
             "останутся только сами броски и ошибки."))
+
+        self._light_switch = NtSwitch(_LIGHT_TEXT, accent=theme.HK_ICE)
+        self._light_switch.set_checked_silently(self.light_log)
+        self._light_switch.toggled.connect(self._on_light_log)
+        self._light_switch.setEnabled(self.verbose_log)
+        layout.addWidget(self._light_switch)
+        layout.addWidget(self.hint(
+            "Только то, что происходит: номер уровня, кто в каком ряду, "
+            "по строке на каждый откалиброванный ряд и сам бросок. Всё "
+            "остальное продолжает считаться, просто не пишется. Работает "
+            "только пока логи вообще включены."))
 
     @staticmethod
     def _hide(widget):
@@ -182,6 +244,34 @@ class HockeySettingsPanel(SheetPanel):
         self.config.static_mask = enabled
         self.save_fn()
 
+    # ── Measuring the defenders ──────────────────────────────────────────
+
+    @property
+    def orange_mode(self) -> bool:
+        return bool(getattr(self.config, "orange_mode", False))
+
+    def _on_orange_mode(self, enabled: bool):
+        self.config.orange_mode = enabled
+        self.save_fn()
+
+    # ── The shot ─────────────────────────────────────────────────────────
+
+    @property
+    def auto_shot(self) -> bool:
+        return bool(getattr(self.config, "auto_shot", False))
+
+    def _on_auto_shot(self, enabled: bool):
+        self.config.auto_shot = enabled
+        self.save_fn()
+
+    @property
+    def fine_aim(self) -> bool:
+        return bool(getattr(self.config, "fine_aim", False))
+
+    def _on_fine_aim(self, enabled: bool):
+        self.config.fine_aim = enabled
+        self.save_fn()
+
     # ── The log ──────────────────────────────────────────────────────────
 
     @property
@@ -190,6 +280,26 @@ class HockeySettingsPanel(SheetPanel):
 
     def _on_verbose_log(self, enabled: bool):
         self.config.verbose_log = enabled
+        self.save_fn()
+        # There is nothing to make light of when nothing is being written.
+        self._light_switch.setEnabled(enabled)
+
+    @property
+    def light_log(self) -> bool:
+        return bool(getattr(self.config, "light_log", False))
+
+    def _on_light_log(self, enabled: bool):
+        self.config.light_log = enabled
+        self.save_fn()
+
+    # ── The screen ───────────────────────────────────────────────────────
+
+    @property
+    def hide_overlays(self) -> bool:
+        return bool(getattr(self.config, "hide_overlays", False))
+
+    def _on_hide_overlays(self, enabled: bool):
+        self.config.hide_overlays = enabled
         self.save_fn()
 
     # ── Rows ─────────────────────────────────────────────────────────────
