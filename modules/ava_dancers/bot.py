@@ -2,10 +2,10 @@ from __future__ import annotations
 import time
 import threading
 
-import win32gui
 from PySide6.QtCore import QThread, Signal
 
-from app.core.capture import grab_window
+from app.core.capture import (grab_window, wgc_frames_seen,
+                              window_frame_origin)
 from app.core.input_sender import press_key_after
 
 # What a tile looks like lives in tiles.py, and how a note is followed down
@@ -101,6 +101,7 @@ class AvaBot(QThread):
         warned_shape = False
         polls = 0
         started = last_report = time.monotonic()
+        frames_at_start = wgc_frames_seen(self._hwnd)
 
         while not self._stop_event.is_set():
             try:
@@ -119,9 +120,11 @@ class AvaBot(QThread):
                 for press in self._tracker.update(now, img):
                     self._schedule(press)
                 self._flush_pending(now)
+                self._report_misses()
 
                 if now - last_report >= _REPORT_EVERY_S:
-                    self._report(polls / (now - started))
+                    self._report(polls / (now - started),
+                                 self._frame_rate(frames_at_start, now - started))
                     last_report = now
 
             except Exception as exc:
@@ -141,7 +144,13 @@ class AvaBot(QThread):
         still loading) the measured defaults stand.
         """
         try:
-            left, top, _, _ = win32gui.GetWindowRect(self._hwnd)
+            # Where the capture's own top-left pixel sits on screen. NOT
+            # GetWindowRect: with Windows Graphics Capture the frame
+            # starts at the window as drawn, eight pixels in from what
+            # GetWindowRect reports. Taking the wrong one put the whole
+            # playfield 8px out — every lane shifted into its neighbour
+            # and the hit line raised by the same amount. It cost a round.
+            left, top = window_frame_origin(self._hwnd)
             found = locate_field(grab_window(self._hwnd), left, top)
         except Exception as exc:
             self.error.emit(f"Не удалось найти поле: {exc}")
@@ -176,7 +185,7 @@ class AvaBot(QThread):
         if not key:
             return
         press_key_after(self._hwnd, key, press.delay_s)
-        self._tracker.expect_hit(press.lane, press.arrival)
+        self._tracker.expect_hit(press.lane, press.arrival, press.speed)
         self._pressed += 1
         self.key_pressed.emit(key)
         self._pending.append((press.arrival, press.lane, press.kind))
@@ -188,12 +197,49 @@ class AvaBot(QThread):
             self._pending = [p for p in self._pending if p[0] > now]
             self.tiles_seen.emit(due)
 
-    def _report(self, hz: float):
+    def _frame_rate(self, frames_at_start, elapsed: float) -> float | None:
+        """How fast the game is actually redrawing, when that is knowable.
+
+        A poll rate on its own cannot say whether the loop is waiting on the
+        game to draw or on itself to finish, and those want opposite fixes.
+        Only the WGC backend is told about redraws; under PrintWindow there
+        is nothing to compare against.
+        """
+        if frames_at_start is None or elapsed <= 0:
+            return None
+        now_frames = wgc_frames_seen(self._hwnd)
+        if now_frames is None:
+            return None
+        return (now_frames - frames_at_start) / elapsed
+
+    def _report_misses(self):
+        """Say what each missed press was aimed at, as soon as it is known.
+
+        A running total cannot tell ordinary timing scatter from something
+        that happened to several notes at once, and the two want opposite
+        fixes. One line per miss makes the difference obvious in the log.
+        """
+        pending = self._tracker.miss_log
+        if not pending:
+            return
+        self._tracker.miss_log = []
+        for miss in pending:
+            self.diagnostics.emit(
+                f"МИМО — ряд {miss['lane'] + 1} "
+                f"({KEY_MAP.get(miss['lane'], '?')}), "
+                f"нота шла {miss['v']:.0f} px/с")
+
+    def _report(self, hz: float, fps: float | None = None):
         tracker = self._tracker
         refused = ", ".join(f"{why} {n}"
                             for why, n in tracker.refusals.most_common())
-        line = (f"{hz:.0f} Гц · нот {tracker.committed} · "
-                f"нажато {self._pressed}")
+        line = f"{hz:.0f} Гц"
+        if fps is not None:
+            line += f" (игра {fps:.0f})"
+        speed = tracker.note_speed()
+        if speed:
+            line += f" · {speed:.0f} px/с"
+        line += f" · нот {tracker.committed} · нажато {self._pressed}"
         if tracker.scored or tracker.missed:
             line += f" · попало {tracker.scored}"
             if tracker.missed:

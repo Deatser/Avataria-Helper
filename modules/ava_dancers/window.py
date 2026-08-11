@@ -6,16 +6,16 @@ import cv2
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
                                QGraphicsDropShadowEffect)
 from PySide6.QtGui import QColor, QFontMetricsF
-from PySide6.QtCore import Qt, QRect, QTimer, QThread
+from PySide6.QtCore import Qt, QRect, QRectF, QTimer, QThread
 
-from app.core.capture import grab_window
+from app.core.capture import grab_window, set_wgc_enabled
 from app.core.input_sender import press_key
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
                                      load_template, primary_monitor_region)
 from app.ui.calibration_overlay import CalibrationOverlay
-from app.ui.zones_overlay import ZonesOverlay
 from app.ui.module_window import ModuleWindow
 from app.ui.settings_panel import SettingsPanel
+from app.ui.widgets.mode_button import ModeButton
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
 from app.ui.widgets.nt_status_dot import NtStatusDot
@@ -25,7 +25,6 @@ from app.ui.widgets.log_panel import LogPanel
 from app.ui import theme
 from modules.ava_dancers.bot import (AvaBot, Thresholds, KEY_MAP,
                                      NICE, BONUS, BAD, DISLIKE, BOMB)
-from modules.ava_dancers.tracker import DEFAULT_GEOMETRY, LANES
 from modules.ava_dancers.entry_flow import EntryFlow
 from modules.ava_dancers.exit_flow import ExitFlow
 from modules.ava_dancers.game_over_watch import GameOverWatch
@@ -46,6 +45,9 @@ _RESTART_BOT_DELAY_MS = 2_000
 # the game drops the run on its own. The exact sequence that follows is not
 # ours to control, so this stays deliberately blunt and short: it only has
 # to end a round that has already, in effect, ended.
+# How long to keep playing normally after the reward line appears,
+# before deliberately throwing the round.
+_FINISH_GRACE_MS      = 2_000
 _FINISH_SPAM_MS       = 4_000   # total mashing time
 _FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
 
@@ -54,17 +56,28 @@ _FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
 _CALIB_DEFAULT_W = 300
 _CALIB_DEFAULT_H = 120
 
-# What the tracker reads, drawn over the game: one tall box per lane plus
-# the line where a press is committed and the line a note's bottom edge
-# is on when the key lands. A display only, nothing interactive.
-_ZONES_TEXT = "🔲  Зоны рядов"
+# ── Farm modes ───────────────────────────────────────────────────────────
+# Which reward ends a run, or that nothing does. Chosen from three buttons
+# on this window rather than a switch in the settings sheet: it is the one
+# setting worth changing between runs, so it is worth seeing without
+# opening anything.
+MODE_SILVER  = "silver"
+MODE_GOLD    = "gold"
+MODE_ENDLESS = "endless"
 
-# Marking the four lanes out by hand, one box at a time — seeded off the
-# tracker's own geometry so the first box already lands roughly on lane 1
-# and each next one starts where the last was, shifted across. Only ever
-# needed when the layout changes and the numbers have to be re-read.
-_LANES_CALIB_TEXT  = "📏  Разметить 4 ряда"
-_LANES_CALIB_NEXT  = "📏  Записать ряд {n}/4"
+_MODES = [
+    (MODE_SILVER,  "Фарм Серебра"),
+    (MODE_GOLD,    "Фарм Золота"),
+    (MODE_ENDLESS, "∞ Фарм"),
+]
+_MODE_FINISH = {MODE_SILVER: FINISH_SILVER, MODE_GOLD: FINISH_GOLD}
+
+# The mode row is the loudest thing on the window on purpose — twice the
+# height of an ordinary button, and its label scales with the window so all
+# three fit however narrow it gets.
+_MODE_ROW_H     = 68
+_MODE_FONT_MAX  = 20
+_MODE_FONT_MIN  = 8
 
 _CALIB_START_TEXT = "📐  Область награды"
 _CALIB_STOP_TEXT  = "📐  Записать область"
@@ -161,9 +174,6 @@ class AvaDancersWindow(ModuleWindow):
         self._finish_timer: QTimer | None = None
         self._finish_ticks = 0
         self._calib = CalibrationOverlay(window_manager, reference=self)
-        self._zones_overlay = ZonesOverlay(window_manager, reference=self)
-        self._lane_calib_step = 0            # 0 = not marking, 1..4 = this lane
-        self._lane_calib_boxes: list[QRect] = []
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
         self.resize(max(w, _MIN_W), max(h, _MIN_H))
@@ -235,15 +245,7 @@ class AvaDancersWindow(ModuleWindow):
         # Calibration tools, not day-to-day controls — kept wired up for
         # when the reward templates need retuning, just hidden from the
         # normal view.
-        self._zones_btn = NtButton(_ZONES_TEXT, accent=theme.VW_PURPLE,
-                                   upper=False)
-        self._zones_btn.clicked.connect(self._toggle_zones_overlay)
-        layout.addWidget(self._zones_btn)
-
-        self._lanes_btn = NtButton(_LANES_CALIB_TEXT, accent=theme.VW_PURPLE,
-                                   upper=False)
-        self._lanes_btn.clicked.connect(self._toggle_lane_calib)
-        layout.addWidget(self._lanes_btn)
+        self._build_mode_row(layout)
 
         detect_silver_btn = NtButton("🥈  Детект серебра", accent=theme.VW_PURPLE,
                                      upper=False)
@@ -409,6 +411,7 @@ class AvaDancersWindow(ModuleWindow):
         (announce=False, from _resume_after_restart) — the bot never reads
         as "stopped" in between, so only the first one is worth a log line.
         """
+        set_wgc_enabled(getattr(self.config, "fast_capture", False))
         self._bot = AvaBot(hwnd, self._thresholds())
         self._bot.tiles_seen.connect(self._on_tiles_seen)
         self._bot.field_located.connect(
@@ -553,25 +556,17 @@ class AvaDancersWindow(ModuleWindow):
     # Both run only while the bot does — neither can appear otherwise, and a
     # once-a-second screen grab has no reason to keep running idle.
 
-    def finish_target(self) -> str:
-        stored = getattr(self.config, "finish_on", FINISH_GOLD)
-        return FINISH_SILVER if stored == FINISH_SILVER else FINISH_GOLD
-
-    def set_finish_target(self, target: str):
-        """Settings switch flipped — a running watcher switches with it."""
-        if self._leave_watch:
-            self._leave_watch.set_target(target)
-        silver = target == FINISH_SILVER
-        self._log.add_log_segments(
-            [("Завершение забега: ", theme.TEXT_SECONDARY),
-             ("серебро" if silver else "золото",
-              theme.TEXT_PRIMARY if silver else theme.ACCENT_AMBER)],
-            level="plain",   # a setting's new value, not an action's outcome
-        )
-
     def _start_leave_watch(self, hwnd: int):
+        """Only ever runs when some reward is meant to end the round.
+
+        In endless mode there is nothing for it to watch for: the run ends
+        when the game ends it.
+        """
         self._stop_leave_watch()
-        self._leave_watch = LeaveWatch(hwnd, self.finish_target())
+        target = self.finish_target()
+        if target is None:
+            return
+        self._leave_watch = LeaveWatch(hwnd, target)
         self._leave_watch.leave_ready.connect(self._on_leave_ready)
         self._leave_watch.error.connect(
             lambda e: self._log.add_log(e, level="error"))
@@ -588,9 +583,21 @@ class AvaDancersWindow(ModuleWindow):
         # This one stays local to the module's own log — tile-by-tile
         # play-by-play, not a helper-log event. The helper only hears about
         # a run once it is actually over — see _on_game_over.
-        message = f"{label} набрало ({score:.0%}) — заканчиваю забег"
+        message = (f"{label} набрало ({score:.0%}) — доигрываю "
+                   f"{_FINISH_GRACE_MS // 1000} с и заканчиваю")
         self._log.add_log(message, level="success")
-        self._finish_run()
+        # The reward line lights up the moment it is earned, and throwing
+        # the round in that same instant looks exactly like what it is. A
+        # couple of seconds of ordinary play first costs nothing — the
+        # reward is already banked — and the notes in flight get finished
+        # rather than dropped mid-air.
+        QTimer.singleShot(_FINISH_GRACE_MS, self._finish_if_running)
+
+    def _finish_if_running(self):
+        """The grace period is up. Nothing to do if the run ended by itself
+        in the meantime, or the bot was switched off."""
+        if self._bot_active and self._bot and self._bot.isRunning():
+            self._finish_run()
 
     def _finish_run(self):
         """Stop playing well, then mash every lane until the game drops the
@@ -648,8 +655,14 @@ class AvaDancersWindow(ModuleWindow):
         hwnd = self._wm.get_game_hwnd()
         self._stop_round_threads()   # no more tiles to read on this screen
 
-        gold_mode = self.finish_target() == FINISH_GOLD
-        silver, gold = 2750, (30 if gold_mode else 0)
+        # The round pays by score, and each mode reaches a known tier: silver
+        # farming stops at 2750, gold farming at 2750 + 30. Endless is played
+        # out to the end, so it passes the gold tier on the way and earns at
+        # least that — the exact figure is on the results screen and is not
+        # read, so this counts the floor rather than inventing a number.
+        mode = self.farm_mode()
+        silver = 2750
+        gold = 30 if mode in (MODE_GOLD, MODE_ENDLESS) else 0
         if self._stats is not None:
             self._stats.record_ava_dancers_run(gold=gold, silver=silver)
             games_played = self._stats.data.ava_dancers.games_played
@@ -661,7 +674,10 @@ class AvaDancersWindow(ModuleWindow):
             rewards.append(f"{silver} серебра")
         if gold:
             rewards.append(f"{gold} золота")
-        message = f"закончили забег №{games_played} — заработали {' и '.join(rewards)}"
+        earned = " и ".join(rewards)
+        if mode == MODE_ENDLESS:
+            earned += " (не меньше — в ∞ режиме награда с экрана не читается)"
+        message = f"закончили забег №{games_played} — заработали {earned}"
         self._log.add_log(message, level="success")
         self._log_to_helper(message)
 
@@ -776,6 +792,7 @@ class AvaDancersWindow(ModuleWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._scale_tiles()
+        self._scale_mode_row()
         if self._settings is not None:
             self._settings.keep_inside_host()
 
@@ -793,9 +810,29 @@ class AvaDancersWindow(ModuleWindow):
                 save_fn = self.save_fn,
                 host    = self,
             )
-            self._settings.finish_target_changed.connect(self.set_finish_target)
             self._settings.auto_restart_changed.connect(self._on_auto_restart)
+            self._settings.fast_capture_changed.connect(self._on_fast_capture)
         self._settings.toggle()
+
+    def _on_fast_capture(self, enabled: bool):
+        """Switch capture backends and say which one took.
+
+        Asking for WGC without the library installed silently leaves
+        PrintWindow in place, so the answer comes back from set_wgc_enabled
+        rather than from the switch — a setting that quietly did nothing is
+        exactly the kind of thing that wastes a round to discover.
+        """
+        actual = set_wgc_enabled(enabled)
+        if enabled and not actual:
+            self._log.add_log(
+                "Быстрый захват недоступен — нет пакета windows-capture. "
+                "Остаюсь на обычном.", level="error")
+            return
+        self._log.add_log_segments(
+            [("Захват: ", theme.TEXT_SECONDARY),
+             ("Windows Graphics Capture" if actual else "PrintWindow",
+              theme.VW_CYAN if actual else theme.TEXT_PRIMARY)],
+            level="plain")
 
     def _on_auto_restart(self, enabled: bool):
         self._log.add_log_segments(
@@ -887,119 +924,118 @@ class AvaDancersWindow(ModuleWindow):
              (")", theme.TEXT_SECONDARY)],
             level="plain")
 
-    # ── Detection zones overlay ──────────────────────────────────────────────
-    # Everything the tracker looks at, drawn over the game so the calibration
-    # can be checked by eye: the tall box it reads in each lane, the line
-    # where a press gets committed, and the line a note's bottom edge is on
-    # when the key lands. Click-through, nothing reads back from it — a
-    # second press hides it again.
+    # ── Farm mode ────────────────────────────────────────────────────────────
 
-    def _toggle_zones_overlay(self):
-        if self._zones_overlay.isVisible():
-            self._zones_overlay.clear()
-            self._zones_btn.set_active(False)
+    def _build_mode_row(self, layout: QVBoxLayout):
+        """Three buttons, one of them lit — the run's whole plan at a glance.
+
+        Green is the one in force, magenta the two that are not; the colour
+        is the state, so there is nothing to read.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._mode_btns: dict[str, ModeButton] = {}
+        for mode, label in _MODES:
+            button = ModeButton(label, accent=theme.ACCENT_GREEN)
+            button.setMinimumHeight(_MODE_ROW_H)
+            button.clicked.connect(lambda m=mode: self._choose_mode(m))
+            row.addWidget(button)
+            self._mode_btns[mode] = button
+        self._mode_row = row
+        layout.addLayout(row)
+        self._paint_mode_row()
+
+    def farm_mode(self) -> str:
+        """The stored mode, migrating the old two-way setting on the way.
+
+        Before this there was a `finish_on` switch in the settings sheet with
+        only gold and silver in it; a config written by that version has to
+        keep meaning what it meant.
+        """
+        stored = getattr(self.config, "farm_mode", None)
+        if stored in (MODE_SILVER, MODE_GOLD, MODE_ENDLESS):
+            return stored
+        legacy = getattr(self.config, "finish_on", FINISH_GOLD)
+        return MODE_SILVER if legacy == FINISH_SILVER else MODE_GOLD
+
+    def finish_target(self) -> str | None:
+        """Which reward ends the run, or None when nothing does."""
+        return _MODE_FINISH.get(self.farm_mode())
+
+    def _paint_mode_row(self):
+        active = self.farm_mode()
+        for mode, button in self._mode_btns.items():
+            on = mode == active
+            button.set_accent(theme.ACCENT_GREEN if on else theme.VW_MAGENTA)
+            button.set_active(on)
+        self._scale_mode_row()
+
+    def _scale_mode_row(self):
+        """Pick the largest label size all three buttons can still hold.
+
+        Measured rather than assumed: this window can be dragged from 420px
+        down to 300px, and the font Qt actually resolves is not knowable up
+        front. Labels wrap onto a second line, so "Фарм Серебра" stays
+        readable where one line would have had to shrink to nothing.
+        """
+        buttons = getattr(self, "_mode_btns", None)
+        if not buttons:
             return
+        sample = next(iter(buttons.values()))
+        room_w = max(40, sample.width() - 14) if sample.width() > 1 else                  max(40, self.width() // len(_MODES) - 22)
+        room_h = max(24, sample.height() - 10)
+        labels = [label for _, label in _MODES]
 
-        if not self._wm.get_game_hwnd():
-            self._log.add_log("Игровое окно не найдено", level="error")
+        font = theme.get_mono_font(_MODE_FONT_MIN, bold=True)
+        for size in range(_MODE_FONT_MAX, _MODE_FONT_MIN - 1, -1):
+            candidate = theme.get_mono_font(size, bold=True)
+            metrics = QFontMetricsF(candidate)
+            if all(self._label_fits(metrics, text, room_w, room_h)
+                   for text in labels):
+                font = candidate
+                break
+        for button in buttons.values():
+            button.setFont(font)
+            button.update()
+
+    @staticmethod
+    def _label_fits(metrics: QFontMetricsF, text: str,
+                    width: float, height: float) -> bool:
+        box = metrics.boundingRect(QRectF(0, 0, width, height),
+                                   int(Qt.AlignCenter | Qt.TextWordWrap), text)
+        return box.width() <= width and box.height() <= height
+
+    def _choose_mode(self, mode: str):
+        if mode == self.farm_mode():
             return
-
-        geo = self._bot.geometry() if self._bot else DEFAULT_GEOMETRY
-        region = geo.region
-        zones = [
-            (QRect(region["left"] + i * geo.lane_w, region["top"],
-                   geo.lane_w, region["height"]), QColor(theme.VW_CYAN))
-            for i in range(LANES)
-        ]
-        zones.append((QRect(geo.left, geo.commit_y, geo.width, 2),
-                      QColor(theme.ACCENT_GREEN)))
-        zones.append((QRect(geo.left, geo.hit_y, geo.width, 2),
-                      QColor(theme.VW_MAGENTA)))
-        self._zones_overlay.show_zones(zones)
-        self._zones_btn.set_active(True)
-        self._log.add_log(
-            "Голубым — что читает детектор, зелёным — где решает жать, "
-            "розовым — где нота в момент нажатия.", level="plain")
-
-    # ── Marking out the four lanes by hand ───────────────────────────────────
-    # The same draggable box as the reward calibration above, run four times
-    # in a row: press once to place lane 1, press again to record it and get
-    # lane 2's box, and so on. Nothing is saved anywhere — the four
-    # rectangles go to the log to be read off, which is the whole point. Only
-    # needed if the game's layout ever moves out from under tracker.py's own
-    # border lookup.
-
-    def _toggle_lane_calib(self):
-        if self._lane_calib_step == 0:
-            if not self._wm.get_game_hwnd():
-                self._log.add_log("Игровое окно не найдено", level="error")
-                return
-            self._lane_calib_boxes = []
-            self._lane_calib_step  = 1
-            self._show_lane_box()
-            self._log.add_log(
-                "Разметка рядов: тяните за середину, чтобы подвинуть, за край "
-                "или угол — чтобы изменить размер. Обведите ряд целиком, "
-                "сверху донизу. Кнопка ещё раз — записать и перейти к "
-                f"следующему из {LANES}.", level="plain")
-            return
-
-        self._lane_calib_boxes.append(self._calib.bounds())
-        self._log_lane_box(self._lane_calib_step, self._lane_calib_boxes[-1])
-        if self._lane_calib_step >= LANES:
-            self._finish_lane_calib()
-            return
-        self._lane_calib_step += 1
-        self._show_lane_box()
-
-    def _show_lane_box(self):
-        """Seed the next box: lane 1 off the tracker's own geometry, every one
-        after that from the box just recorded, shifted across by its own
-        width — so four lanes cost four nudges, not four drags."""
-        geo = self._bot.geometry() if self._bot else DEFAULT_GEOMETRY
-        if self._lane_calib_boxes:
-            prev = self._lane_calib_boxes[-1]
-            box = QRect(prev.left() + prev.width(), prev.top(),
-                        prev.width(), prev.height())
-        else:
-            box = QRect(geo.left, geo.top, geo.lane_w, geo.height)
-        self._calib.show_at(box)
-        self._lanes_btn.setText(_LANES_CALIB_NEXT.format(n=self._lane_calib_step))
-        self._lanes_btn.set_active(True)
-
-    def _log_lane_box(self, n: int, box: QRect):
+        self.config.farm_mode = mode
+        self.save_fn()
+        self._paint_mode_row()
+        self._apply_mode()
+        label = dict(_MODES)[mode]
         self._log.add_log_segments(
-            [(f"Ряд {n} — ", theme.TEXT_SECONDARY),
-             ("left", theme.VW_CYAN), (f" {box.left()}", theme.VW_MAGENTA),
-             ("  top", theme.VW_CYAN), (f" {box.top()}", theme.VW_MAGENTA),
-             ("  width", theme.VW_CYAN), (f" {box.width()}", theme.VW_MAGENTA),
-             ("  height", theme.VW_CYAN), (f" {box.height()}", theme.VW_MAGENTA),
-             ("   right", theme.TEXT_SECONDARY),
-             (f" {box.left() + box.width()}", theme.VW_MAGENTA),
-             ("  bottom", theme.TEXT_SECONDARY),
-             (f" {box.top() + box.height()}", theme.VW_MAGENTA)],
+            [("Режим: ", theme.TEXT_SECONDARY), (label, theme.ACCENT_GREEN)],
             level="plain")
 
-    def _finish_lane_calib(self):
-        """All four recorded — hide the box and print one line carrying the
-        whole set, so it can be copied out in one go."""
-        self._calib.clear()
-        self._lane_calib_step = 0
-        self._lanes_btn.setText(_LANES_CALIB_TEXT)
-        self._lanes_btn.set_active(False)
-        payload = ", ".join(
-            f'{{"left": {b.left()}, "top": {b.top()}, '
-            f'"width": {b.width()}, "height": {b.height()}}}'
-            for b in self._lane_calib_boxes)
-        self._log.add_log(f"LANES = [{payload}]", level="success")
+    def _apply_mode(self):
+        """Make a round already in progress obey a mode picked mid-run.
 
-    def _cancel_lane_calib(self):
-        if self._lane_calib_step == 0:
+        Endless is the absence of a reward watcher rather than a different
+        target for it, so switching into it has to stop the watcher and
+        switching out of it has to start one.
+        """
+        if not (self._bot and self._bot.isRunning()):
             return
-        self._lane_calib_step = 0
-        self._lane_calib_boxes = []
-        self._lanes_btn.setText(_LANES_CALIB_TEXT)
-        self._lanes_btn.set_active(False)
+        target = self.finish_target()
+        if target is None:
+            self._stop_leave_watch()
+            return
+        if self._leave_watch:
+            self._leave_watch.set_target(target)
+        else:
+            hwnd = self._wm.get_game_hwnd()
+            if hwnd:
+                self._start_leave_watch(hwnd)
 
     # ── Favorite ─────────────────────────────────────────────────────────────
 
@@ -1030,5 +1066,3 @@ class AvaDancersWindow(ModuleWindow):
         self._stop_round_threads()
         self._stop_entry_flow()
         self._calib.clear()
-        self._cancel_lane_calib()
-        self._zones_overlay.clear()

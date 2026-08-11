@@ -427,17 +427,17 @@ def fit_line(samples: deque) -> tuple[float, float]:
     the spread of the predicted arrival from 21ms to 12ms and the share of
     notes landing more than 40ms out from 9% to 2%.
 
-    Fitting a straight line is safe because notes do not accelerate: across
-    354 tracked descents the median curvature came to 3 px/s², which over
-    the whole prediction horizon is under 4ms.
+    Fitting a straight line is safe for the descent itself: across 354
+    tracked descents the median curvature came to 3 px/s². What it cannot
+    see is the game retiming a note in mid-air — that is caught lower down,
+    by the late check (see LaneTracker._check_late).
     """
     n = len(samples)
     if n < 2:
         return 0.0, samples[-1][1] if n else 0.0
     ts = np.fromiter((s[0] for s in samples), float, n)
     ys = np.fromiter((s[1] for s in samples), float, n)
-    t0 = ts[0]
-    ts = ts - t0
+    ts = ts - ts[0]
     t_mean, y_mean = ts.mean(), ys.mean()
     denom = float(((ts - t_mean) ** 2).sum())
     if denom <= 0.0:
@@ -474,7 +474,11 @@ class LaneTracker:
 
     def reset(self):
         self._tracks: list[list[Track]] = [[] for _ in range(LANES)]
+        # Seeded, so a brand-new track has something to predict with while
+        # matching. _measured holds only speeds a note actually showed —
+        # the seed must not be reported as if it had been observed.
         self._last_speed = [DEFAULT_SPEED] * LANES
+        self._measured   = [0.0] * LANES
         self._scheduled: list[list[float]] = [[] for _ in range(LANES)]
         # Why committed tracks were turned down, by reason. The bot prints
         # this periodically: when it presses wrongly or not at all, the split
@@ -486,6 +490,11 @@ class LaneTracker:
         self._awaiting: list[list[dict]] = [[] for _ in range(LANES)]
         self.scored = 0
         self.missed = 0
+        # Every press that did not score, with what it was aimed at. Drained
+        # by the bot into the log: a miss on its own says nothing, but
+        # several at once across lanes, at one speed, is a different animal
+        # from one every few minutes.
+        self.miss_log: list[dict] = []
 
     def configure(self, thresholds: Thresholds):
         self._th = thresholds
@@ -610,6 +619,7 @@ class LaneTracker:
             return None      # the same note, tracked twice — see MIN_PRESS_GAP_S
         self._scheduled[tr.lane].append(arrival)
         self._last_speed[tr.lane] = tr.v
+        self._measured[tr.lane]   = tr.v
 
         return Press(lane=tr.lane, kind=tr.kind, speed=tr.v, arrival=arrival,
                      delay_s=max(0.0, arrival - now - PRESS_LEAD_S))
@@ -666,12 +676,24 @@ class LaneTracker:
                 self.scored += 1
             else:
                 self.missed += 1
+                self.miss_log.append({"lane": lane, "at": p["at"], "v": p["v"]})
         self._awaiting[lane] = still
 
-    def expect_hit(self, lane: int, arrival: float):
+    def expect_hit(self, lane: int, arrival: float, speed: float = 0.0):
         """Told by the bot when it schedules a press, so _verify can look for
         the flash that should follow it."""
-        self._awaiting[lane].append({"at": arrival, "ok": False})
+        self._awaiting[lane].append({"at": arrival, "ok": False, "v": speed})
+
+    def note_speed(self) -> float:
+        """Roughly how fast notes are travelling right now.
+
+        Printed alongside the poll rate so a speed wave shows up in the log
+        as a step. If missed presses turn out to land on those steps, they
+        are notes whose speed changed after their press was already worked
+        out — which wants a different fix from ordinary timing scatter.
+        """
+        speeds = sorted(v for v in self._measured if v)
+        return speeds[len(speeds) // 2] if speeds else 0.0
 
     # ── introspection, for the UI and tests ──────────────────────────────
 

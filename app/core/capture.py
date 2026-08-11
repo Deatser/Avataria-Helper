@@ -82,6 +82,97 @@ class ScreenCapture:
         return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
 
+# ── Which capture to use ────────────────────────────────────────────────
+# PrintWindow is the default and always works. Windows Graphics Capture is
+# the same picture roughly twice as fast (see wgc_capture.py), switched on
+# from Ava Dancers' settings; it cannot capture a minimised window, so a
+# session that will not start or stops producing frames falls straight back
+# rather than taking the bot down with it.
+_use_wgc = False
+_wgc_lock = Lock()
+_wgc_sessions: dict[int, object] = {}
+_wgc_broken: set[int] = set()
+
+
+def set_wgc_enabled(enabled: bool) -> bool:
+    """Turn Windows Graphics Capture on or off. Returns what was actually
+    set — asking for it without the library installed leaves it off."""
+    global _use_wgc
+    from app.core import wgc_capture
+
+    enabled = bool(enabled) and wgc_capture.available()
+    with _wgc_lock:
+        if not enabled:
+            _drop_wgc_sessions()
+        _use_wgc = enabled
+        _wgc_broken.clear()
+    return enabled
+
+
+def wgc_enabled() -> bool:
+    return _use_wgc
+
+
+def window_frame_origin(hwnd: int) -> tuple[int, int]:
+    """Screen coordinates of the top-left pixel grab_window(hwnd) returns.
+
+    The two backends do not agree on this and the difference is not
+    cosmetic. GetWindowRect counts in the invisible resize border — on the
+    game it reads (-8, -8) — while a WGC frame starts at the window as it is
+    actually drawn, (0, 0). Anything converting a position found *inside* a
+    full-window capture back to screen coordinates has to ask here, or it
+    lands eight pixels out: enough to shift every lane into its neighbour and
+    move the hit line up by the same amount.
+    """
+    if _use_wgc:
+        session = _wgc_sessions.get(hwnd)
+        if session is not None:
+            return session.origin
+    left, top, _, _ = win32gui.GetWindowRect(hwnd)
+    return left, top
+
+
+def wgc_frames_seen(hwnd: int) -> int | None:
+    """Frames the window has produced, or None if WGC is not driving it."""
+    session = _wgc_sessions.get(hwnd) if _use_wgc else None
+    return session.frames_seen if session is not None else None
+
+
+def _drop_wgc_sessions():
+    for session in _wgc_sessions.values():
+        try:
+            session.stop()
+        except Exception:
+            pass
+    _wgc_sessions.clear()
+
+
+def _wgc_session(hwnd: int):
+    """The running capture for this window, started on first use.
+
+    None once a window has failed: retrying a session that would not start,
+    every poll, would cost far more than the capture it is meant to replace.
+    """
+    from app.core import wgc_capture
+
+    with _wgc_lock:
+        if hwnd in _wgc_broken:
+            return None
+        session = _wgc_sessions.get(hwnd)
+        if session is not None:
+            return session
+        try:
+            session = wgc_capture.WindowSession(hwnd)
+            if not session.wait_ready():
+                session.stop()
+                raise RuntimeError("окно не отдало ни одного кадра")
+        except Exception:
+            _wgc_broken.add(hwnd)
+            return None
+        _wgc_sessions[hwnd] = session
+        return session
+
+
 def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
     """Capture hwnd's own content, wherever it sits in the window stack.
 
@@ -98,6 +189,25 @@ def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
     ScreenCapture.grab retries its own BitBlt — so a failure here gets a
     couple of fresh attempts before it is allowed to propagate.
     """
+    if _use_wgc:
+        session = _wgc_session(hwnd)
+        if session is not None:
+            try:
+                return session.grab(region)
+            except Exception:
+                # Minimised, closed, moved — whatever it was, PrintWindow can
+                # still answer. Tear the session down so the next call starts
+                # a fresh one instead of inheriting a dead one; it is the
+                # session that just failed that has to go, whether or not it
+                # is still the one on file.
+                with _wgc_lock:
+                    if _wgc_sessions.get(hwnd) is session:
+                        del _wgc_sessions[hwnd]
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+
     last_error: Exception | None = None
     for _ in range(_RETRIES):
         try:
@@ -171,6 +281,18 @@ def _release_thread_cache():
 def release_window_capture():
     """Public entry point for a worker thread to call right before it exits."""
     _release_thread_cache()
+
+
+def release_all_capture():
+    """Drop everything, both backends — for shutting the app down.
+
+    A WGC session owns a thread and a GPU surface, and unlike the GDI cache
+    it is shared between threads rather than owned by one, so it cannot be
+    cleaned up by whichever worker happens to exit last.
+    """
+    _release_thread_cache()
+    with _wgc_lock:
+        _drop_wgc_sessions()
 
 
 def _print_window(hwnd: int) -> tuple[np.ndarray, int, int]:

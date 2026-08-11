@@ -18,10 +18,14 @@ def _qt_msg_handler(mode, context, message):
     if mode in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
         print(f"[Qt] {message}", file=sys.stderr)
 
+from app.core.capture import release_all_capture
 from app.core.config import ConfigManager
 from app.core.stats import StatsManager
+from app.core.tropikania_config import TropikaniaConfigManager
+from app.core.tropikania_stats import TropikaniaStatsManager
 from app.core.window_manager import WindowManager
 from app.ui.overlay import Overlay
+from app.ui.tropikania_overlay import TropikaniaOverlay
 from app.ui.raise_on_click import RaiseOnClick
 
 
@@ -69,6 +73,33 @@ def main():
     # against a hidden overlay has nothing to draw a wire to.
     if found:
         overlay.restore_favorite_windows()
+
+    # Own WindowManager and its own config/stats files — Tropikania and
+    # Avataria are separate game windows and separate records.
+    tropikania_config = TropikaniaConfigManager()
+    tropikania_stats  = TropikaniaStatsManager()
+    tropikania_wm = WindowManager()
+    tropikania_overlay = None
+    tropikania_found = tropikania_wm.find_game("Тропикания")
+    if tropikania_found:
+        print("Тропикания found")
+        tropikania_overlay = TropikaniaOverlay(tropikania_config, tropikania_wm,
+                                               tropikania_stats, stats)
+        tropikania_wm.attach_overlay(
+            int(tropikania_overlay.winId()),
+            tropikania_config.data.overlay.x,
+            tropikania_config.data.overlay.y,
+            tropikania_config.data.overlay.width,
+            tropikania_config.data.overlay.height,
+        )
+        tropikania_overlay.show()
+        tropikania_overlay.restore_favorite_windows()
+
+    # A Windows Graphics Capture session owns a background thread and a GPU
+    # surface, and unlike the GDI cache it is shared rather than owned by the
+    # worker that made it — so no worker can be the one to clean it up.
+    app.aboutToQuit.connect(release_all_capture)
+
     sys.exit(app.exec())
 
 

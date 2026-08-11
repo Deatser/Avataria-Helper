@@ -321,3 +321,53 @@ def test_verification_leaves_tracking_alone():
     presses = [p for _ in range(20)
                for p in tracker.update(100.0, flash_frame([0, 1, 2, 3]))]
     assert presses == []
+
+
+def test_the_field_lands_in_the_same_place_whoever_framed_it():
+    """The same window through two backends: PrintWindow includes the
+    invisible resize border, a WGC frame starts 8px in. Told the right
+    origin, both have to place the playfield identically — getting this
+    wrong shifted every lane into its neighbour and cost a round."""
+    border = 8
+    outer = np.zeros((1400, 2560, 3), np.uint8)
+    outer[300:1300, 900:1600] = 0
+    outer[300:308, 900:1600] = CYAN
+    outer[1292:1300, 900:1600] = CYAN
+    outer[300:1300, 900:908] = CYAN
+    outer[300:1300, 1592:1600] = CYAN
+
+    as_printwindow = locate_field(outer, -border, -border)
+    inner = outer[border:, border:]                   # what WGC hands over
+    as_wgc = locate_field(inner, 0, 0)
+
+    assert as_printwindow is not None and as_wgc is not None
+    assert (as_wgc.left, as_wgc.top) == (as_printwindow.left, as_printwindow.top)
+
+
+def test_a_missed_press_is_recorded_with_what_it_was_aimed_at():
+    """One line per miss, with the note's speed: several at once at one
+    speed is a different problem from one every few minutes."""
+    tracker = LaneTracker()
+    tracker.expect_hit(2, 100.0, speed=655.0)
+    tracker.update(100.15, frame())
+    tracker.update(100.60, frame())
+    assert tracker.missed == 1
+    assert tracker.miss_log == [{"lane": 2, "at": 100.0, "v": 655.0}]
+
+
+def test_a_scored_press_is_not_recorded_as_a_miss():
+    tracker = LaneTracker()
+    tracker.expect_hit(2, 100.0, speed=655.0)
+    tracker.update(100.15, flash_frame([2]))
+    tracker.update(100.60, frame())
+    assert tracker.miss_log == []
+
+
+def test_note_speed_reports_what_the_lanes_have_measured():
+    """Printed next to the poll rate so a speed wave shows up in the log as
+    a step — the thing a burst of misses would have to line up with."""
+    tracker = LaneTracker()
+    assert tracker.note_speed() == 0.0, "a seeded default is not a measurement"
+    descend(tracker, [(0, REGION["top"] + 20, "nice")], speed=600.0)
+    assert tracker.note_speed() == pytest.approx(600, rel=0.05)
+
