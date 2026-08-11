@@ -1,4 +1,6 @@
 # app/ui/theme.py
+from pathlib import Path
+
 from PySide6.QtGui import QColor, QFont, QFontDatabase
 
 # ── Backgrounds — neutral near-black with a faint violet cast ────────────────
@@ -111,18 +113,61 @@ PADDING = 14
 SPACING = 8
 
 # ── Typography ───────────────────────────────────────────────────────────────
+# The four faces are shipped with the app rather than hoped for. Every
+# family these chains named first — JetBrains Mono, Ndot 55, Cinzel — turned
+# out not to be installed on the machine this runs on, so all four roles
+# were quietly falling through to Consolas and Courier New. That fallback,
+# not a design choice, is what the whole app looked like.
+#
+# Three of them now live in assets/fonts and are registered at startup.
+# Ndot 55 is not among them and cannot be: its licence allows use only on
+# Nothing's own brand material and forbids passing the font on to anyone
+# else. It stays at the head of the display chain so that installing it by
+# hand still takes effect, and Comfortaa stands in until then.
+#
+# Comfortaa carries Latin, Cyrillic, digits, ∞ and the ←↓↑→ arrows the tile
+# readout draws (checked against its cmap). None of them carry ▲ ★ ☆ ⚙, so
+# Qt substitutes those from a system face glyph by glyph, as it already did
+# for everything missing before.
+FONT_MAIN          = "Comfortaa"
 FONT_MONO          = "JetBrains Mono"
 FONT_MONO_FALLBACK = "Consolas"
 FONT_SIZE_S = 11
 FONT_SIZE_M = 13
 FONT_SIZE_L = 16
 
-_DISPLAY_CHAIN = ["Ndot 55", "OCR A Extended", "Consolas", "Courier New"]
-_ROUND_CHAIN   = ["Comfortaa", "Segoe UI", "Arial"]
-_SERIF_CHAIN   = ["Cinzel", "Palatino Linotype", "Book Antiqua", "Georgia", "Times New Roman"]
+_FONT_DIR = Path(__file__).resolve().parents[2] / "assets" / "fonts"
+
+# Each role keeps its own face; Comfortaa is the shared stand-in behind
+# them, not a replacement for them.
+_MONO_CHAIN    = [FONT_MONO, FONT_MONO_FALLBACK, FONT_MAIN]
+_DISPLAY_CHAIN = ["Ndot 55", FONT_MAIN, "OCR A Extended", "Consolas", "Courier New"]
+_ROUND_CHAIN   = [FONT_MAIN, "Segoe UI", "Arial"]
+_SERIF_CHAIN   = ["Cinzel", FONT_MAIN, "Palatino Linotype", "Book Antiqua",
+                  "Georgia", "Times New Roman"]
+
+_loaded = False
+
+
+def _ensure_fonts():
+    """Register the bundled faces with Qt, once.
+
+    Lazily rather than at import: addApplicationFont needs a QGuiApplication
+    to exist, and this module is imported long before one does in some entry
+    points. Every font getter goes through here, so whichever runs first
+    does the loading.
+    """
+    global _loaded
+    if _loaded or not _FONT_DIR.is_dir():
+        return
+    for path in sorted(_FONT_DIR.glob("*.ttf")):
+        if QFontDatabase.addApplicationFont(str(path)) == -1:
+            return          # no application object yet — try again next call
+    _loaded = True
 
 
 def _pick(chain: list) -> str:
+    _ensure_fonts()
     families = set(QFontDatabase.families())
     for name in chain:
         if name in families:
@@ -131,9 +176,7 @@ def _pick(chain: list) -> str:
 
 
 def get_mono_font(size: int = FONT_SIZE_M, bold: bool = False) -> QFont:
-    families = set(QFontDatabase.families())
-    name = FONT_MONO if FONT_MONO in families else FONT_MONO_FALLBACK
-    font = QFont(name, size)
+    font = QFont(_pick(_MONO_CHAIN), size)
     font.setBold(bold)
     font.setLetterSpacing(QFont.AbsoluteSpacing, 0.3)
     return font

@@ -40,12 +40,16 @@ def test_the_in_game_check_is_looser_than_the_click_bar():
 
 # ── Step lists ──────────────────────────────────────────────────────────────
 
-def test_ok_alone_when_restart_is_off():
-    assert ExitFlow(0, restart=False).steps() == [OK_STEP]
+def test_nothing_after_ok_when_restart_is_off():
+    """OK is not in the step list at all any more — it is clicked at its
+    known spot once the ИГРА ОКОНЧЕНА banner says the screen is up, because
+    matching leave_ok.png only worked some of the time and a round that
+    missed it never started the next one."""
+    assert ExitFlow(0, restart=False).steps() == []
 
 
-def test_restart_adds_repeat_and_start_after_ok():
-    assert ExitFlow(0, restart=True).steps() == [OK_STEP] + RESTART_STEPS
+def test_restart_runs_repeat_and_start_after_ok():
+    assert ExitFlow(0, restart=True).steps() == RESTART_STEPS
 
 
 def test_the_entry_chain_ends_on_the_button_that_starts_the_round():

@@ -8,10 +8,9 @@ from app.ui.sheet_panel import SheetPanel
 from app.ui.widgets.nt_switch import NtSwitch
 
 _W = 360
-_H = 250
+_H = 190
 
 _RESTART_TEXT = "Автоматически начинать новую игру"
-_WGC_TEXT     = "Быстрый захват (Windows Graphics Capture)"
 
 
 class SettingsPanel(SheetPanel):
@@ -22,7 +21,6 @@ class SettingsPanel(SheetPanel):
     # modes chosen from the buttons on the module's own window, where it is
     # visible without opening anything.
     auto_restart_changed  = Signal(bool)
-    fast_capture_changed  = Signal(bool)
 
     def __init__(self, config, save_fn, host):
         self.config  = config
@@ -41,15 +39,6 @@ class SettingsPanel(SheetPanel):
         layout.addWidget(self.hint(
             "Выключено — бот только выйдет из забега и остановится."))
 
-        layout.addWidget(self.caption("Захват экрана"))
-
-        self._wgc_switch = NtSwitch(_WGC_TEXT, accent=theme.VW_CYAN)
-        self._wgc_switch.set_checked_silently(self.fast_capture)
-        self._wgc_switch.toggled.connect(self._on_fast_capture_toggled)
-        layout.addWidget(self._wgc_switch)
-        layout.addWidget(self.hint(
-            "Кадров вдвое больше — детектор точнее. Игру можно закрывать "
-            "другими окнами, но не сворачивать."))
 
     # ── Settings ─────────────────────────────────────────────────────────────
 
@@ -57,16 +46,8 @@ class SettingsPanel(SheetPanel):
     def auto_restart(self) -> bool:
         return bool(getattr(self.config, "auto_restart", True))
 
-    @property
-    def fast_capture(self) -> bool:
-        return bool(getattr(self.config, "fast_capture", False))
 
     def _on_restart_toggled(self, enabled: bool):
         self.config.auto_restart = enabled
         self.save_fn()
         self.auto_restart_changed.emit(enabled)
-
-    def _on_fast_capture_toggled(self, enabled: bool):
-        self.config.fast_capture = enabled
-        self.save_fn()
-        self.fast_capture_changed.emit(enabled)

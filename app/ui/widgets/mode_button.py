@@ -29,7 +29,7 @@ _BRACKET_W   = 2.6   # heavier than StatTile's hairline — see module note
 # small ring behind the crisp text. QPainter has no cheap blur for a run of
 # text, and this reads the same at these sizes.
 _GLOW_PASSES = 5
-_GLOW_REACH  = 1.8
+_GLOW_REACH  = 1.1
 _GLOW_RING   = ((1, 0), (-1, 0), (0, 1), (0, -1),
                 (0.7, 0.7), (-0.7, 0.7), (0.7, -0.7), (-0.7, -0.7))
 
@@ -142,7 +142,11 @@ class ModeButton(QWidget):
 
     def _draw_glow_text(self, painter: QPainter, rect: QRectF, text: str,
                         colour: QColor):
-        strength = 9 if self._active else 5
+        # Deliberately faint. A halo strong enough to read as neon on a
+        # number you glance at is painful on a label you look at while
+        # deciding something — and these three sit at the top of the window
+        # where the eye lands first.
+        strength = 4 if self._active else 2
         for i in range(_GLOW_PASSES, 0, -1):
             glow = QColor(colour)
             glow.setAlpha(int(strength * (_GLOW_PASSES - i + 1)))

@@ -12,7 +12,6 @@ from app.core.capture import grab_window, set_wgc_enabled
 from app.core.input_sender import press_key
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
                                      load_template, primary_monitor_region)
-from app.ui.calibration_overlay import CalibrationOverlay
 from app.ui.module_window import ModuleWindow
 from app.ui.settings_panel import SettingsPanel
 from app.ui.widgets.mode_button import ModeButton
@@ -34,7 +33,10 @@ from modules.ava_dancers.speedup_watch import SpeedupWatch
 
 _DEFAULT_W = 420
 _DEFAULT_H = 570
-_MIN_H     = 510   # header + controls + tiles + log + actions + switch
+# The height the window is actually used at. Everything in it — the mode
+# row, the tile readout, the log — is sized for this, and dragging the
+# edge up only ever squeezed the log into uselessness.
+_MIN_H     = 582
 _MIN_W     = 300
 
 # Gap between clicking Старт and putting the detector back to work, so it
@@ -50,11 +52,6 @@ _RESTART_BOT_DELAY_MS = 2_000
 _FINISH_GRACE_MS      = 2_000
 _FINISH_SPAM_MS       = 4_000   # total mashing time
 _FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
-
-# Where the calibration box first appears — centred on the game window,
-# seeded as a plain rectangle; drag its edges or middle from there.
-_CALIB_DEFAULT_W = 300
-_CALIB_DEFAULT_H = 120
 
 # ── Farm modes ───────────────────────────────────────────────────────────
 # Which reward ends a run, or that nothing does. Chosen from three buttons
@@ -76,11 +73,15 @@ _MODE_FINISH = {MODE_SILVER: FINISH_SILVER, MODE_GOLD: FINISH_GOLD}
 # height of an ordinary button, and its label scales with the window so all
 # three fit however narrow it gets.
 _MODE_ROW_H     = 68
+_MODE_ROW_GAP   = 8
 _MODE_FONT_MAX  = 20
 _MODE_FONT_MIN  = 8
 
-_CALIB_START_TEXT = "📐  Область награды"
-_CALIB_STOP_TEXT  = "📐  Записать область"
+# The fitted size is what the button *could* hold; the label is drawn
+# smaller than that on purpose, so the text sits inside the card with air
+# around it instead of filling it edge to edge.
+_MODE_FONT_SHRINK = 1.5
+_MODE_FONT_FLOOR  = 6
 
 # Tile index → on-screen arrow (tiles are ordered A, S, W, D)
 _KEY_LABELS = ["←", "↓", "↑", "→"]
@@ -173,7 +174,6 @@ class AvaDancersWindow(ModuleWindow):
         self._entry_flow: EntryFlow | None = None
         self._finish_timer: QTimer | None = None
         self._finish_ticks = 0
-        self._calib = CalibrationOverlay(window_manager, reference=self)
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
         self.resize(max(w, _MIN_W), max(h, _MIN_H))
@@ -261,12 +261,6 @@ class AvaDancersWindow(ModuleWindow):
         layout.addWidget(detect_gold_btn)
         detect_gold_btn.setVisible(False)
 
-        self._calib_btn = NtButton(_CALIB_START_TEXT, accent=theme.VW_PURPLE,
-                                   upper=False)
-        self._calib_btn.clicked.connect(self._toggle_calib)
-        layout.addWidget(self._calib_btn)
-        self._calib_btn.setVisible(False)
-
         # ── Tile status row — the main readout, so it gets the room ───────────
         tiles_row = QHBoxLayout()
         self._tiles_row = tiles_row
@@ -321,11 +315,6 @@ class AvaDancersWindow(ModuleWindow):
         layout.addLayout(log_head)
 
         layout.addWidget(self._log)
-
-        guide_btn = NtButton("Гайд", upper=False,
-                             accent=theme.VW_PURPLE, filled=True)
-        guide_btn.setMinimumHeight(30)
-        layout.addWidget(guide_btn)
 
         # ── Backdrop: templates/vaporwawe.* by default, video first ──────────
         self._panel.background_failed.connect(
@@ -411,7 +400,10 @@ class AvaDancersWindow(ModuleWindow):
         (announce=False, from _resume_after_restart) — the bot never reads
         as "stopped" in between, so only the first one is worth a log line.
         """
-        set_wgc_enabled(getattr(self.config, "fast_capture", False))
+        # Always on. It is the same picture twice as fast, it falls back
+        # to PrintWindow by itself if the window is ever minimised, and
+        # there was never a reason to play a round without it.
+        set_wgc_enabled(True)
         self._bot = AvaBot(hwnd, self._thresholds())
         self._bot.tiles_seen.connect(self._on_tiles_seen)
         self._bot.field_located.connect(
@@ -811,28 +803,7 @@ class AvaDancersWindow(ModuleWindow):
                 host    = self,
             )
             self._settings.auto_restart_changed.connect(self._on_auto_restart)
-            self._settings.fast_capture_changed.connect(self._on_fast_capture)
         self._settings.toggle()
-
-    def _on_fast_capture(self, enabled: bool):
-        """Switch capture backends and say which one took.
-
-        Asking for WGC without the library installed silently leaves
-        PrintWindow in place, so the answer comes back from set_wgc_enabled
-        rather than from the switch — a setting that quietly did nothing is
-        exactly the kind of thing that wastes a round to discover.
-        """
-        actual = set_wgc_enabled(enabled)
-        if enabled and not actual:
-            self._log.add_log(
-                "Быстрый захват недоступен — нет пакета windows-capture. "
-                "Остаюсь на обычном.", level="error")
-            return
-        self._log.add_log_segments(
-            [("Захват: ", theme.TEXT_SECONDARY),
-             ("Windows Graphics Capture" if actual else "PrintWindow",
-              theme.VW_CYAN if actual else theme.TEXT_PRIMARY)],
-            level="plain")
 
     def _on_auto_restart(self, enabled: bool):
         self._log.add_log_segments(
@@ -872,58 +843,6 @@ class AvaDancersWindow(ModuleWindow):
         self._log.add_log(f"{label}: {score:.1%} {tag}",
                           level="success" if hit else "plain")
 
-    # ── Rectangle calibration ───────────────────────────────────────────────
-    # Marks out where the reward line actually sits, so the watchers can be
-    # pointed at that one spot instead of scanning the whole screen for it.
-
-    def _toggle_calib(self):
-        """First press: a plain box appears over the game — drag its
-        middle to move it, an edge or corner to resize it. Second press:
-        its bounds go to the log, and it hides."""
-        if self._calib.isVisible():
-            self._log_calib_bounds()
-            self._calib.clear()
-            self._calib_btn.setText(_CALIB_START_TEXT)
-            self._calib_btn.set_active(False)
-            return
-
-        hwnd = self._wm.get_game_hwnd()
-        if not hwnd:
-            self._log.add_log("Игровое окно не найдено", level="error")
-            return
-        rect = self._wm.window_rect_screen(hwnd)
-        if rect is None:
-            self._log.add_log("Не удалось определить положение окна игры",
-                              level="error")
-            return
-
-        ox, oy, w, h = rect
-        box = QRect(ox + (w - _CALIB_DEFAULT_W) // 2,
-                   oy + (h - _CALIB_DEFAULT_H) // 2,
-                   _CALIB_DEFAULT_W, _CALIB_DEFAULT_H)
-        self._calib.show_at(box)
-        self._calib_btn.setText(_CALIB_STOP_TEXT)
-        self._calib_btn.set_active(True)
-        self._log.add_log(
-            "Область — тяните за середину, чтобы подвинуть, за край или "
-            "угол — чтобы изменить размер. Нажмите кнопку ещё раз, чтобы "
-            "записать.",
-            level="plain")
-
-    def _log_calib_bounds(self):
-        box = self._calib.bounds()
-        cx, cy = box.center().x(), box.center().y()
-        self._log.add_log_segments(
-            [("Область — ", theme.TEXT_SECONDARY),
-             ("x", theme.VW_CYAN), (f" {box.left()}", theme.VW_MAGENTA),
-             ("  y", theme.VW_CYAN), (f" {box.top()}", theme.VW_MAGENTA),
-             ("  w", theme.VW_CYAN), (f" {box.width()}", theme.VW_MAGENTA),
-             ("  h", theme.VW_CYAN), (f" {box.height()}", theme.VW_MAGENTA),
-             ("  центр (", theme.TEXT_SECONDARY),
-             (f"{cx}, {cy}", theme.VW_MAGENTA),
-             (")", theme.TEXT_SECONDARY)],
-            level="plain")
-
     # ── Farm mode ────────────────────────────────────────────────────────────
 
     def _build_mode_row(self, layout: QVBoxLayout):
@@ -933,7 +852,7 @@ class AvaDancersWindow(ModuleWindow):
         is the state, so there is nothing to read.
         """
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(_MODE_ROW_GAP)
         self._mode_btns: dict[str, ModeButton] = {}
         for mode, label in _MODES:
             button = ModeButton(label, accent=theme.ACCENT_GREEN)
@@ -981,19 +900,26 @@ class AvaDancersWindow(ModuleWindow):
         buttons = getattr(self, "_mode_btns", None)
         if not buttons:
             return
-        sample = next(iter(buttons.values()))
-        room_w = max(40, sample.width() - 14) if sample.width() > 1 else                  max(40, self.width() // len(_MODES) - 22)
-        room_h = max(24, sample.height() - 10)
+        # Worked out from the window, never from the buttons themselves.
+        # Their own width is only real once the layout has run, so reading
+        # it gave one answer while the window was being built and another
+        # afterwards — the label visibly changed size on the first click
+        # and stayed changed. The row is three buttons across the panel,
+        # so the arithmetic is exact anyway.
+        gaps = theme.PADDING * 2 + _MODE_ROW_GAP * (len(_MODES) - 1)
+        room_w = max(40, (self.width() - gaps) // len(_MODES) - 14)
+        room_h = max(24, _MODE_ROW_H - 10)
         labels = [label for _, label in _MODES]
 
-        font = theme.get_mono_font(_MODE_FONT_MIN, bold=True)
+        fitted = _MODE_FONT_MIN
         for size in range(_MODE_FONT_MAX, _MODE_FONT_MIN - 1, -1):
-            candidate = theme.get_mono_font(size, bold=True)
-            metrics = QFontMetricsF(candidate)
+            metrics = QFontMetricsF(theme.get_mono_font(size, bold=True))
             if all(self._label_fits(metrics, text, room_w, room_h)
                    for text in labels):
-                font = candidate
+                fitted = size
                 break
+        size = max(_MODE_FONT_FLOOR, round(fitted / _MODE_FONT_SHRINK))
+        font = theme.get_mono_font(size, bold=True)
         for button in buttons.values():
             button.setFont(font)
             button.update()
@@ -1065,4 +991,3 @@ class AvaDancersWindow(ModuleWindow):
         self._stop_exit_flow()
         self._stop_round_threads()
         self._stop_entry_flow()
-        self._calib.clear()
