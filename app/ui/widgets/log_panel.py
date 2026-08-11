@@ -18,6 +18,24 @@ _FLIP_MS   = 16
 _FLIP_SPAN = 4
 _LINE_LAG  = 2
 
+# One switch for every log panel in the app — the scramble reveal and the
+# split-flap wipe both run on a QTimer per character, which on a slow
+# machine is the single heaviest thing the UI does. Off → lines are written
+# whole and clearing is instant. Set from OverlayConfig.log_animation at
+# startup and by the helper's own settings sheet; kept module-level rather
+# than per-panel because every window builds its own LogPanel and they must
+# all agree.
+_animate = True
+
+
+def set_animation_enabled(enabled: bool):
+    global _animate
+    _animate = bool(enabled)
+
+
+def animation_enabled() -> bool:
+    return _animate
+
 
 class LogPanel(QTextEdit):
     """Scrolling log area — every message animates with scramble effect."""
@@ -136,6 +154,14 @@ class LogPanel(QTextEdit):
         self.append("")
         block_num = self.document().blockCount() - 1
         self._set_line_height(block_num)
+
+        if not _animate:
+            # Straight to the settled line — no frames, no timers.
+            self._write_block(block_num, list(segments), ts)
+            if on_done:
+                on_done()
+            return
+
         self._write_block(block_num, self._build_frame(segments, 0), ts)
 
         def tick(f):
@@ -192,6 +218,10 @@ class LogPanel(QTextEdit):
         cursor.removeSelectedText()
 
         fmt = QTextCharFormat()
+        # Take the widget's own font, so a window that has been through
+        # theme.apply_tracking() gets its letter-spacing in the log too —
+        # inserted char formats don't pick it up from the document default.
+        fmt.setFont(self.font())
         if ts:
             fmt.setForeground(QColor(theme.LOG_TS_COLOR))
             cursor.setCharFormat(fmt)
@@ -214,7 +244,7 @@ class LogPanel(QTextEdit):
     # starting one after another from the top.
 
     def clear_logs(self):
-        if self._wiping or self.document().isEmpty():
+        if not _animate or self._wiping or self.document().isEmpty():
             self.clear()
             return
         lines = [self._block_segments(i)

@@ -6,6 +6,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout
 
+from app.core import activated_promo_log
+from app.core.promo_activate import PromoActivateFlow
 from app.core.promo_watch import PromoCheck, PromoFetchLatest
 from app.ui import theme
 from app.ui.module_window import ModuleWindow
@@ -13,6 +15,7 @@ from app.ui.widgets.log_actions import build_log_actions
 from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
+from app.ui.widgets.nt_status_dot import NtStatusDot
 from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
 
 _DEFAULT_W = 380
@@ -20,15 +23,31 @@ _DEFAULT_H = 440
 _MIN_W     = 320
 _MIN_H     = 380
 
-_DETECT_TEXT = "▶  Запустить автоматический детект промокодов"
-_FETCH_TEXT  = "🔍  Вывести данные по последним промокодам"
+_DETECT_START_TEXT = "▶  Запустить автодетект промокодов"
+_DETECT_STOP_TEXT  = "■  Выключить автодетект промокодов"
+_FETCH_TEXT        = "🔍  Вывести данные по последним промокодам"
+
+# Чуть больше обычного таймаута PromoCheck: за этой пробой пользователь
+# смотрит сам, поэтому даём базе немного больше времени ответить.
+_ENABLE_CHECK_TIMEOUT = 10
 
 _ACTIVATE_LINE = "Нажмите чтобы активировать все доступные промокоды"
 
+# Зелёный — доступен, красный — просрочен, жёлтый — уже активирован (и он
+# же для кода с неразобранным сроком: активировать можно, но за срок никто
+# не ручается).
 _STATUS_COLOR = {
-    "valid":   theme.ACCENT_GREEN,
-    "expired": theme.ACCENT_RED,
-    "unknown": theme.ACCENT_AMBER,
+    "valid":     theme.ACCENT_GREEN,
+    "expired":   theme.ACCENT_RED,
+    "activated": theme.ACCENT_AMBER,
+    "unknown":   theme.ACCENT_AMBER,
+}
+
+_STATUS_NOTE = {
+    "valid":     "доступен",
+    "expired":   "просрочен",
+    "activated": "уже активирован",
+    "unknown":   "срок неизвестен",
 }
 
 _BACKDROP_STEM  = "AvaPromo"
@@ -49,33 +68,46 @@ def _default_backdrop(video: bool = True) -> str:
     return ""
 
 
+def entry_status(entry) -> str:
+    """Статус для показа: журнал активированных перебивает срок — код,
+    который бот уже ввёл, интересен именно этим, а не тем, истёк он или
+    ещё нет."""
+    if activated_promo_log.is_activated(entry.code):
+        return "activated"
+    return entry.status if entry.status in _STATUS_COLOR else "unknown"
+
+
 def _entry_html(entry) -> str:
-    """One "pr_XXX - Title [до ДД.ММ.ГГ]" line, code and date each an
-    underlined, coloured `copy:`-anchored span — see LogPanel.mousePressEvent
-    for what actually makes them clickable."""
+    """Строка «pr_XXX — награда [до ДД.ММ.ГГГГ ЧЧ:ММ] — статус», целиком
+    окрашенная по статусу: зелёный доступен, красный просрочен, жёлтый уже
+    активирован. Сам код — подчёркнутая `copy:`-ссылка (что делает её
+    кликабельной, см. LogPanel.mousePressEvent)."""
+    status = entry_status(entry)
+    color  = _STATUS_COLOR[status]
+
     code_html = (f'<a href="copy:{entry.code}" '
                  f'style="color:{theme.ACCENT_CYAN}; text-decoration:underline;">'
                  f'{escape(entry.code)}</a>')
 
-    title_text = escape(entry.title) if entry.title else "Не удалось определить содержимое"
+    reward_text = escape(entry.title) if entry.title else "награда не указана"
 
     if entry.date_display:
         date_text = f"до {entry.date_display}"
     else:
-        date_text = "не удалось определить срок активации"
-    date_color = _STATUS_COLOR[entry.status]
-    date_html  = (f'<span style="color:{date_color}; text-decoration:underline;">'
-                  f'{date_text}</span>')
+        date_text = "срок активации не указан"
 
-    return (f'<span style="color:{theme.TEXT_SECONDARY};">{code_html} - '
-            f'{title_text} [{date_html}]</span>')
+    line = (f'{code_html} '
+            f'<span style="color:{theme.TEXT_SECONDARY};">— {reward_text}</span> '
+            f'<span style="color:{color};">[{date_text}] — {_STATUS_NOTE[status]}</span>')
+
+    return line
 
 
 class PromoWindow(ModuleWindow):
     """Промокоды — not in the module registry (same reasoning as
-    StatsWindow: no bot, no screen watching of its own — PromoWatch runs
-    at the Overlay level so it keeps going with this window closed), the
-    overlay opens it directly.
+    StatsWindow: no bot, no screen watching of its own — PromoAutoLoop
+    runs at the Overlay level so it keeps going with this window closed),
+    the overlay opens it directly.
     """
 
     closed = Signal()
@@ -83,14 +115,17 @@ class PromoWindow(ModuleWindow):
     _RESIZE_MIN_W = _MIN_W
     _RESIZE_MIN_H = _MIN_H
 
-    def __init__(self, config, save_fn, window_manager, overlay=None):
+    def __init__(self, config, save_fn, window_manager, stats=None, overlay=None):
         # Not parent_overlay: same reason StatsWindow skips it — the base
         # class would report this as a module closing, and it is not one.
         super().__init__("Промокоды", config, save_fn, parent_overlay=None)
         self._wm      = window_manager
+        self._stats   = stats
         self._overlay = overlay
         self._fetcher: PromoFetchLatest | None = None
         self._checker: PromoCheck | None = None
+        self._flow: PromoActivateFlow | None = None
+        self._last_entries: list = []
 
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
@@ -120,18 +155,11 @@ class PromoWindow(ModuleWindow):
         layout.addWidget(sep)
         layout.addSpacing(4)
 
-        warning = QLabel(
-            "⚠ Нужен рабочий доступ к Telegram (VPN, если он заблокирован "
-            "у провайдера)")
-        warning.setWordWrap(True)
-        warning.setFont(theme.get_mono_font(theme.FONT_SIZE_S))
-        warning.setStyleSheet(f"color:{theme.ACCENT_AMBER}; background:transparent;")
-        layout.addWidget(warning)
-        layout.addSpacing(2)
-
-        self._detect_btn = NtButton(_DETECT_TEXT, accent=theme.ACCENT_GREEN,
-                                    upper=False)
-        self._detect_btn.set_active(bool(getattr(self.config, "detect_enabled", False)))
+        detect_on = bool(getattr(self.config, "detect_enabled", False))
+        self._detect_btn = NtButton(
+            _DETECT_STOP_TEXT if detect_on else _DETECT_START_TEXT,
+            accent=theme.ACCENT_GREEN, upper=False)
+        self._detect_btn.set_active(detect_on)
         self._detect_btn.clicked.connect(self._toggle_detect)
         layout.addWidget(self._detect_btn)
 
@@ -163,6 +191,12 @@ class PromoWindow(ModuleWindow):
     def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
 
+        self._status_dot = NtStatusDot()
+        if bool(getattr(self.config, "detect_enabled", False)):
+            self._status_dot.set_running()
+        else:
+            self._status_dot.set_offline()
+
         title = QLabel("ПРОМОКОДЫ")
         title.setFont(theme.get_display_font(theme.FONT_SIZE_M))
         title.setStyleSheet(f"color:{theme.ACCENT_CYAN}; background:transparent;")
@@ -178,6 +212,8 @@ class PromoWindow(ModuleWindow):
         close_btn.setFixedSize(24, 24)
         close_btn.clicked.connect(self.close)
 
+        header.addWidget(self._status_dot)
+        header.addSpacing(6)
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self._collapse_btn)
@@ -206,10 +242,7 @@ class PromoWindow(ModuleWindow):
 
     def _on_log_anchor(self, href: str):
         if href == "activate:all":
-            # The mechanism itself is a later step — see the button's own
-            # log line for what is there today.
-            self._log.add_log(
-                "Активация всех промокодов — в разработке", level="plain")
+            self._activate_all()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -223,9 +256,9 @@ class PromoWindow(ModuleWindow):
             return
 
         if self._checker is not None:
-            return   # already checking whether Telegram answers
+            return   # проба связи с базой уже идёт
         self._detect_btn.setEnabled(False)
-        checker = PromoCheck()
+        checker = PromoCheck(timeout=_ENABLE_CHECK_TIMEOUT)
         checker.ok.connect(self._on_detect_check_ok)
         checker.error.connect(self._on_detect_check_error)
         checker.finished.connect(self._on_detect_check_finished)
@@ -233,25 +266,30 @@ class PromoWindow(ModuleWindow):
         checker.start()
 
     def _on_detect_check_ok(self):
-        self._set_detect(True)
+        self._set_detect(True, announce=True)
+        self._status_dot.set_running()
+        self._log.add_log("Автодетект включен", level="plain")
 
     def _on_detect_check_error(self, message: str):
-        self._log.add_log(f"Промокоды: {message}", level="error")
+        self._status_dot.set_offline()
+        self._log.add_log(
+            f"Не удалось включить автодетект — {message}", level="plain")
 
     def _on_detect_check_finished(self):
         self._checker = None
         self._detect_btn.setEnabled(True)
 
-    def _set_detect(self, enabled: bool):
+    def _set_detect(self, enabled: bool, announce: bool = False):
         self.config.detect_enabled = enabled
         self.save_fn()
         self._detect_btn.set_active(enabled)
+        self._detect_btn.setText(_DETECT_STOP_TEXT if enabled else _DETECT_START_TEXT)
+        if not enabled:
+            self._status_dot.set_offline()
         if self._overlay is not None:
-            self._overlay.set_promo_watch_enabled(enabled)
-        self._log.add_log(
-            "Автодетект промокодов включён" if enabled
-            else "Автодетект промокодов выключен",
-            level="plain")
+            self._overlay.set_promo_watch_enabled(enabled, announce=announce)
+        if not enabled:
+            self._log.add_log("Автодетект промокодов выключен", level="plain")
 
     # ── Latest codes ─────────────────────────────────────────────────────────
 
@@ -274,15 +312,97 @@ class PromoWindow(ModuleWindow):
         self._log.add_log(f"Промокоды: {message}", level="error")
 
     def _on_fetched(self, entries: list):
+        self._last_entries = entries
         if not entries:
             self._log.add_log("Свежих промокодов не нашлось", level="plain")
             return
-        for entry in entries:
+        for i, entry in enumerate(entries):
+            if i > 0:
+                self._log.blank_line()
             self._log.add_html(_entry_html(entry))
         self._log.blank_line()
         self._log.add_html(
             f'<a href="activate:all" style="color:{theme.ACCENT_SOFT}; '
             f'text-decoration:underline;">{_ACTIVATE_LINE}</a>')
+        self._log.blank_line()
+
+    # ── Activation ───────────────────────────────────────────────────────────
+
+    def _activate_all(self):
+        if self._flow is not None:
+            return   # a run is already in progress
+        if not self._last_entries:
+            self._log.add_log("Сначала выведите последние промокоды",
+                              level="plain")
+            return
+        hwnd = self._wm.get_game_hwnd() if self._wm else None
+        if not hwnd:
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+
+        # No pre-filtering here — every listed entry gets its own
+        # "Активируем..." line and exactly one outcome, in the order it
+        # was listed. Expiry and the activated-codes log are both checked
+        # inside the flow itself, per entry (see PromoActivateFlow.run).
+        flow = PromoActivateFlow(hwnd, list(self._last_entries))
+        flow.starting.connect(self._on_flow_starting)
+        flow.submitted.connect(self._on_flow_submitted)
+        flow.expired.connect(self._on_flow_expired)
+        flow.already_activated.connect(self._on_flow_already_activated)
+        flow.unknown_error.connect(self._on_flow_unknown_error)
+        flow.confirmed.connect(self._on_flow_confirmed)
+        flow.failed.connect(self._on_flow_failed)
+        flow.error.connect(self._on_flow_error)
+        flow.finished.connect(self._on_flow_finished)
+        self._flow = flow
+        flow.start()
+
+    def _on_flow_starting(self, entry):
+        self._log.add_log(f"Активируем промокод {entry.code}...", level="plain")
+
+    def _on_flow_submitted(self, entry):
+        title = entry.title or "без названия"
+        self._log.add_log_segments(
+            [("Активирован", theme.ACCENT_GREEN),
+             (f" промокод {entry.code} - {title}", theme.TEXT_SECONDARY)],
+            level="plain")
+        self._log.blank_line()
+        if self._overlay is not None:
+            self._overlay._on_promo_submitted(entry)
+
+    def _on_flow_expired(self, entry):
+        self._log.add_log_segments(
+            [(f"Промокод {entry.code} ", theme.TEXT_SECONDARY),
+             ("просрочен", theme.ACCENT_RED)],
+            level="plain")
+        self._log.blank_line()
+
+    def _on_flow_already_activated(self, entry):
+        self._log.add_log_segments(
+            [(f"Промокод {entry.code} уже ", theme.TEXT_SECONDARY),
+             ("активирован!", theme.ACCENT_GREEN)],
+            level="plain")
+        self._log.blank_line()
+
+    def _on_flow_unknown_error(self, entry):
+        self._log.add_log(
+            "Произошла неизвестная ошибка при активации промокода.",
+            level="plain")
+        self._log.blank_line()
+
+    def _on_flow_confirmed(self, entry):
+        if self._stats is not None:
+            self._stats.record_promo_activation()
+
+    def _on_flow_failed(self, entry):
+        self._log.add_log(f"Не удалось активировать промокод {entry.code}",
+                          level="error")
+
+    def _on_flow_error(self, message: str):
+        self._log.add_log(f"Промокоды: {message}", level="error")
+
+    def _on_flow_finished(self):
+        self._flow = None
 
     # ── Window plumbing ──────────────────────────────────────────────────────
 
@@ -299,3 +419,6 @@ class PromoWindow(ModuleWindow):
             self._fetcher.wait()
         if self._checker is not None:
             self._checker.wait()
+        if self._flow is not None:
+            self._flow.stop_flow()
+            self._flow.wait()

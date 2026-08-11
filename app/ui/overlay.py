@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QApplication, QDialog)
+                               QApplication, QDialog, QSizePolicy)
 from PySide6.QtCore import Qt, QPoint, QTimer
 
-from app.core.promo_watch import PromoWatch
+from app.core.promo_activate import PromoAutoLoop
 from app.core.stats import StatsManager
 from app.ui.promo_window import PromoWindow
 from app.ui import theme
@@ -22,6 +22,7 @@ from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.nt_status_dot import NtStatusDot
 from app.ui.widgets.log_actions import build_log_actions
+from app.ui.widgets import log_panel as log_panel_mod
 from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_confirm_dialog import NtConfirmDialog
 from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
@@ -46,10 +47,38 @@ def _default_backdrop(video: bool = True) -> str:
     return ""
 
 
+# The board of tiles owns the window and the log gets what is left — 70/30
+# of the height below the header, held by the layout's own stretch factors.
+_BOARD_SHARE = 7
+_LOG_SHARE   = 3
+
+# A tile is a button, not a panel: it keeps its own size and the three
+# columns are spread across the window — first flush left, last flush right,
+# the slack shared out between them — so the backdrop breathes around them
+# instead of being papered over edge to edge.
+_TILE_W     = 210   # fits the longest face, "PROMO CODES", without clipping
+_TILE_H     = 52    # a floor and a ceiling, so a tall window gives air, not slabs
+_TILE_MAX_H = 78
+
+_BOARD_TOP_GAP = 22   # separator → column captions
+_TILE_GAP      = 14   # between tiles inside a column
+_ICON_BTN   = 26    # < NtButton._SMALL_W → centred glyph, no accent bar
+
+# Button faces are English; module_cls.name stays Russian — it is the key
+# for open windows, logs and config, and none of that is on screen here.
+_DISPLAY_NAMES = {
+    "Ava Dancers": "Ava Dancers",
+    "Сноуборд":    "Snowboard",
+    "Хоккей":      "Hockey",
+    "Садовник":    "Садовник",
+    "Уборщик":     "Уборщик",
+}
+
+
 class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
               ResizeMixin, QWidget):
-    _RESIZE_MIN_W = 240
-    _RESIZE_MIN_H = 466   # header + 4 module buttons + log + 2 actions
+    _RESIZE_MIN_W = 3 * _TILE_W + 2 * theme.SPACING + theme.PADDING * 2
+    _RESIZE_MIN_H = 430   # header + three tile rows + log + handle
 
     def __init__(self, config, window_manager, stats=None, parent=None):
         super().__init__(parent)
@@ -60,6 +89,10 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._settings_panel: HelperSettingsPanel | None = None
         self._links = NodeLinkCanvas(window_manager)
         self._links.set_enabled(getattr(config.data.overlay, "show_links", True))
+        # Before any LogPanel is built, so the very first startup line
+        # already obeys the saved choice.
+        log_panel_mod.set_animation_enabled(
+            getattr(config.data.overlay, "log_animation", True))
         self._drag_origin = QPoint()
         self._drag_from   = QPoint()
         self._save_later  = QTimer(self)
@@ -72,7 +105,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._game_ok       = None   # tri-state: unknown until first check
         self._pending_logs: list[tuple[list, str]] = []
         self._panel: VwPanel | None = None
-        self._promo_watch: PromoWatch | None = None
+        self._promo_auto: PromoAutoLoop | None = None
         self._promo_window: PromoWindow | None = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
@@ -117,16 +150,23 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         title.setCursor(Qt.SizeAllCursor)
         title.mousePressEvent = self._drag_press
         title.mouseMoveEvent  = self._drag_move
+        # Settings is a gear up in the title bar: pressed once in a while, and
+        # it has no business taking a slab on the board.
+        settings_btn = NtButton("⚙", accent=theme.ACCENT, filled=True)
+        settings_btn.setFixedSize(_ICON_BTN, _ICON_BTN)
+        settings_btn.setToolTip("Настройки")
+        settings_btn.clicked.connect(self._toggle_settings)
         self._collapse_btn = NtButton("▲", accent=theme.ACCENT)
-        self._collapse_btn.setFixedSize(26, 26)
+        self._collapse_btn.setFixedSize(_ICON_BTN, _ICON_BTN)
         self._collapse_btn.clicked.connect(self._toggle_collapse)
         close_btn = NtButton("×", accent=theme.ACCENT_RED)
-        close_btn.setFixedSize(26, 26)
+        close_btn.setFixedSize(_ICON_BTN, _ICON_BTN)
         close_btn.clicked.connect(self.close)
         header.addWidget(self._status_dot)
         header.addSpacing(6)
         header.addWidget(title)
         header.addStretch()
+        header.addWidget(settings_btn)
         header.addWidget(self._collapse_btn)
         header.addWidget(close_btn)
         layout.addLayout(header)
@@ -136,66 +176,69 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         sep.setFixedHeight(1)
         sep.setStyleSheet(f"background:{theme.BORDER_DIM};")
         layout.addWidget(sep)
-        layout.addSpacing(2)
+        # Air between the title bar's rule and the GAMES / JOBS / PANEL
+        # captions — only above them; the gap to their own tiles stays tight.
+        layout.addSpacing(_BOARD_TOP_GAP)
 
-        # ── Module buttons ──────────────────────────────────────────────────
+        # ── Three columns of big tiles ──────────────────────────────────────
+        # GAMES — the modules that play something, one under another.
+        # JOBS  — the two that grind a profession.
+        # PANEL — the helper's own windows.
+        # Every tile stretches to fill the board, so the buttons are the
+        # window's main surface and the log takes the rest.
         self._module_buttons: dict[str, NtButton] = {}
+        board = QHBoxLayout()
+        board.setSpacing(theme.SPACING)
 
-        def add_modules(slot: str):
-            for module_cls in MODULES:
-                if getattr(module_cls, "panel_slot", "top") != slot:
-                    continue
-                btn = NtButton(self._module_label(module_cls.name, False),
-                               accent=getattr(module_cls, "color", None),
-                               upper=False)
-                btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
-                self._module_buttons[module_cls.name] = btn
-                layout.addWidget(btn)
+        games = [m for m in MODULES if getattr(m, "panel_slot", "top") == "top"]
+        jobs  = [m for m in MODULES if getattr(m, "panel_slot", "top") == "bottom"]
 
-        add_modules("top")
-        # Хоккей graduated to a real, registered module too (see MODULES)
-        # — no placeholders left here.
-        add_modules("bottom")
+        def module_tile(module_cls) -> NtButton:
+            btn = self._tile(self._module_label(module_cls.name, False),
+                             getattr(module_cls, "color", None))
+            btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
+            self._module_buttons[module_cls.name] = btn
+            return btn
 
-        layout.addSpacing(6)
+        columns = [
+            ("GAMES", [module_tile(m) for m in games]),
+            ("JOBS",  [module_tile(m) for m in jobs]),
+            ("PANEL", [self._tile("Stats", theme.ACCENT_CYAN,
+                                  self._toggle_stats),
+                       self._tile("Promo codes", theme.ACCENT_CYAN,
+                                  self._toggle_promo_window)]),
+        ]
+        # A column of its own per group; the tiles keep their own height, so a
+        # short column simply ends earlier instead of stretching its buttons.
+        for index, (caption, tiles) in enumerate(columns):
+            if index:
+                board.addStretch(1)   # slack shared evenly between columns
+            strip = QVBoxLayout()
+            strip.setSpacing(6)          # caption sits close to its column
+            strip.addWidget(self._caption(caption))
+            stack = QVBoxLayout()        # …the tiles themselves breathe more
+            stack.setSpacing(_TILE_GAP)
+            for tile in tiles:
+                stack.addWidget(tile)
+            strip.addLayout(stack)
+            strip.addStretch()
+            board.addLayout(strip, 0)
+        layout.addLayout(board, stretch=_BOARD_SHARE)
 
         # ── Log section ─────────────────────────────────────────────────────
-        # Clearing moved up here as a small button on the heading row: it is
-        # an action on the log itself, and it frees the full-width slot below
-        # for something worth pressing often.
+        # The bottom third: clearing and copying stay as small buttons on the
+        # heading row.
         self.log_panel = LogPanel()
-        self.log_panel.setMinimumHeight(80)
+        self.log_panel.setMinimumHeight(90)
+        self.log_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         log_head = QHBoxLayout()
-        log_label = QLabel("LOG")
-        log_label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
-        log_label.setStyleSheet(
-            f"color:{theme.TEXT_PRIMARY}; background:transparent;"
-        )
-        log_head.addWidget(log_label)
+        log_head.addWidget(self._caption("LOG"))
         log_head.addStretch()
         log_head.addLayout(build_log_actions(self.log_panel, theme.BORDER_BRIGHT))
         layout.addLayout(log_head)
 
-        layout.addWidget(self.log_panel, stretch=1)
-
-        stats_btn = NtButton("Статистика", upper=False,
-                             accent=theme.ACCENT_CYAN)
-        stats_btn.setMinimumHeight(30)
-        stats_btn.clicked.connect(self._toggle_stats)
-        layout.addWidget(stats_btn)
-
-        promo_btn = NtButton("Промокоды", upper=False,
-                             accent=theme.ACCENT_CYAN)
-        promo_btn.setMinimumHeight(30)
-        promo_btn.clicked.connect(self._toggle_promo_window)
-        layout.addWidget(promo_btn)
-
-        settings_btn = NtButton("Настройки", accent=theme.ACCENT,
-                                upper=False, filled=True)
-        settings_btn.setMinimumHeight(30)
-        settings_btn.clicked.connect(self._toggle_settings)
-        layout.addWidget(settings_btn)
+        layout.addWidget(self.log_panel, stretch=_LOG_SHARE)
 
         # ── Backdrop: templates/AvaHelper.* by default, video first ──────────
         self._panel.background_failed.connect(
@@ -208,6 +251,30 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         drag.mousePressEvent = self._drag_press
         drag.mouseMoveEvent  = self._drag_move
         layout.addWidget(drag)
+
+    # ── Layout helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _caption(text: str) -> QLabel:
+        """Small dim heading over a group — МОДЫ, LOG."""
+        label = QLabel(text)
+        label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
+        label.setStyleSheet(
+            f"color:{theme.TEXT_SECONDARY}; background:transparent;")
+        return label
+
+    @staticmethod
+    def _tile(text: str, accent: str, on_click=None) -> NtButton:
+        """One slab on the board — the launcher's main surface."""
+        btn = NtButton(text, accent=accent)
+        btn.setFixedWidth(_TILE_W)
+        btn.setMinimumHeight(_TILE_H)
+        btn.setMaximumHeight(_TILE_MAX_H)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        btn.setFont(theme.get_mono_font(theme.FONT_SIZE_M))
+        if on_click is not None:
+            btn.clicked.connect(on_click)
+        return btn
 
     # ── Backdrop ─────────────────────────────────────────────────────────────
 
@@ -287,7 +354,9 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
     @staticmethod
     def _module_label(name: str, active: bool) -> str:
-        return f"{'Выключить' if active else 'Включить'} мод {name}"
+        # The tile says what the module is, in English; whether it is running
+        # is the accent's job (set_active), not the label's.
+        return _DISPLAY_NAMES.get(name, name)
 
     def _set_module_active(self, name: str, active: bool):
         btn = self._module_buttons.get(name)
@@ -325,6 +394,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             config          = self.config.data.promo,
             save_fn         = self.config.save,
             window_manager  = self.wm,
+            stats           = self.stats,
             overlay         = self,
         )
         window.closed.connect(self._on_promo_window_closed)
@@ -338,38 +408,75 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
     def _on_promo_window_closed(self):
         self._promo_window = None
 
-    def set_promo_watch_enabled(self, enabled: bool):
-        running = self._promo_watch is not None
+    def set_promo_watch_enabled(self, enabled: bool, announce: bool = False):
+        """Starts/stops PromoAutoLoop — the once-a-minute autonomous
+        check-and-activate cycle behind "Запустить автоматический детект
+        промокодов". Called both from PromoWindow's own button (announce=True,
+        the user just turned it on) and once at startup, from whatever
+        config.data.promo.detect_enabled was last left at (announce=False —
+        resuming, not a fresh "on" the user should be told about)."""
+        running = self._promo_auto is not None
         if enabled == running:
             return
         if enabled:
-            last_id = getattr(self.config.data.promo, "last_post_id", "")
-            watch = PromoWatch(last_post_id=int(last_id) if last_id else 0)
-            watch.code_found.connect(self._on_promo_code_found)
-            watch.armed.connect(self._on_promo_armed)
-            watch.error.connect(self._on_promo_error)
-            self._promo_watch = watch
-            watch.start()
+            loop = PromoAutoLoop(get_hwnd=self.wm.get_game_hwnd)
+            loop.starting.connect(self._on_promo_starting)
+            loop.submitted.connect(self._on_promo_submitted)
+            loop.confirmed.connect(self._on_promo_confirmed)
+            loop.failed.connect(self._on_promo_failed)
+            loop.unknown_error.connect(self._on_promo_unknown_error)
+            loop.error.connect(self._on_promo_error)
+            loop.recovered.connect(self._on_promo_recovered)
+            self._promo_auto = loop
+            loop.start()
+            if announce:
+                self.add_log(
+                    "[Промокоды] Активирован автодетект промокодов - Успешно",
+                    level="plain")
         else:
-            self._promo_watch.stop_watch()
-            self._promo_watch.wait()
-            self._promo_watch = None
+            self._promo_auto.stop_loop()
+            self._promo_auto.wait()
+            self._promo_auto = None
 
-    def _on_promo_code_found(self, code: str, post_id: int):
-        QApplication.clipboard().setText(code)
-        self.config.data.promo.last_post_id = str(post_id)
-        self.config.save()
+    # These mirror PromoWindow's own handlers (same signal shapes, since
+    # both PromoActivateFlow and PromoAutoLoop share promo_activate.run_entry)
+    # — logged here too, in the helper's main log, not only the promo
+    # window's own one, since this loop runs whether or not that window
+    # is even open. Expired/already-activated entries are not logged here
+    # at all — that noise belongs only to the "Вывести данные" button's own
+    # one-off listing, not to a check running every minute in the
+    # background; PromoAutoLoop simply skips them without a signal.
+
+    def _on_promo_starting(self, entry):
+        self.add_log(
+            f"[Промокоды] Обнаружен новый промокод {entry.code} - Активируем...",
+            level="plain")
+
+    def _on_promo_submitted(self, entry):
+        title = entry.title or "без названия"
         self.add_log_segments(
-            [("Новый промокод скопирован: ", theme.TEXT_SECONDARY),
-             (code, theme.ACCENT_GREEN)])
+            [("[Промокоды] ", theme.TEXT_SECONDARY),
+             ("Активирован", theme.ACCENT_GREEN),
+             (f" промокод {entry.code} — {title}", theme.TEXT_SECONDARY)],
+            level="plain")
 
-    def _on_promo_armed(self, post_id: int):
-        self.config.data.promo.last_post_id = str(post_id)
-        self.config.save()
-        self.add_log("Слежу за новыми промокодами в Telegram", level="plain")
+    def _on_promo_confirmed(self, entry):
+        self.stats.record_promo_activation()
+
+    def _on_promo_failed(self, entry):
+        self.add_log(f"[Промокоды] Не удалось активировать промокод {entry.code}",
+                     level="error")
+
+    def _on_promo_unknown_error(self, entry):
+        self.add_log(
+            "[Промокоды] Произошла неизвестная ошибка при активации промокода.",
+            level="plain")
 
     def _on_promo_error(self, message: str):
-        self.add_log(f"Промокоды: {message}", level="error")
+        self.add_log(f"[Промокоды] {message}", level="error")
+
+    def _on_promo_recovered(self):
+        self.add_log("[Промокоды] База промокодов снова доступна", level="plain")
 
     # ── Statistics ───────────────────────────────────────────────────────────
 
