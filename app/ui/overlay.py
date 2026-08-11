@@ -11,6 +11,7 @@ from app.core.stats import StatsManager
 from app.ui.promo_window import PromoWindow
 from app.ui import theme
 from app.ui.crt_power_mixin import CrtPowerMixin
+from app.ui.energy_window import EnergyWindow
 from app.ui.helper_settings_panel import HelperSettingsPanel
 from app.ui.module_window import _SAVE_DELAY_MS
 from app.ui.drag_mixin import BackgroundDragMixin
@@ -56,9 +57,16 @@ _LOG_SHARE   = 3
 # columns are spread across the window — first flush left, last flush right,
 # the slack shared out between them — so the backdrop breathes around them
 # instead of being papered over edge to edge.
-_TILE_W     = 210   # fits the longest face, "PROMO CODES", without clipping
-_TILE_H     = 52    # a floor and a ceiling, so a tall window gives air, not slabs
-_TILE_MAX_H = 78
+# One size for every tile on the board, whatever column it is in and however
+# many its column holds — a taller window gives air below them, not bigger
+# buttons in the short columns.
+_TILE_W = 210   # fits the longest face, "PROMO CODES", without clipping
+_TILE_H = 58
+
+# Кулинар has no module behind it yet — it holds its slot, and the game's
+# own rose-red, until there is something to switch on. (Энергия has its own
+# window now; its yellow lives in the theme as EN_YELLOW.)
+_COOK_ROSE = "#ef4b6b"
 
 _BOARD_TOP_GAP = 22   # separator → column captions
 _TILE_GAP      = 14   # between tiles inside a column
@@ -107,6 +115,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._panel: VwPanel | None = None
         self._promo_auto: PromoAutoLoop | None = None
         self._promo_window: PromoWindow | None = None
+        self._energy_window: EnergyWindow | None = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -200,13 +209,19 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             self._module_buttons[module_cls.name] = btn
             return btn
 
+        # Not modules yet — placeholders holding their slot (and their colour)
+        # on the board until there is something behind them to switch on.
+        cook   = self._tile("Кулинар", _COOK_ROSE)
+        energy = self._tile("Энергия", theme.EN_YELLOW, self._toggle_energy)
+
         columns = [
             ("GAMES", [module_tile(m) for m in games]),
-            ("JOBS",  [module_tile(m) for m in jobs]),
-            ("PANEL", [self._tile("Stats", theme.ACCENT_CYAN,
+            ("JOBS",  [module_tile(m) for m in jobs] + [cook]),
+            ("PANEL", [self._tile("Статистика", theme.ACCENT_CYAN,
                                   self._toggle_stats),
-                       self._tile("Promo codes", theme.ACCENT_CYAN,
-                                  self._toggle_promo_window)]),
+                       self._tile("Промокоды", theme.ACCENT_CYAN,
+                                  self._toggle_promo_window),
+                       energy]),
         ]
         # A column of its own per group; the tiles keep their own height, so a
         # short column simply ends earlier instead of stretching its buttons.
@@ -267,10 +282,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
     def _tile(text: str, accent: str, on_click=None) -> NtButton:
         """One slab on the board — the launcher's main surface."""
         btn = NtButton(text, accent=accent)
-        btn.setFixedWidth(_TILE_W)
-        btn.setMinimumHeight(_TILE_H)
-        btn.setMaximumHeight(_TILE_MAX_H)
-        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        btn.setFixedSize(_TILE_W, _TILE_H)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn.setFont(theme.get_mono_font(theme.FONT_SIZE_M))
         if on_click is not None:
             btn.clicked.connect(on_click)
@@ -345,6 +358,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             windows.append(self._stats_window)
         if self._promo_window is not None:
             windows.append(self._promo_window)
+        if self._energy_window is not None:
+            windows.append(self._energy_window)
         return windows
 
     def on_module_closed(self, module_name: str):
@@ -478,6 +493,32 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
     def _on_promo_recovered(self):
         self.add_log("[Промокоды] База промокодов снова доступна", level="plain")
 
+    # ── Energy ───────────────────────────────────────────────────────────────
+
+    def _toggle_energy(self):
+        if self._energy_window and self._energy_window.isVisible():
+            self._energy_window.close()
+            return
+
+        window = EnergyWindow(
+            config          = self.config.data.energy,
+            save_fn         = self.config.save,
+            window_manager  = self.wm,
+            stats           = self.stats,
+            overlay         = self,
+        )
+        window.closed.connect(self._on_energy_closed)
+        # Attach before the first show, same rule as every other window here
+        if self.wm.get_game_hwnd():
+            self.wm.attach_child(int(window.winId()))
+        window.show()
+        self._links.connect_windows(self, window, theme.EN_YELLOW)
+        self._energy_window = window
+        self.add_log("Открыто окно энергии")
+
+    def _on_energy_closed(self):
+        self._energy_window = None
+
     # ── Statistics ───────────────────────────────────────────────────────────
 
     def _toggle_stats(self):
@@ -516,9 +557,11 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             config_sect = getattr(self.config.data, module_cls.config_key, None)
             if config_sect and getattr(config_sect, "favorite", False):
                 self._toggle_module(module_cls)
-        # Not a module, but starred the same way and restored the same way
+        # Not modules, but starred the same way and restored the same way
         if getattr(self.config.data.stats_window, "favorite", False):
             self._toggle_stats()
+        if getattr(self.config.data.energy, "favorite", False):
+            self._toggle_energy()
 
     # ── Drag ────────────────────────────────────────────────────────────────
     # The title and the handle keep their own bindings; these two let the
@@ -630,6 +673,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
                 w.close()
         if self._stats_window:
             self._stats_window.close()
+        if self._energy_window:
+            self._energy_window.close()
 
         self._links.clear()   # nothing left to connect to
         self.set_promo_watch_enabled(False)

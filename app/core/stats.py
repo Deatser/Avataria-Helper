@@ -70,6 +70,27 @@ class JanitorStats:
 
 
 @dataclass
+class PromoStats:
+    activated: int = 0   # confirmed by RESULT_SUCCESS — see promo_activate.py
+
+
+@dataclass
+class EnergyStats:
+    """Что купило кафе — по одной строке на каждый товар из меню.
+
+    Три счётчика товаров держатся отдельно от потраченного: цены в игре
+    могут поменяться, а «сколько раз брали Брауни» — факт, который от этого
+    не зависит. Порядок полей — как в меню.
+    """
+    energy_bought:     int = 0
+    gold_spent:        int = 0
+    silver_spent:      int = 0
+    pie_bought:        int = 0   # Пирожок
+    cheesecake_bought: int = 0   # Чизкейк
+    brownie_bought:    int = 0   # Брауни
+
+
+@dataclass
 class AppStats:
     player: PlayerStats = field(default_factory=PlayerStats)
     ava_dancers: AvaDancersStats = field(default_factory=AvaDancersStats)
@@ -77,6 +98,8 @@ class AppStats:
     janitor: JanitorStats = field(default_factory=JanitorStats)
     snowboard: SnowboardStats = field(default_factory=SnowboardStats)
     hockey: HockeyStats = field(default_factory=HockeyStats)
+    promo: PromoStats = field(default_factory=PromoStats)
+    energy: EnergyStats = field(default_factory=EnergyStats)
 
 
 def shown(value, field_name: str) -> str:
@@ -146,6 +169,34 @@ class StatsManager:
         self.data.janitor.shifts_finished += 1
         self.save()
         self.daily.bump_cleanup("janitor")
+
+    def record_promo_activation(self):
+        """One promo code confirmed activated in-game — see
+        PromoActivateFlow.confirmed, the only signal this is wired to."""
+        self.data.promo.activated += 1
+        self.save()
+        self.daily.bump_promo()
+
+    def record_energy_purchase(self, energy: int = 0, gold: int = 0,
+                               silver: int = 0, pie: int = 0,
+                               cheesecake: int = 0, brownie: int = 0):
+        """Один законченный заход в кафе — целиком, не по товару.
+
+        Пишется один раз, когда закуп прошёл до конца (см.
+        EnergyFarmFlow.finished_run): всё, что куплено за заход, приходит
+        одной суммой и одинаково ложится и в общий итог, и в файл за день.
+        """
+        entity = self.data.energy
+        entity.energy_bought     += max(0, int(energy))
+        entity.gold_spent        += max(0, int(gold))
+        entity.silver_spent      += max(0, int(silver))
+        entity.pie_bought        += max(0, int(pie))
+        entity.cheesecake_bought += max(0, int(cheesecake))
+        entity.brownie_bought    += max(0, int(brownie))
+        self.save()
+        self.daily.bump_energy(energy=energy, gold=gold, silver=silver,
+                               pie=pie, cheesecake=cheesecake,
+                               brownie=brownie)
 
     def set_gardener_next_time(self, clean_next_time: str):
         """What the timer badge itself reads — overwrites whatever was

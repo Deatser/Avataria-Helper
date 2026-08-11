@@ -40,6 +40,22 @@ class DailyCleanupStats:
 
 
 @dataclass
+class DailyPromoStats:
+    activated: int = 0
+
+
+@dataclass
+class DailyEnergyStats:
+    """Своя копия EnergyStats — по той же причине, что и у остальных здесь."""
+    energy_bought:     int = 0
+    gold_spent:        int = 0
+    silver_spent:      int = 0
+    pie_bought:        int = 0
+    cheesecake_bought: int = 0
+    brownie_bought:    int = 0
+
+
+@dataclass
 class DailyStats:
     date:        str              = ""
     ava_dancers: DailyRunStats    = field(default_factory=DailyRunStats)
@@ -47,10 +63,14 @@ class DailyStats:
     hockey:      DailyRunStats    = field(default_factory=DailyRunStats)
     gardener:    DailyCleanupStats = field(default_factory=DailyCleanupStats)
     janitor:     DailyCleanupStats = field(default_factory=DailyCleanupStats)
+    promo:       DailyPromoStats  = field(default_factory=DailyPromoStats)
+    energy:      DailyEnergyStats = field(default_factory=DailyEnergyStats)
 
 
 _RUN_KEYS     = ("ava_dancers", "snowboard", "hockey")
 _CLEANUP_KEYS = ("gardener", "janitor")
+_ENERGY_FIELDS = ("energy_bought", "gold_spent", "silver_spent",
+                  "pie_bought", "cheesecake_bought", "brownie_bought")
 
 
 def _add(a: DailyStats, b: DailyStats) -> DailyStats:
@@ -66,6 +86,10 @@ def _add(a: DailyStats, b: DailyStats) -> DailyStats:
     for key in _CLEANUP_KEYS:
         ea, eb, er = getattr(a, key), getattr(b, key), getattr(total, key)
         er.shifts_finished = ea.shifts_finished + eb.shifts_finished
+    total.promo.activated = a.promo.activated + b.promo.activated
+    for name in _ENERGY_FIELDS:
+        setattr(total.energy, name,
+                getattr(a.energy, name) + getattr(b.energy, name))
     return total
 
 
@@ -103,6 +127,24 @@ class DailyLog:
     def bump_cleanup(self, module_key: str):
         data = self._load()
         getattr(data, module_key).shifts_finished += 1
+        save_dataclass(_path_for(_today_str()), data)
+
+    def bump_promo(self):
+        data = self._load()
+        data.promo.activated += 1
+        save_dataclass(_path_for(_today_str()), data)
+
+    def bump_energy(self, energy: int = 0, gold: int = 0, silver: int = 0,
+                    pie: int = 0, cheesecake: int = 0, brownie: int = 0):
+        """Тот же итог захода в кафе, что ушёл в общий счёт stats.json."""
+        data = self._load()
+        entity = data.energy
+        entity.energy_bought     += max(0, int(energy))
+        entity.gold_spent        += max(0, int(gold))
+        entity.silver_spent      += max(0, int(silver))
+        entity.pie_bought        += max(0, int(pie))
+        entity.cheesecake_bought += max(0, int(cheesecake))
+        entity.brownie_bought    += max(0, int(brownie))
         save_dataclass(_path_for(_today_str()), data)
 
     # ── Reading, aggregated ──────────────────────────────────────────────────

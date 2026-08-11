@@ -107,44 +107,55 @@ HK_TEXT        = "#e8f6ff"
 HK_BORDER      = "#1c3550"
 HK_BORDER_DIM  = "#0f2033"
 
+# ── Energy (Энергия window) ───────────────────────────────────────────────────
+# A bar at closing time: near-black room, one warm lamp, motes of light
+# drifting up through it. The accent is the yellow of the game's own energy
+# icon, and it is the only saturated thing in the window.
+EN_BG          = "#0b0a07"
+EN_SURFACE     = "#15120b"
+EN_ELEVATED    = "#211b10"
+EN_YELLOW      = "#f2d24b"   # module accent — the energy icon's own yellow
+EN_YELLOW_SOFT = "#f8e79a"
+EN_EMBER       = "#8a6a1e"
+EN_TEXT        = "#f3ecd8"
+EN_BORDER      = "#3a2f14"
+EN_BORDER_DIM  = "#231c0c"
+
 # ── Geometry ─────────────────────────────────────────────────────────────────
 RADIUS  = 8
 PADDING = 14
 SPACING = 8
 
 # ── Typography ───────────────────────────────────────────────────────────────
-# The four faces are shipped with the app rather than hoped for. Every
-# family these chains named first — JetBrains Mono, Ndot 55, Cinzel — turned
-# out not to be installed on the machine this runs on, so all four roles
-# were quietly falling through to Consolas and Courier New. That fallback,
-# not a design choice, is what the whole app looked like.
-#
-# Three of them now live in assets/fonts and are registered at startup.
-# Ndot 55 is not among them and cannot be: its licence allows use only on
-# Nothing's own brand material and forbids passing the font on to anyone
-# else. It stays at the head of the display chain so that installing it by
-# hand still takes effect, and Comfortaa stands in until then.
+# Comfortaa, and nothing else, across every window, panel and log. The old
+# split — JetBrains Mono for body text, a display face for headings, Cinzel
+# for accents — is gone by request; the bundled files for the other faces
+# stay in assets/fonts but are no longer named by any chain.
 #
 # Comfortaa carries Latin, Cyrillic, digits, ∞ and the ←↓↑→ arrows the tile
-# readout draws (checked against its cmap). None of them carry ▲ ★ ☆ ⚙, so
-# Qt substitutes those from a system face glyph by glyph, as it already did
-# for everything missing before.
-FONT_MAIN          = "Comfortaa"
-FONT_MONO          = "JetBrains Mono"
-FONT_MONO_FALLBACK = "Consolas"
+# readout draws (checked against its cmap). It has no ▲ ★ ☆ ⚙, so Qt
+# substitutes those from a system face glyph by glyph, as it already did.
+#
+# It is a proportional face, so the log panel no longer aligns in columns
+# the way a monospace did — that is the cost of one family everywhere.
+FONT_MAIN   = "Comfortaa"
 FONT_SIZE_S = 11
 FONT_SIZE_M = 13
 FONT_SIZE_L = 16
 
 _FONT_DIR = Path(__file__).resolve().parents[2] / "assets" / "fonts"
 
-# Each role keeps its own face; Comfortaa is the shared stand-in behind
-# them, not a replacement for them.
-_MONO_CHAIN    = [FONT_MONO, FONT_MONO_FALLBACK, FONT_MAIN]
-_DISPLAY_CHAIN = ["Ndot 55", FONT_MAIN, "OCR A Extended", "Consolas", "Courier New"]
-_ROUND_CHAIN   = [FONT_MAIN, "Segoe UI", "Arial"]
-_SERIF_CHAIN   = ["Cinzel", FONT_MAIN, "Palatino Linotype", "Book Antiqua",
-                  "Georgia", "Times New Roman"]
+# The four getters survive as *voices* of Comfortaa rather than separate
+# faces: they differ by weight and letter-spacing only, which is what keeps
+# a single-family interface from reading flat. The chain remains so a
+# machine without the bundled file lands on a rounded system face, not
+# Courier.
+_UI_CHAIN = [FONT_MAIN, "Segoe UI", "Arial"]
+
+# The heading voice's letter-spacing, in absolute pixels. A window that
+# wants one uniform rhythm — headings and body alike — passes this through
+# apply_tracking() instead of the per-getter defaults below.
+TRACKING_DISPLAY = 2.0
 
 _loaded = False
 
@@ -175,28 +186,62 @@ def _pick(chain: list) -> str:
     return chain[-1]
 
 
-def get_mono_font(size: int = FONT_SIZE_M, bold: bool = False) -> QFont:
-    font = QFont(_pick(_MONO_CHAIN), size)
-    font.setBold(bold)
-    font.setLetterSpacing(QFont.AbsoluteSpacing, 0.3)
+def _comfortaa(size: int, bold: bool, tracking: float,
+               weight: QFont.Weight = QFont.Weight.Medium) -> QFont:
+    """One family, four voices.
+
+    Comfortaa's Regular reads thin against these dark panels, so plain text
+    sits at Medium and only emphasis goes to Bold. `tracking` is absolute
+    pixels, the same unit the old chains used.
+    """
+    font = QFont(_pick(_UI_CHAIN), size)
+    font.setWeight(QFont.Weight.Bold if bold else weight)
+    font.setLetterSpacing(QFont.AbsoluteSpacing, tracking)
     return font
+
+
+def get_mono_font(size: int = FONT_SIZE_M, bold: bool = False) -> QFont:
+    """Body voice: switch labels, buttons, log lines, stat values."""
+    return _comfortaa(size, bold, 0.2)
 
 
 def get_display_font(size: int = FONT_SIZE_L, bold: bool = True) -> QFont:
-    font = QFont(_pick(_DISPLAY_CHAIN), size)
-    font.setBold(bold)
-    font.setLetterSpacing(QFont.AbsoluteSpacing, 1.8)
-    return font
+    """Heading voice: window titles and section captions, mostly uppercase.
+
+    Wide tracking is what carries these — caps in a rounded face collapse
+    into a blob without it.
+    """
+    return _comfortaa(size, bold, TRACKING_DISPLAY,
+                      weight=QFont.Weight.DemiBold)
 
 
 def get_round_font(size: int = FONT_SIZE_M, bold: bool = False) -> QFont:
-    font = QFont(_pick(_ROUND_CHAIN), size)
-    font.setBold(bold)
-    return font
+    """Neutral voice: plain sentence-case labels, no extra tracking."""
+    return _comfortaa(size, bold, 0.0)
 
 
 def get_serif_font(size: int = FONT_SIZE_S, bold: bool = False) -> QFont:
-    font = QFont(_pick(_SERIF_CHAIN), size)
-    font.setBold(bold)
-    font.setLetterSpacing(QFont.AbsoluteSpacing, 0.8)
-    return font
+    """Accent voice: kept as a lighter, airier Comfortaa so the places that
+    asked for a serif still read as a step apart."""
+    return _comfortaa(size, bold, 0.9, weight=QFont.Weight.Normal)
+
+
+def tracked(font: QFont, tracking: float = TRACKING_DISPLAY) -> QFont:
+    """Copy of `font` with the given absolute letter-spacing."""
+    out = QFont(font)
+    out.setLetterSpacing(QFont.AbsoluteSpacing, tracking)
+    return out
+
+
+def apply_tracking(widget, tracking: float = TRACKING_DISPLAY):
+    """Give `widget` and every child the same letter-spacing.
+
+    The widgets set their own fonts in __init__ (body voice, narrow
+    tracking), so a font on the parent is not inherited — the only way to
+    make one window read with a single rhythm is to walk it and rewrite the
+    spacing, keeping each widget's own size and weight. Call it after the
+    tree is built, and again for anything created later.
+    """
+    from PySide6.QtWidgets import QWidget
+    for child in [widget, *widget.findChildren(QWidget)]:
+        child.setFont(tracked(child.font(), tracking))

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QTimer, Signal
 
+from app.core import energy_bar
 from app.core.duration import from_seconds
 from app.core.stats import shown
 from app.ui import theme
@@ -191,6 +192,7 @@ class StatsWindow(ModuleWindow):
         self._name_value  = self._add_row(layout, "Имя")
         self._date_value  = self._add_row(layout, "Регистрация")
         self._promo_value = self._add_row(layout, "Автоматическая активация промокодов")
+        self._promo_count_value = self._add_row(layout, "Кол-во активированных промокодов")
         layout.addSpacing(6)
 
         layout.addLayout(self._build_controls())
@@ -199,6 +201,8 @@ class StatsWindow(ModuleWindow):
         layout.addWidget(self._build_games_section())
         layout.addSpacing(8)
         layout.addWidget(self._build_professions_section())
+        layout.addSpacing(8)
+        layout.addWidget(self._build_panel_section())
         layout.addStretch()
 
         scroll.setWidget(content)
@@ -261,6 +265,48 @@ class StatsWindow(ModuleWindow):
         body.addWidget(self._section_label("САДОВНИК", theme.GD_OLIVE))
         body.addLayout(self._build_gardener_tiles())
         return section
+
+    def _build_panel_section(self) -> NeonSection:
+        """The helper's own windows — for now just Энергия's cafe runs."""
+        section = NeonSection("Панель", theme.EN_YELLOW)
+        body = section.body()
+
+        body.addWidget(self._section_label("ЭНЕРГИЯ", theme.EN_YELLOW))
+        body.addLayout(self._build_energy_tiles())
+        body.addSpacing(6)
+        body.addLayout(self._build_treat_tiles())
+        return section
+
+    def _build_energy_tiles(self) -> QGridLayout:
+        """What a cafe run costs and what it brought — three across."""
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(theme.SPACING)
+        self._energy_tile = StatTile("энергии куплено", accent=theme.EN_YELLOW)
+        self._energy_gold_tile = StatTile("золота потрачено",
+                                          accent=theme.ACCENT_AMBER)
+        self._energy_silver_tile = StatTile("серебра потрачено",
+                                            accent=theme.ACCENT_STEEL)
+        for column, tile in enumerate((self._energy_tile,
+                                       self._energy_gold_tile,
+                                       self._energy_silver_tile)):
+            grid.addWidget(tile, 0, column)
+        return grid
+
+    def _build_treat_tiles(self) -> QGridLayout:
+        """One tile per sweet on the cafe's menu, each in its own colour."""
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(theme.SPACING)
+        self._pie_tile = StatTile("Пирожок", accent=energy_bar.PIE.color)
+        self._cheesecake_tile = StatTile("Чизкейк",
+                                         accent=energy_bar.CHEESECAKE.color)
+        self._brownie_tile = StatTile("Брауни",
+                                      accent=energy_bar.BROWNIE.color)
+        for column, tile in enumerate((self._pie_tile, self._cheesecake_tile,
+                                       self._brownie_tile)):
+            grid.addWidget(tile, 0, column)
+        return grid
 
     def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
@@ -381,7 +427,7 @@ class StatsWindow(ModuleWindow):
         glowing white both, not a dim label next to a lit-up value."""
         row = QHBoxLayout()
         row.setSpacing(theme.SPACING)
-        name = QLabel(caption)
+        name = QLabel(f"{caption}:")
         name.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
         name.setStyleSheet(f"color:{theme.TEXT_PRIMARY}; background:transparent;")
         self._glow(name)
@@ -491,6 +537,10 @@ class StatsWindow(ModuleWindow):
         snowboard = source("snowboard")
         gardener  = source("gardener")
         janitor   = source("janitor")
+        promo     = source("promo")
+        energy    = source("energy")
+
+        self._set_value(self._promo_count_value, str(promo.activated))
 
         self._set_tile(self._games_tile, ava.games_played, animate)
         self._set_tile(self._gold_tile, ava.gold_won, animate)
@@ -506,6 +556,14 @@ class StatsWindow(ModuleWindow):
 
         self._set_tile(self._cleanup_tile, gardener.shifts_finished, animate)
         self._set_tile(self._janitor_cleanup_tile, janitor.shifts_finished, animate)
+
+        self._set_tile(self._energy_tile, energy.energy_bought, animate)
+        self._set_tile(self._energy_gold_tile, energy.gold_spent, animate)
+        self._set_tile(self._energy_silver_tile, energy.silver_spent, animate)
+        self._set_tile(self._pie_tile, energy.pie_bought, animate)
+        self._set_tile(self._cheesecake_tile, energy.cheesecake_bought, animate)
+        self._set_tile(self._brownie_tile, energy.brownie_bought, animate)
+
         self._update_countdown()
 
     def _set_tile(self, tile: StatTile, value: int, animate: bool):

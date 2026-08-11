@@ -283,6 +283,27 @@ class PromoConfig:
 
 
 @dataclass
+class EnergyConfig:
+    """Энергия — geometry, plus the one number the window is about.
+
+    Carries the same star as the module windows: starred → the overlay
+    reopens it at startup (see Overlay.restore_favorite_windows).
+    """
+    favorite: bool = False
+    position_saved: bool = False
+    x: int = 420
+    y: int = 60
+    width: int = 560
+    height: int = 480
+    # How much energy the bar run should buy. A setting, not a tally — what
+    # actually gets bought will be counted in stats.json when the run exists.
+    bar_amount: int = 200
+    # Which of the bar's two prices to pay — "silver" or "gold". See
+    # app/core/energy_bar.py for the menu itself.
+    pay_with: str = "gold"
+
+
+@dataclass
 class AppConfig:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     ava_dancers: AvaDancersConfig = field(default_factory=AvaDancersConfig)
@@ -292,6 +313,7 @@ class AppConfig:
     hockey: HockeyConfig = field(default_factory=HockeyConfig)
     stats_window: StatsWindowConfig = field(default_factory=StatsWindowConfig)
     promo: PromoConfig = field(default_factory=PromoConfig)
+    energy: EnergyConfig = field(default_factory=EnergyConfig)
 
 
 class ConfigManager:
