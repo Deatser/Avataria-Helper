@@ -5,7 +5,6 @@ import threading
 from pathlib import Path
 
 import cv2
-import mss
 from PySide6.QtCore import QThread, Signal
 
 from app.core.capture import grab_window, release_window_capture
@@ -23,9 +22,19 @@ MARKS: list[tuple[str, str]] = [
     ("11:00", "timer11min.png"),
 ]
 
-# No known screen coordinates for the timer, so this searches the whole
-# primary monitor rather than a fixed box. Each mark only needs to be caught
-# once, so this can afford to poll slower than the tile detector.
+# The timer's own box, located 2026-08-11 by matching timer4min.png against
+# a captured round (it landed at screen 1405,72 — 212x83), with room around
+# it for a different window size.
+#
+# This used to scan the whole primary monitor: five matchTemplate passes over
+# 2560x1440, measured at ~294ms of twelve-thread work every 300ms — the
+# machine pinned for the whole round, to produce one log line, while the
+# detector next to it needs the CPU. Inside this box the same five passes
+# cost about a millisecond.
+TIMER_REGION: dict = {"left": 1330, "top": 30, "width": 380, "height": 200}
+
+# Each mark only needs to be caught once, so this can afford to poll slower
+# than the tile detector.
 SEARCH_INTERVAL     = 0.3
 MATCH_THRESHOLD     = 0.95   # 0.98 turned out to never hit live — the game's
                              # own render (font smoothing, screen scaling) just
@@ -36,11 +45,6 @@ RETRIGGER_COOLDOWN  = 60.0   # a given mark can't reappear within a round; this
                              # just guards against catching it twice in one
                              # on-screen window, per mark, while still re-
                              # arming each one for the next round
-
-
-def _primary_monitor_region() -> dict:
-    with mss.mss() as sct:
-        return dict(sct.monitors[1])
 
 
 class SpeedupWatch(QThread):
@@ -81,7 +85,7 @@ class SpeedupWatch(QThread):
 
     def _loop(self, templates: list[tuple[str, "cv2.Mat"]]):
         self._stop_event.clear()
-        region  = _primary_monitor_region()
+        region  = TIMER_REGION
         last_match = {label: 0.0 for label, _ in templates}
         self.watch_started.emit()
 

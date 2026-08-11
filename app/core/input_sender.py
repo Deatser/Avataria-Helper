@@ -132,6 +132,75 @@ def press_key(hwnd: int, key: str) -> bool:
     return True
 
 
+def press_key_after(hwnd: int, key: str, delay_s: float) -> None:
+    """press_key, but at a chosen moment instead of right now — once.
+
+    AvaDancers works out from a note's own measured speed when it will reach
+    the hit line, and that lands between two of its capture polls far more
+    often than on one. Firing on the poll that decided would throw the
+    precision away and put the press up to a whole capture late. The
+    scheduler already running for KEYUP has millisecond resolution and one
+    thread, so the wait costs nothing and never blocks the caller's loop.
+
+    Exactly one press, deliberately. There used to be a press_key_burst here
+    that fired the same key three times 30ms apart, because the old detector
+    could only guess the moment to within a whole poll and a repeat covered
+    for landing outside the note's window. Once the moment became accurate
+    the repeats stopped being insurance and became the bug: the first press
+    takes the note, and the two behind it arrive at an empty lane, which the
+    game scores as wrong presses. A note is hit once or not at all.
+    """
+    if delay_s <= 0:
+        press_key(hwnd, key)
+        return
+    _delayed.call_later(delay_s, press_key, hwnd, key)
+
+
+_VK_BACK = 0x08
+# Comfortably longer than any promo code seen so far (~12 chars) plus
+# whatever a previous, only partly-cleared attempt could have left behind.
+_CLEAR_BACKSPACES = 24
+
+
+def clear_field(hwnd: int) -> bool:
+    """Empties a focused text field with plain, unmodified Backspace
+    presses.
+
+    Not Ctrl+A: PostMessage never changes the OS's own idea of which
+    modifier keys are actually down, so when Chromium decides whether a
+    keystroke is a shortcut it checks *real* modifier state and finds
+    Ctrl not held — a posted Ctrl+A then reads as a plain, unmodified 'A'
+    key instead of "select all", and gets typed as whatever character the
+    active OS keyboard layout maps that key to (a stray "ф" on a Russian
+    layout — confirmed live 2026-08-05, and it never actually cleared
+    the field, so repeated attempts kept stacking text on top of the
+    last). Plain, unmodified keys don't have that problem: press_key
+    already relies on exactly that for every ordinary game key.
+    """
+    if not hwnd:
+        return False
+    target = _input_target(hwnd)
+    _prime_focus(hwnd, target)
+    for _ in range(_CLEAR_BACKSPACES):
+        win32api.PostMessage(target, win32con.WM_KEYDOWN, _VK_BACK, 0)
+        win32api.PostMessage(target, win32con.WM_KEYUP, _VK_BACK, 0)
+    return True
+
+
+def type_text(hwnd: int, text: str) -> bool:
+    """Sends `text` into whatever field is currently focused, one
+    character at a time via WM_CHAR — same PostMessage approach press_key
+    uses for a single game key, just for arbitrary text (a promo code)
+    instead of one fixed VK code."""
+    if not hwnd or not text:
+        return False
+    target = _input_target(hwnd)
+    _prime_focus(hwnd, target)
+    for ch in text:
+        win32api.PostMessage(target, win32con.WM_CHAR, ord(ch), 0)
+    return True
+
+
 def _lparam(x: int, y: int) -> int:
     """Pack a point the way a mouse message carries it.
 

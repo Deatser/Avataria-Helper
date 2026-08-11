@@ -65,7 +65,7 @@ def test_classify_real_tile(name, expected):
     ("bonus",   True),
     ("bad",     False),
     ("dislike", False),
-    ("bomb",    True),
+    ("bomb",    False),   # a bomb is let through, not hit
 ])
 def test_pressable_matches_kind(name, pressable):
     assert classify_hsv(load_hsv(name)).pressable is pressable
@@ -128,3 +128,23 @@ def test_classify_white_tile_is_dislike():
     reading = classify_hsv(hsv)
     assert reading.kind == DISLIKE
     assert reading.pressable is False
+
+
+# ── the bomb is found with room to spare ────────────────────────────────────
+
+def test_a_bomb_is_recognised_well_under_the_threshold():
+    """A missed bomb is a press on a tile that should have been let through,
+    so the fuse is looked for with a far lower bar than any other hue. The
+    reference bomb has to clear it by a wide margin."""
+    from modules.ava_dancers.tiles import _BOMB_MAGENTA_SHARE
+
+    reading = classify_hsv(load_hsv("bomb"))
+    assert reading.kind == BOMB
+    assert reading.magenta > _BOMB_MAGENTA_SHARE * 3
+
+
+def test_no_arrow_carries_any_magenta():
+    """The gap the low threshold lives in: measured over a recorded round,
+    real arrows show no magenta at all."""
+    for name in ("nice", "bonus", "dislike", "bad"):
+        assert classify_hsv(load_hsv(name)).magenta == 0.0

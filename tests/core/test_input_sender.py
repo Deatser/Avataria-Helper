@@ -28,6 +28,42 @@ def test_press_key_case_insensitive():
     assert VK_MAP.get("a") == VK_MAP.get("A".lower())
 
 
+# ── A scheduled press is exactly one press ──────────────────────────────────
+
+def test_press_key_after_sends_the_key_once(monkeypatch):
+    """AvaDancers hits a note once or not at all.
+
+    This used to fire the same key three times 30ms apart, to cover for a
+    detector that could only guess the moment to within a whole poll. Once
+    the moment became accurate, the two extra presses landed on an empty
+    lane and the game scored them as wrong presses.
+    """
+    from app.core import input_sender
+
+    downs = []
+    monkeypatch.setattr(input_sender.win32api, "PostMessage",
+                        lambda hwnd, msg, wp, lp:
+                        downs.append(wp) if msg == input_sender.win32con.WM_KEYDOWN
+                        else None)
+    monkeypatch.setattr(input_sender, "_input_target", lambda hwnd: hwnd)
+
+    input_sender.press_key_after(4242, "a", 0.0)
+
+    assert downs == [input_sender.VK_MAP["a"]]
+
+
+def test_press_key_after_defers_a_future_press(monkeypatch):
+    from app.core import input_sender
+
+    scheduled = []
+    monkeypatch.setattr(input_sender._delayed, "call_later",
+                        lambda delay, fn, *args: scheduled.append((delay, args)))
+
+    input_sender.press_key_after(4242, "s", 0.42)
+
+    assert scheduled == [(0.42, (4242, "s"))]
+
+
 # ── Clicks give the pointer back ────────────────────────────────────────────
 
 def test_a_point_outside_the_window_still_packs(monkeypatch):

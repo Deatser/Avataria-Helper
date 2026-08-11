@@ -13,6 +13,7 @@ from app.core.input_sender import press_key
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
                                      load_template, primary_monitor_region)
 from app.ui.calibration_overlay import CalibrationOverlay
+from app.ui.zones_overlay import ZonesOverlay
 from app.ui.module_window import ModuleWindow
 from app.ui.settings_panel import SettingsPanel
 from app.ui.widgets.nt_button import NtButton
@@ -24,6 +25,7 @@ from app.ui.widgets.log_panel import LogPanel
 from app.ui import theme
 from modules.ava_dancers.bot import (AvaBot, Thresholds, KEY_MAP,
                                      NICE, BONUS, BAD, DISLIKE, BOMB)
+from modules.ava_dancers.tracker import DEFAULT_GEOMETRY, LANES
 from modules.ava_dancers.entry_flow import EntryFlow
 from modules.ava_dancers.exit_flow import ExitFlow
 from modules.ava_dancers.game_over_watch import GameOverWatch
@@ -35,8 +37,6 @@ _DEFAULT_W = 420
 _DEFAULT_H = 570
 _MIN_H     = 510   # header + controls + tiles + log + actions + switch
 _MIN_W     = 300
-
-_SPEEDUP_BOOST_MS = 15_000   # how long to keep max poll rate / priority after a timer mark
 
 # Gap between clicking Старт and putting the detector back to work, so it
 # does not spend its first seconds polling a round that is still loading.
@@ -53,6 +53,18 @@ _FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
 # seeded as a plain rectangle; drag its edges or middle from there.
 _CALIB_DEFAULT_W = 300
 _CALIB_DEFAULT_H = 120
+
+# What the tracker reads, drawn over the game: one tall box per lane plus
+# the line where a press is committed and the line a note's bottom edge
+# is on when the key lands. A display only, nothing interactive.
+_ZONES_TEXT = "🔲  Зоны рядов"
+
+# Marking the four lanes out by hand, one box at a time — seeded off the
+# tracker's own geometry so the first box already lands roughly on lane 1
+# and each next one starts where the last was, shifted across. Only ever
+# needed when the layout changes and the numbers have to be re-read.
+_LANES_CALIB_TEXT  = "📏  Разметить 4 ряда"
+_LANES_CALIB_NEXT  = "📏  Записать ряд {n}/4"
 
 _CALIB_START_TEXT = "📐  Область награды"
 _CALIB_STOP_TEXT  = "📐  Записать область"
@@ -149,6 +161,9 @@ class AvaDancersWindow(ModuleWindow):
         self._finish_timer: QTimer | None = None
         self._finish_ticks = 0
         self._calib = CalibrationOverlay(window_manager, reference=self)
+        self._zones_overlay = ZonesOverlay(window_manager, reference=self)
+        self._lane_calib_step = 0            # 0 = not marking, 1..4 = this lane
+        self._lane_calib_boxes: list[QRect] = []
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
         self.resize(max(w, _MIN_W), max(h, _MIN_H))
@@ -220,6 +235,16 @@ class AvaDancersWindow(ModuleWindow):
         # Calibration tools, not day-to-day controls — kept wired up for
         # when the reward templates need retuning, just hidden from the
         # normal view.
+        self._zones_btn = NtButton(_ZONES_TEXT, accent=theme.VW_PURPLE,
+                                   upper=False)
+        self._zones_btn.clicked.connect(self._toggle_zones_overlay)
+        layout.addWidget(self._zones_btn)
+
+        self._lanes_btn = NtButton(_LANES_CALIB_TEXT, accent=theme.VW_PURPLE,
+                                   upper=False)
+        self._lanes_btn.clicked.connect(self._toggle_lane_calib)
+        layout.addWidget(self._lanes_btn)
+
         detect_silver_btn = NtButton("🥈  Детект серебра", accent=theme.VW_PURPLE,
                                      upper=False)
         detect_silver_btn.clicked.connect(
@@ -386,6 +411,10 @@ class AvaDancersWindow(ModuleWindow):
         """
         self._bot = AvaBot(hwnd, self._thresholds())
         self._bot.tiles_seen.connect(self._on_tiles_seen)
+        self._bot.field_located.connect(
+            lambda msg: self._log.add_log(f"Калибровка: {msg}", level="plain"))
+        self._bot.diagnostics.connect(
+            lambda msg: self._log.add_log(msg, level="plain"))
         self._bot.error.connect(lambda e: self._log.add_log(e, level="error"))
         self._bot.start()
         self._start_speedup_watch(hwnd)
@@ -478,18 +507,16 @@ class AvaDancersWindow(ModuleWindow):
             self._speedup_watch = None
 
     def _on_speedup_detected(self, label: str, score: float):
+        """Purely a heads-up line now.
+
+        This used to also shove the detector's poll rate up for 15s, back
+        when a note had one poll's chance to be caught. The tracker measures
+        each note's speed for itself and schedules its press ahead of time,
+        so a speed wave is not something it has to be warned about.
+        """
         self._log_to_helper(
             f"нашёл отметку {label} (похожесть {score:.0%}): скоро волна ускорения"
         )
-        if self._bot and self._bot.isRunning():
-            self._bot.setPriority(QThread.TimeCriticalPriority)
-            self._bot.boost_poll_rate()
-            QTimer.singleShot(_SPEEDUP_BOOST_MS, self._end_speedup_boost)
-
-    def _end_speedup_boost(self):
-        if self._bot and self._bot.isRunning():
-            self._bot.setPriority(QThread.NormalPriority)
-            self._bot.reset_poll_rate()
 
     # ── Entry flow (menus → running round) ────────────────────────────────────
 
@@ -860,6 +887,120 @@ class AvaDancersWindow(ModuleWindow):
              (")", theme.TEXT_SECONDARY)],
             level="plain")
 
+    # ── Detection zones overlay ──────────────────────────────────────────────
+    # Everything the tracker looks at, drawn over the game so the calibration
+    # can be checked by eye: the tall box it reads in each lane, the line
+    # where a press gets committed, and the line a note's bottom edge is on
+    # when the key lands. Click-through, nothing reads back from it — a
+    # second press hides it again.
+
+    def _toggle_zones_overlay(self):
+        if self._zones_overlay.isVisible():
+            self._zones_overlay.clear()
+            self._zones_btn.set_active(False)
+            return
+
+        if not self._wm.get_game_hwnd():
+            self._log.add_log("Игровое окно не найдено", level="error")
+            return
+
+        geo = self._bot.geometry() if self._bot else DEFAULT_GEOMETRY
+        region = geo.region
+        zones = [
+            (QRect(region["left"] + i * geo.lane_w, region["top"],
+                   geo.lane_w, region["height"]), QColor(theme.VW_CYAN))
+            for i in range(LANES)
+        ]
+        zones.append((QRect(geo.left, geo.commit_y, geo.width, 2),
+                      QColor(theme.ACCENT_GREEN)))
+        zones.append((QRect(geo.left, geo.hit_y, geo.width, 2),
+                      QColor(theme.VW_MAGENTA)))
+        self._zones_overlay.show_zones(zones)
+        self._zones_btn.set_active(True)
+        self._log.add_log(
+            "Голубым — что читает детектор, зелёным — где решает жать, "
+            "розовым — где нота в момент нажатия.", level="plain")
+
+    # ── Marking out the four lanes by hand ───────────────────────────────────
+    # The same draggable box as the reward calibration above, run four times
+    # in a row: press once to place lane 1, press again to record it and get
+    # lane 2's box, and so on. Nothing is saved anywhere — the four
+    # rectangles go to the log to be read off, which is the whole point. Only
+    # needed if the game's layout ever moves out from under tracker.py's own
+    # border lookup.
+
+    def _toggle_lane_calib(self):
+        if self._lane_calib_step == 0:
+            if not self._wm.get_game_hwnd():
+                self._log.add_log("Игровое окно не найдено", level="error")
+                return
+            self._lane_calib_boxes = []
+            self._lane_calib_step  = 1
+            self._show_lane_box()
+            self._log.add_log(
+                "Разметка рядов: тяните за середину, чтобы подвинуть, за край "
+                "или угол — чтобы изменить размер. Обведите ряд целиком, "
+                "сверху донизу. Кнопка ещё раз — записать и перейти к "
+                f"следующему из {LANES}.", level="plain")
+            return
+
+        self._lane_calib_boxes.append(self._calib.bounds())
+        self._log_lane_box(self._lane_calib_step, self._lane_calib_boxes[-1])
+        if self._lane_calib_step >= LANES:
+            self._finish_lane_calib()
+            return
+        self._lane_calib_step += 1
+        self._show_lane_box()
+
+    def _show_lane_box(self):
+        """Seed the next box: lane 1 off the tracker's own geometry, every one
+        after that from the box just recorded, shifted across by its own
+        width — so four lanes cost four nudges, not four drags."""
+        geo = self._bot.geometry() if self._bot else DEFAULT_GEOMETRY
+        if self._lane_calib_boxes:
+            prev = self._lane_calib_boxes[-1]
+            box = QRect(prev.left() + prev.width(), prev.top(),
+                        prev.width(), prev.height())
+        else:
+            box = QRect(geo.left, geo.top, geo.lane_w, geo.height)
+        self._calib.show_at(box)
+        self._lanes_btn.setText(_LANES_CALIB_NEXT.format(n=self._lane_calib_step))
+        self._lanes_btn.set_active(True)
+
+    def _log_lane_box(self, n: int, box: QRect):
+        self._log.add_log_segments(
+            [(f"Ряд {n} — ", theme.TEXT_SECONDARY),
+             ("left", theme.VW_CYAN), (f" {box.left()}", theme.VW_MAGENTA),
+             ("  top", theme.VW_CYAN), (f" {box.top()}", theme.VW_MAGENTA),
+             ("  width", theme.VW_CYAN), (f" {box.width()}", theme.VW_MAGENTA),
+             ("  height", theme.VW_CYAN), (f" {box.height()}", theme.VW_MAGENTA),
+             ("   right", theme.TEXT_SECONDARY),
+             (f" {box.left() + box.width()}", theme.VW_MAGENTA),
+             ("  bottom", theme.TEXT_SECONDARY),
+             (f" {box.top() + box.height()}", theme.VW_MAGENTA)],
+            level="plain")
+
+    def _finish_lane_calib(self):
+        """All four recorded — hide the box and print one line carrying the
+        whole set, so it can be copied out in one go."""
+        self._calib.clear()
+        self._lane_calib_step = 0
+        self._lanes_btn.setText(_LANES_CALIB_TEXT)
+        self._lanes_btn.set_active(False)
+        payload = ", ".join(
+            f'{{"left": {b.left()}, "top": {b.top()}, '
+            f'"width": {b.width()}, "height": {b.height()}}}'
+            for b in self._lane_calib_boxes)
+        self._log.add_log(f"LANES = [{payload}]", level="success")
+
+    def _cancel_lane_calib(self):
+        if self._lane_calib_step == 0:
+            return
+        self._lane_calib_step = 0
+        self._lane_calib_boxes = []
+        self._lanes_btn.setText(_LANES_CALIB_TEXT)
+        self._lanes_btn.set_active(False)
+
     # ── Favorite ─────────────────────────────────────────────────────────────
 
     def _toggle_favorite(self):
@@ -889,3 +1030,5 @@ class AvaDancersWindow(ModuleWindow):
         self._stop_round_threads()
         self._stop_entry_flow()
         self._calib.clear()
+        self._cancel_lane_calib()
+        self._zones_overlay.clear()
