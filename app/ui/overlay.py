@@ -1,12 +1,21 @@
 # app/ui/overlay.py
 from __future__ import annotations
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QApplication, QDialog, QSizePolicy)
 from PySide6.QtCore import Qt, QPoint, QTimer
 
+from app.core.pause_watch import (PLACES_WAIT_S, GameReadyWatch, PauseRecovery,
+                                  PauseWatch)
 from app.core.promo_activate import PromoAutoLoop
+from app.core.restart_state import (HELPER_LOG, REASON_BREAK, REASON_MANUAL,
+                                    REASON_PAUSE, REASON_STUCK, RestartInfo,
+                                    take_logs, write_logs, write_restart)
 from app.core.stats import StatsManager
 from app.ui.promo_window import PromoWindow
 from app.ui import theme
@@ -68,6 +77,15 @@ _TILE_H = 58
 # window now; its yellow lives in the theme as EN_YELLOW.)
 _COOK_ROSE = "#ef4b6b"
 
+# Как часто можно перезапускаться из-за техперерыва. Перерыв длится часами и
+# перезапуском не лечится — это просто регулярная проверка, не кончился ли он.
+BREAK_RETRY_S = 300.0
+
+# Сколько мод после перезапуска имеет на то, чтобы дойти до игры и начать в
+# неё играть. Щедро: вход в игру — это несколько экранов с анимациями, плюс
+# сама игра стартует не мгновенно.
+PLAYING_CHECK_MS = 180_000
+
 _BOARD_TOP_GAP = 22   # separator → column captions
 _TILE_GAP      = 14   # between tiles inside a column
 _ICON_BTN   = 26    # < NtButton._SMALL_W → centred glyph, no accent bar
@@ -114,6 +132,19 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._pending_logs: list[tuple[list, str]] = []
         self._panel: VwPanel | None = None
         self._promo_auto: PromoAutoLoop | None = None
+        self._pause_watch = PauseWatch(get_hwnd=self.wm.get_game_hwnd)
+        self._pause_watch.pause_seen.connect(self._on_pause_detected)
+        self._pause_watch.break_seen.connect(self._on_break_detected)
+        self._pause_watch.error.connect(
+            lambda msg: self.add_log(f"[Пауза] {msg}", level="error"))
+        self._pause_recovery: PauseRecovery | None = None
+        self._paused_modules: list[str] = []
+        # Записка от прошлого запуска (см. app/core/restart_state.py) и
+        # признак того, что мы сами сейчас уходим на перезапуск.
+        self._restart_info = None
+        self._restarting   = False
+        self._saved_logs: dict[str, str] = {}   # логи окон до перезапуска
+        self._ready_watch: GameReadyWatch | None = None
         self._promo_window: PromoWindow | None = None
         self._energy_window: EnergyWindow | None = None
 
@@ -135,6 +166,11 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
         self.set_promo_watch_enabled(
             getattr(config.data.promo, "detect_enabled", False))
+
+        # Зависания игры караулятся всегда, а не только пока включён какой-то
+        # мод: окно «Пауза» встаёт поверх игры само по себе, и увидеть его
+        # некому, если каждый мод смотрит только за своим экраном.
+        self._pause_watch.start()
 
     def _build_ui(self):
         self._panel = VwPanel(self)
@@ -333,6 +369,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             stats          = self.stats,
         )
         self._open_windows[name] = window
+        # Если этот мод был открыт до перезапуска — вернуть ему его лог.
+        self._restore_window_log(window)
 
         # Attach BEFORE the first show. Re-parenting an already-shown window
         # leaves Qt's deferred update() path dead: repaint() still draws, but
@@ -492,6 +530,314 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
     def _on_promo_recovered(self):
         self.add_log("[Промокоды] База промокодов снова доступна", level="plain")
+
+    # ── Зависание игры ───────────────────────────────────────────────────────
+    # PauseWatch видит окно «Пауза», дальше всё разыгрывается здесь: какой мод
+    # работал — тот и гасим, ОК жмёт PauseRecovery, а как только вернулись
+    # «Места», гашеные моды включаются обратно и сами идут по своим кнопкам.
+    # Лог пишется в оба окна — в общий и в окно самого мода: с точки зрения
+    # мода это его забег оборвался, а не что-то абстрактное в помощнике.
+
+    def _running_module_windows(self) -> list[QWidget]:
+        return [w for w in self._open_windows.values()
+                if getattr(w, "module_is_running", None) and w.module_is_running()]
+
+    def _pause_log(self, message: str, level: str = "info",
+                   windows: list[QWidget] | None = None):
+        self.add_log(f"[Пауза] {message}", level=level)
+        for window in (self._running_module_windows() if windows is None
+                       else windows):
+            if hasattr(window, "module_log"):
+                window.module_log(f"[Пауза] {message}", level=level)
+
+    def _on_break_detected(self, score: float):
+        """Технический перерыв — перезапускаем игру.
+
+        Перезапуск перерыва не отменяет: игра поднимется и покажет ту же
+        заставку. Поэтому подряд не долбим — если прошлый перезапуск был по
+        этой же причине и меньше BREAK_RETRY_S назад, просто ждём. Следующий
+        повод придёт сам: PauseWatch повторяет сигнал раз в пять минут, пока
+        заставка висит.
+        """
+        self.add_log(f"[Пауза] Технический перерыв — заставка на экране "
+                     f"({score:.0%}), игре нужен перезапуск",
+                     level="error")
+
+        if self._since_break_restart() < BREAK_RETRY_S:
+            self.add_log("[Пауза] Перерыв продолжается — ждём и пробуем позже",
+                         level="plain")
+            return
+        self.request_restart(REASON_BREAK)
+
+    def _since_break_restart(self) -> float:
+        """Сколько секунд прошло с перезапуска из-за перерыва. Огромное
+        число, если такого перезапуска не было."""
+        if self._restart_info is None or self._restart_info.reason != REASON_BREAK:
+            return float("inf")
+        return max(0.0, time.time() - self._restart_info.at)
+
+    # ── Перезапуск игры вместе с помощником ──────────────────────────────────
+
+    def note_restart(self, info):
+        """Записка от прошлого запуска: почему мы перезапустились и кого
+        включить обратно. Кладётся сюда из main.py."""
+        self._restart_info = info
+
+    def request_restart(self, reason: str, modules: list[str] | None = None):
+        """Закрыть игру, поднять её заново и вернуться вместе с модами.
+
+        Своими силами это не сделать: наши окна — дочерние по отношению к
+        окну игры, и закрытие игры уничтожает их все. Поэтому работу делает
+        отдельный процесс (app/core/restarter.py), а помощник закрывается
+        сразу за ним и возвращается уже им запущенный.
+        """
+        if self._restarting:
+            return
+        self._restarting = True
+
+        # Работавшие моды плюс те, кого позвали явно: мод, попросивший
+        # перезапуск из-за зависшей игры, хочет вернуться независимо от того,
+        # успел ли его бот числиться запущенным в эту секунду.
+        wanted  = list(modules or [])
+        running = [w.module_name for w in self._running_module_windows()]
+        modules = wanted + [name for name in running if name not in wanted]
+        if not modules and self._restart_info is not None:
+            # Повторный заход: моды до сюда не дожили — включить их не успели,
+            # игра так и не загрузилась. Список берём из прошлой записки,
+            # иначе он потеряется на первом же неудачном перезапуске.
+            modules = list(self._restart_info.modules)
+        for window in self._running_module_windows():
+            window.module_log("[Пауза] Перезапускаем игру", level="error")
+        if modules:
+            self.add_log("[Пауза] После перезапуска включу обратно: "
+                         + ", ".join(modules), level="plain")
+        write_restart(reason, modules)
+        self._save_logs()
+
+        try:
+            subprocess.Popen([sys.executable, "-m", "app.core.restarter",
+                              str(os.getpid())], cwd=str(_PROJECT_ROOT))
+        except Exception as exc:
+            self._restarting = False
+            self.add_log(f"[Пауза] Перезапуск не запустился: {exc}",
+                         level="error")
+            return
+
+        self.add_log("[Пауза] Закрываем помощник — вернёмся сами",
+                     level="plain")
+        self.close()
+
+    # ── Логи через перезапуск ────────────────────────────────────────────────
+    # Перезапуск уносит окна вместе с их логами, а читать по возвращении надо
+    # именно то, что было до него: причину, последние забеги, что делал мод.
+    # Сохраняется готовый HTML — с цветами и отметками времени, как было на
+    # экране, — и вставляется наверх панели, над строками новой сессии.
+
+    def _save_logs(self):
+        panels = {HELPER_LOG: self.log_panel.toHtml()}
+        for name, window in self._open_windows.items():
+            log = getattr(window, "_log", None)
+            if log is not None and hasattr(log, "toHtml"):
+                panels[name] = log.toHtml()
+        write_logs(panels)
+
+    def restore_logs(self):
+        """Вставить сохранённый лог в главное окно. Окна модов забирают свой
+        сами, когда открываются, — см. _restore_window_log."""
+        self._saved_logs = take_logs()
+        html = self._saved_logs.pop(HELPER_LOG, "")
+        if html:
+            self.log_panel.prepend_html(html)
+            self.add_log("[Пауза] Выше — лог до перезапуска", level="plain")
+
+    def _restore_window_log(self, window):
+        html = self._saved_logs.pop(getattr(window, "module_name", ""), "")
+        log = getattr(window, "_log", None)
+        if html and log is not None and hasattr(log, "prepend_html"):
+            log.prepend_html(html)
+            log.add_log("[Пауза] Выше — лог до перезапуска", level="plain")
+
+    def resume_after_restart(self):
+        """Дождаться, пока игра догрузится, и включить моды, которые работали
+        до перезапуска.
+
+        Ждём не по часам, а по картинке: окно игры появляется задолго до
+        того, как в неё можно жать, и единственный честный признак «всё
+        загрузилось» — кнопка «Места» на экране. Ждать её можно долго,
+        перезапуск бывает небыстрым; но если за десять минут она так и не
+        появилась, значит поднялось что-то не то, и перезапуск повторяется.
+        """
+        info = self._restart_info
+        if info is None:
+            return
+        names = list(info.modules)
+        self.add_log("[Пауза] Ждём загрузки игры — «Места» на экране",
+                     level="plain")
+
+        watch = GameReadyWatch(get_hwnd=self.wm.get_game_hwnd)
+        watch.ready.connect(lambda _score, n=names: self._on_game_ready(n))
+        watch.timed_out.connect(self._on_game_not_ready)
+        watch.error.connect(
+            lambda msg: self.add_log(f"[Пауза] {msg}", level="error"))
+        # Ссылка снимается по finished, а не в обработчике сигнала: там поток
+        # ещё внутри run(), и снос последней ссылки на живой QThread роняет
+        # приложение целиком. Ровно то же правило, что у PauseRecovery.
+        watch.finished.connect(self._clear_ready_watch)
+        self._ready_watch = watch
+        watch.start()
+
+    def _clear_ready_watch(self):
+        self._ready_watch = None
+
+    def _on_game_ready(self, names: list[str]):
+        self.add_log("[Пауза] Игра загрузилась", level="success")
+        if not names:
+            return
+        self._resume_modules(names)
+        # Включить мало — надо убедиться, что он доехал до игры.
+        QTimer.singleShot(PLAYING_CHECK_MS, lambda: self._verify_playing(names))
+
+    def _on_game_not_ready(self):
+        self.add_log(f"[Пауза] Игра не загрузилась за "
+                     f"{int(PLACES_WAIT_S // 60)} мин — перезапускаем ещё раз",
+                     level="error")
+        reason = self._restart_info.reason if self._restart_info else REASON_MANUAL
+        self.request_restart(reason)
+
+    def _resume_modules(self, names: list[str]):
+        by_name = {m.name: m for m in MODULES}
+        for name in names:
+            module_cls = by_name.get(name)
+            if module_cls is None:
+                continue
+            window = self._open_windows.get(name)
+            if window is None:
+                # Именно «нет окна», а не «оно невидимо»: _toggle_module —
+                # переключатель, и на уже открытом моде он его закроет.
+                self._toggle_module(module_cls)
+                window = self._open_windows.get(name)
+            if window is not None and hasattr(window, "module_start"):
+                window.module_start()
+                self.add_log(f"[Пауза] Мод {name} включён после перезапуска",
+                             level="plain")
+
+    # ── Доехал ли мод до игры ────────────────────────────────────────────────
+
+    def _verify_playing(self, names: list[str]):
+        """Через PLAYING_CHECK_MS после включения — мод действительно играет?
+
+        «Включён» и «играет» — разные вещи: мод может застрять на входе в
+        игру, а его собственный детект залипшей кнопки сработает не всегда
+        (кнопки, которую он не нашёл, он и не нажимал). Если за отведённое
+        время признаков игры нет — перезапускаемся ещё раз.
+        """
+        stuck = []
+        for name in names:
+            window = self._open_windows.get(name)
+            if window is None or not hasattr(window, "module_is_playing"):
+                continue
+            if window.module_is_playing():
+                self.add_log(f"[Пауза] Мод {name} играет — перезапуск удался",
+                             level="success")
+            else:
+                stuck.append(name)
+        if not stuck:
+            return
+        self.add_log(f"[Пауза] Мод {', '.join(stuck)} так и не начал играть "
+                     f"за {PLAYING_CHECK_MS // 60_000} мин — перезапускаем",
+                     level="error")
+        self.request_restart(REASON_STUCK, stuck)
+
+    def _on_pause_detected(self, score: float):
+        if self._pause_recovery is not None:
+            return   # уже разбираемся с этим же зависанием
+        self._pause_watch.pause_checks()
+
+        stopped = self._running_module_windows()
+        self._pause_log(f"Игра зависла — на экране меню паузы ({score:.0%})",
+                        level="error", windows=stopped)
+
+        self._paused_modules = []
+        for window in stopped:
+            if window.module_stop():
+                self._paused_modules.append(window.module_name)
+                self._pause_log(f"Выключаю мод {window.module_name}",
+                                windows=[window])
+
+        recovery = PauseRecovery(get_hwnd=self.wm.get_game_hwnd)
+        recovery.ok_clicked.connect(self._on_pause_ok_clicked)
+        recovery.menu_cleared.connect(self._on_pause_menu_cleared)
+        recovery.restarted.connect(self._on_game_restarted)
+        recovery.failed.connect(self._on_pause_failed)
+        recovery.error.connect(
+            lambda msg: self.add_log(f"[Пауза] {msg}", level="error"))
+        self._pause_recovery = recovery
+        recovery.start()
+
+    def _paused_module_windows(self) -> list[QWidget]:
+        return [self._open_windows[name] for name in self._paused_modules
+                if name in self._open_windows]
+
+    def _on_pause_ok_clicked(self, attempt: int):
+        tail = "" if attempt == 1 else f" (попытка {attempt})"
+        self._pause_log(f"Нажимаю ОК в меню паузы{tail}",
+                        windows=self._paused_module_windows())
+
+    def _on_pause_menu_cleared(self):
+        self._pause_log("Меню паузы закрыто — ждём перезапуска игры",
+                        windows=self._paused_module_windows())
+
+    def _on_game_restarted(self):
+        windows = self._paused_module_windows()
+        self._pause_log("Игра успешно перезапущена", level="success",
+                        windows=windows)
+        self._end_pause_recovery()
+        for window in windows:
+            if window.module_start():
+                self._pause_log(f"Включаю мод обратно: {window.module_name}",
+                                windows=[window])
+        self._paused_modules = []
+
+    def _on_pause_failed(self, message: str):
+        """Кликами не вылечилось — остаётся перезапуск.
+
+        Моды на этот момент уже выключены (_on_pause_detected), поэтому
+        список для записки берётся из _paused_modules, а не из работающих.
+        """
+        windows = self._paused_module_windows()
+        self._pause_log(message, level="error", windows=windows)
+        self._end_pause_recovery()
+        if self._restart_info is None:
+            self._restart_info = RestartInfo(reason=REASON_PAUSE,
+                                             modules=list(self._paused_modules))
+        else:
+            self._restart_info.modules = list(self._paused_modules)
+        self._paused_modules = []
+        self.request_restart(REASON_PAUSE)
+
+    def _end_pause_recovery(self):
+        """Ссылка на поток снимается не здесь, а по его собственному finished
+        (см. _clear_pause_recovery): он в этот момент ещё внутри run(), и
+        уронить его сборщиком мусора — верный способ уронить и приложение."""
+        if self._pause_recovery is not None:
+            self._pause_recovery.stop_flow()
+            self._pause_recovery.finished.connect(self._clear_pause_recovery)
+        self._pause_watch.resume_checks()
+
+    def _clear_pause_recovery(self):
+        self._pause_recovery = None
+
+    def _stop_pause_watch(self):
+        if self._ready_watch is not None:
+            self._ready_watch.stop_watch()
+            self._ready_watch.wait(2000)
+            self._ready_watch = None
+        if self._pause_recovery is not None:
+            self._pause_recovery.stop_flow()
+            self._pause_recovery.wait(2000)
+            self._pause_recovery = None
+        self._pause_watch.stop_watch()
+        self._pause_watch.wait(2000)
 
     # ── Energy ───────────────────────────────────────────────────────────────
 
@@ -662,7 +1008,11 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             event.accept()
             return
 
-        if not self.config.data.overlay.skip_close_confirm and not self._confirm_close():
+        # На перезапуске спрашивать нечего: уходим не насовсем, и ждать
+        # ответа некому — перезапускатель уже считает секунды.
+        if not self._restarting and \
+                not self.config.data.overlay.skip_close_confirm and \
+                not self._confirm_close():
             event.ignore()
             return
 
@@ -678,6 +1028,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
         self._links.clear()   # nothing left to connect to
         self.set_promo_watch_enabled(False)
+        self._stop_pause_watch()
         self.crt_close_started()
         event.ignore()
 

@@ -20,6 +20,9 @@ def _qt_msg_handler(mode, context, message):
 
 from app.core.capture import release_all_capture
 from app.core.config import ConfigManager
+from app.core.launcher import open_game
+from app.core.restart_state import take_restart
+from app.core.term_log import tlog
 from app.core.stats import StatsManager
 from app.core.tropikania_config import TropikaniaConfigManager
 from app.core.tropikania_stats import TropikaniaStatsManager
@@ -27,6 +30,33 @@ from app.core.window_manager import WindowManager
 from app.ui.overlay import Overlay
 from app.ui.tropikania_overlay import TropikaniaOverlay
 from app.ui.raise_on_click import RaiseOnClick
+
+
+# Куда поставить окно помощника, если сохранённое место оказалось негодным —
+# отступ от левого верхнего угла игры.
+_FALLBACK_POS = (60, 60)
+
+
+def _repair_overlay_position(config, wm, overlay):
+    """Вправить позицию окна, если она вне клиентской области игры.
+
+    Прицепленное окно живёт в координатах клиентской области игры, а
+    отцепленное — в экранных, и config хранит последнее сохранённое из двух.
+    Запуск без игры, другой монитор, другое разрешение — и в файле остаются
+    координаты, по которым окно оказывается за краем экрана: видимое по всем
+    признакам, но не видное глазами (2026-08-12: x был -934).
+    """
+    rect = wm.get_game_rect()
+    if rect is None:
+        return
+    ov = config.data.overlay
+    fits_x = 0 <= ov.x <= max(0, rect.width  - overlay.width())
+    fits_y = 0 <= ov.y <= max(0, rect.height - overlay.height())
+    if fits_x and fits_y:
+        return
+    ov.x, ov.y = _FALLBACK_POS
+    config.save()
+    tlog(f"Окно помощника стояло вне игры — переставили в {_FALLBACK_POS}")
 
 
 def main():
@@ -38,6 +68,14 @@ def main():
     wm     = WindowManager()
 
     overlay = Overlay(config, wm, stats)
+    # Записка от прошлого запуска, если мы вернулись после перезапуска игры:
+    # почему ушли и кого включить обратно (см. app/core/restart_state.py).
+    restart_info = take_restart()
+    if restart_info is not None:
+        overlay.note_restart(restart_info)
+        tlog(f"Вернулись после перезапуска ({restart_info.reason})")
+    # Логи прошлой сессии — до того, как окна начнут писать свои строки.
+    overlay.restore_logs()
 
     # Clicking any window brings it forward — see RaiseOnClick. Kept on the
     # application and owned by it, so it outlives every window it serves.
@@ -55,9 +93,17 @@ def main():
     heartbeat.timeout.connect(lambda: None)
     heartbeat.start(500)
 
+    # Прежде всего — привести игру в рабочий вид: поднять из лаунчера, если
+    # её нет, и развернуть, если она свёрнута (см. app/core/launcher.py). До
+    # того как это закончится, окна помощника не показываются: их позиции
+    # считаются от клиентской области игры, и на неразвёрнутой они слипаются
+    # в углу.
+    open_game()
+
     found = wm.find_game("Аватария")
     if found:
-        print("Аватария found")
+        tlog("Аватария found")
+        _repair_overlay_position(config, wm, overlay)
         wm.attach_overlay(
             int(overlay.winId()),
             config.data.overlay.x,
@@ -65,14 +111,22 @@ def main():
             config.data.overlay.width,
             config.data.overlay.height,
         )
-    else:
-        print("Аватария not found — running standalone")
+    # Молча, если игры нет: помощник и так поднимается сам по себе, а
+    # почему её нет — уже сказал лаунчер строкой выше.
 
     overlay.show()
+    # Куда именно легло окно помощника — единственный способ отличить «его
+    # не показали» от «оно за чужим окном» или «уехало за край экрана».
+    on_screen = wm.window_rect_screen(int(overlay.winId()))
+    tlog(f"Окно помощника: на экране {on_screen}, "
+         f"в конфиге ({config.data.overlay.x}, {config.data.overlay.y}), "
+         f"видно: {overlay.isVisible()}")
     # After the overlay is on screen, not before: a starred window opening
     # against a hidden overlay has nothing to draw a wire to.
     if found:
         overlay.restore_favorite_windows()
+        # …и только после них — моды, работавшие до перезапуска игры.
+        overlay.resume_after_restart()
 
     # Own WindowManager and its own config/stats files — Tropikania and
     # Avataria are separate game windows and separate records.
@@ -82,7 +136,7 @@ def main():
     tropikania_overlay = None
     tropikania_found = tropikania_wm.find_game("Тропикания")
     if tropikania_found:
-        print("Тропикания found")
+        tlog("Тропикания found")
         tropikania_overlay = TropikaniaOverlay(tropikania_config, tropikania_wm,
                                                tropikania_stats, stats)
         tropikania_wm.attach_overlay(

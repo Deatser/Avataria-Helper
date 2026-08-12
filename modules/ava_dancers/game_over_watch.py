@@ -13,9 +13,10 @@ from app.core.template_match import best_match, load_template, primary_monitor_r
 # owns the CPU budget that matters.
 SEARCH_INTERVAL = 1.0
 
-# A fixed piece of chrome, not a number that fills in over time — same bar
-# click_flow holds its buttons to.
-MATCH_THRESHOLD = 0.93
+# A fixed piece of chrome, but the banner animates in over its own backdrop,
+# so a real end-of-round only scores ~0.93 at best — 0.80 leaves room for
+# that without letting anything else on screen through (2026-08-12).
+MATCH_THRESHOLD = 0.80
 
 GAMEOVER_TEMPLATE = "gameover.png"
 

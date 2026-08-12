@@ -124,6 +124,19 @@ class LogPanel(QTextEdit):
         # Fast scramble for regular logs (interval 22ms, min 10 frames)
         self.animate_log(segs, include_ts=True, interval_ms=22, min_frames=10)
 
+    def prepend_html(self, html: str):
+        """Вставить готовый HTML в начало панели.
+
+        Для лога прошлой сессии, который помощник сохраняет перед
+        перезапуском игры (см. app/core/restart_state.py): старые строки
+        должны оказаться над новыми, а не под ними, и без анимации — они
+        уже были показаны один раз.
+        """
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        cursor.insertHtml(html)
+        self._scroll_end()
+
     def blank_line(self):
         """Spacer so groups of related lines don't run together."""
         self.append("")

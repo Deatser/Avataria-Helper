@@ -2,16 +2,20 @@
 from __future__ import annotations
 from pathlib import Path
 
+import time
+
 import cv2
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
                                QGraphicsDropShadowEffect)
-from PySide6.QtGui import QColor, QFontMetricsF
-from PySide6.QtCore import Qt, QRect, QRectF, QTimer, QThread
+from PySide6.QtGui import (QColor, QFontMetricsF, QPainter, QPixmap,
+                           QTransform)
+from PySide6.QtCore import Qt, QRectF, QTimer
 
 from app.core.capture import grab_window, set_wgc_enabled
 from app.core.input_sender import press_key
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
                                      load_template, primary_monitor_region)
+from app.core.restart_state import REASON_STUCK
 from app.ui.module_window import ModuleWindow
 from app.ui.settings_panel import SettingsPanel
 from app.ui.widgets.mode_button import ModeButton
@@ -49,7 +53,7 @@ _RESTART_BOT_DELAY_MS = 2_000
 # to end a round that has already, in effect, ended.
 # How long to keep playing normally after the reward line appears,
 # before deliberately throwing the round.
-_FINISH_GRACE_MS      = 2_000
+_FINISH_GRACE_MS      = 5_000
 _FINISH_SPAM_MS       = 4_000   # total mashing time
 _FINISH_SPAM_INTERVAL = 60      # ms between bursts of all four keys
 
@@ -87,6 +91,11 @@ _MODE_FONT_FLOOR  = 6
 _KEY_LABELS = ["←", "↓", "↑", "→"]
 _KEY_ARROWS = {"a": "←", "s": "↓", "w": "↑", "d": "→"}
 
+# Насколько свежими должны быть пойманные ноты, чтобы считать, что бот
+# сейчас играет: между раундами тишина длится секунды, минута — это уже
+# застрял. См. module_is_playing.
+_PLAYING_FRESH_S = 60.0
+
 _START_TEXT = "▶  Запустить бота"
 _STOP_TEXT  = "■  Выключить бота"
 
@@ -95,6 +104,9 @@ _ARROW_RATIO = 0.12
 _ARROW_MIN   = 30
 _ARROW_MAX   = 130
 _ARROW_PT    = 56   # starting point size, replaced on the first resize
+# The image is square, so it is drawn a little under the old text size —
+# a full-height square would tower over the glyphs it replaces.
+_ARROW_IMG_RATIO = 1.02
 _DOT_SIZE    = 26   # starting dot size, replaced on the first resize
 _LOG_H       = 120  # the log is a side channel here, keep it short
 _LIT_MS      = 220  # how long a hit stays lit
@@ -116,28 +128,41 @@ _TEMPLATES     = _PROJECT_ROOT / "templates"
 
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
-_PROBE_PT = 100                    # reference size for measuring glyphs
-_ARROW_SCALE: dict[str, float] = {}
+# The arrows are one square image, not four glyphs: text arrows read as
+# different lengths whatever the font, this one is the same shape turned
+# four ways. The source points right, so it is the last of ←, ↓, ↑, →.
+_ARROW_IMG    = _TEMPLATES / "AvaDancers_point.png"
+_ARROW_ANGLES = [180, 90, -90, 0]
+_ARROW_CACHE: dict[tuple[int, str, int], QPixmap] = {}
 
 
-def _arrow_scales() -> dict[str, float]:
-    """Per-glyph size correction so all four arrows read the same length.
+def _arrow_pixmap(index: int, colour: str, size: int) -> QPixmap:
+    """Arrow image turned to face `index`, tinted `colour`, `size` px tall.
 
-    In a monospace cell ↑ and ↓ run the full cell height while ← and → only
-    span its width — about a third longer. Measure both spans once and shrink
-    the tall ones to match the short ones.
+    Cached per look — the four arrows repaint on every flash and every
+    resize, and re-tinting the same pixmap each time is pure waste.
     """
-    if not _ARROW_SCALE:
-        metrics = QFontMetricsF(theme.get_mono_font(_PROBE_PT, bold=True))
-        spans = {}
-        for arrow in _KEY_LABELS:
-            rect = metrics.tightBoundingRect(arrow)
-            spans[arrow] = max(rect.width(), rect.height())
-        shortest = min(spans.values())
-        _ARROW_SCALE.update(
-            {a: (shortest / span if span else 1.0) for a, span in spans.items()}
-        )
-    return _ARROW_SCALE
+    key = (index, colour, size)
+    cached = _ARROW_CACHE.get(key)
+    if cached is not None:
+        return cached
+    src = QPixmap(str(_ARROW_IMG))
+    if src.isNull():
+        return src
+    src = src.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    angle = _ARROW_ANGLES[index]
+    if angle:
+        src = src.transformed(QTransform().rotate(angle),
+                              Qt.SmoothTransformation)
+    tinted = QPixmap(src.size())
+    tinted.fill(Qt.transparent)
+    painter = QPainter(tinted)
+    painter.drawPixmap(0, 0, src)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(tinted.rect(), QColor(colour))
+    painter.end()
+    _ARROW_CACHE[key] = tinted
+    return tinted
 
 
 def _default_backdrop(video: bool = True) -> str:
@@ -174,6 +199,10 @@ class AvaDancersWindow(ModuleWindow):
         self._entry_flow: EntryFlow | None = None
         self._finish_timer: QTimer | None = None
         self._finish_ticks = 0
+        # Когда пошли ноты в этом заходе и когда была последняя — по ним
+        # видно, что бот действительно играет, а не сидит в меню.
+        self._playing_since: float | None = None
+        self._last_tile_at: float = 0.0
         w = getattr(config, "width",  _DEFAULT_W)
         h = getattr(config, "height", _DEFAULT_H)
         self.resize(max(w, _MIN_W), max(h, _MIN_H))
@@ -267,14 +296,15 @@ class AvaDancersWindow(ModuleWindow):
         tiles_row.addStretch()
         self._tile_dots:   list[NtStatusDot] = []
         self._tile_arrows: list[QLabel]      = []
-        for label in _KEY_LABELS:
+        for index in range(len(_KEY_LABELS)):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.addStretch()   # keep dot and arrow together, centred as a pair
             dot = NtStatusDot(size=_DOT_SIZE, accent=theme.VW_CYAN,
                               idle=theme.VW_TEXT)
-            lbl = QLabel(label)
-            # Mono, not the display face: arrows are guaranteed glyphs there
+            lbl = QLabel()
+            lbl._arrow_index  = index          # which way this one points
+            lbl._arrow_size   = int(_ARROW_PT * _ARROW_IMG_RATIO)
             lbl.setAlignment(Qt.AlignCenter)
             self._set_arrow_lit(lbl, False)
             # The backdrop runs from near-black grid to a bright sun, so every
@@ -327,6 +357,10 @@ class AvaDancersWindow(ModuleWindow):
         drag.mousePressEvent = self.start_drag
         drag.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
         layout.addWidget(drag)
+
+        # One rhythm for the whole window: buttons, log and mode row get the
+        # heading's letter-spacing rather than the tighter body default.
+        theme.apply_tracking(self._panel)
 
     # ── Backdrop ─────────────────────────────────────────────────────────────
 
@@ -381,6 +415,7 @@ class AvaDancersWindow(ModuleWindow):
 
         # Read as started right away: the entry flow is part of starting.
         self._bot_active = True
+        self._playing_since = None   # ноты этого захода ещё не пошли
         self._start_btn.setText(_STOP_TEXT)
         self._start_btn.set_active(True)
         self._start_entry_flow(hwnd)
@@ -502,16 +537,14 @@ class AvaDancersWindow(ModuleWindow):
             self._speedup_watch = None
 
     def _on_speedup_detected(self, label: str, score: float):
-        """Purely a heads-up line now.
+        """Nothing to do, and nothing worth saying.
 
-        This used to also shove the detector's poll rate up for 15s, back
-        when a note had one poll's chance to be caught. The tracker measures
-        each note's speed for itself and schedules its press ahead of time,
-        so a speed wave is not something it has to be warned about.
+        This used to shove the detector's poll rate up for 15s, back when a
+        note had one poll's chance to be caught. The tracker measures each
+        note's speed for itself and schedules its press ahead of time, so a
+        speed wave is not something it has to be warned about — and the
+        heads-up line it printed instead only cluttered the main log.
         """
-        self._log_to_helper(
-            f"нашёл отметку {label} (похожесть {score:.0%}): скоро волна ускорения"
-        )
 
     # ── Entry flow (menus → running round) ────────────────────────────────────
 
@@ -522,6 +555,7 @@ class AvaDancersWindow(ModuleWindow):
         # a chain stuck on a button it cannot find has to be visible.
         self._entry_flow = EntryFlow(hwnd)
         self._entry_flow.flow_done.connect(self._start_detection)
+        self._entry_flow.stuck.connect(self._on_button_stuck)
         self._entry_flow.error.connect(self._on_entry_error)
         self._entry_flow.start()
 
@@ -531,6 +565,30 @@ class AvaDancersWindow(ModuleWindow):
             if not self._entry_flow.wait(1500):
                 self._entry_flow.terminate()
             self._entry_flow = None
+
+    def _on_button_stuck(self, label: str, clicks: int):
+        """Кнопка нажата столько раз, сколько ей отпущено, и всё ещё на
+        экране — игра под ней подвисла.
+
+        Кликом это не лечится — в отличие от меню паузы, где видно, куда
+        жать. Поэтому: сказать в оба лога, выключить бота, чтобы он не жал
+        вслепую, и попросить помощник перезапустить игру. Перезапуск уносит
+        и сам помощник (см. Overlay.request_restart), мод после него
+        включится обратно сам.
+        """
+        message = f"Игра залагала на «{label}» ({clicks} нажатий) — требуется перезапуск"
+        self._log.add_log(message, level="error")
+        self._log_to_helper(message)
+        overlay = self.parent_overlay
+        if overlay is None or not hasattr(overlay, "request_restart"):
+            self._stop_bot()
+            return
+        # Себя называем прямо, а не оставляем помощнику догадываться по
+        # списку работающих: к этому моменту бот мог и не числиться
+        # запущенным (проверочная кнопка, обрыв на входе в игру), а вернуться
+        # он должен в любом случае — после перезапуска мод откроется заново и
+        # снова пойдёт играть.
+        overlay.request_restart(REASON_STUCK, [self.module_name])
 
     def _on_entry_error(self, message: str):
         """A step that never found its button leaves the bot switched off."""
@@ -695,6 +753,7 @@ class AvaDancersWindow(ModuleWindow):
         # Silent like the entry flow — errors only. See _start_entry_flow.
         self._exit_flow = ExitFlow(hwnd, restart=True)
         self._exit_flow.flow_done.connect(self._on_exit_flow_done)
+        self._exit_flow.stuck.connect(self._on_button_stuck)
         self._exit_flow.error.connect(
             lambda e: self._log.add_log(e, level="error"))
         self._exit_flow.start()
@@ -726,6 +785,15 @@ class AvaDancersWindow(ModuleWindow):
             return   # game window gone, or already running somehow
         self._begin_round(hwnd, announce=False)
 
+    def module_is_playing(self) -> bool:
+        """Ноты ловились только что — значит бот в игре, а не в меню.
+
+        Свежесть важна: между раундами нот нет секунд по десять, а вот
+        минута тишины при включённом боте означает, что он застрял.
+        """
+        return (self._bot_active
+                and time.monotonic() - self._last_tile_at <= _PLAYING_FRESH_S)
+
     def _thresholds(self) -> Thresholds:
         defaults = Thresholds()
         return Thresholds(
@@ -744,11 +812,23 @@ class AvaDancersWindow(ModuleWindow):
         by_tile = {i: kind for i, kind in events if 0 <= i < 4}
         if not by_tile:
             return
+        # Первые ноты после запуска — единственное доказательство, что бот не
+        # просто «включён», а действительно попал в игру и жмёт по плиткам.
+        # На него смотрит помощник, когда проверяет, удался ли перезапуск
+        # (см. module_is_playing и Overlay._verify_playing).
+        if self._playing_since is None:
+            self._playing_since = time.monotonic()
+            self._log.add_log("Пошли ноты — играем")
+            self._log_to_helper("играем — ноты пошли")
+        self._last_tile_at = time.monotonic()
         for tile_id, kind in by_tile.items():
             self._flash_tile(tile_id, _KIND_COLOUR.get(kind, theme.VW_TEXT))
 
     def _set_arrow_colour(self, label: QLabel, colour: str):
-        label.setStyleSheet(f"color:{colour}; background:transparent;")
+        label._arrow_colour = colour
+        label.setStyleSheet("background:transparent;")
+        label.setPixmap(
+            _arrow_pixmap(label._arrow_index, colour, label._arrow_size))
         if label.isVisible():
             label.repaint()
 
@@ -762,8 +842,8 @@ class AvaDancersWindow(ModuleWindow):
         dot.flash(colour)
         self._set_arrow_colour(arrow, colour)
         QTimer.singleShot(_LIT_MS, dot.set_offline)
-        QTimer.singleShot(_LIT_MS,
-                          lambda: self._set_arrow_colour(arrow, theme.VW_TEXT))
+        QTimer.singleShot(
+            _LIT_MS, lambda: self._set_arrow_colour(arrow, theme.VW_TEXT))
 
     def _scale_tiles(self):
         """Tiles are the readout you watch — they grow with the window."""
@@ -772,11 +852,13 @@ class AvaDancersWindow(ModuleWindow):
             return
         point = int(min(self.height() * _ARROW_RATIO, self.width() * 0.11))
         point = max(_ARROW_MIN, min(_ARROW_MAX, point))
-        scales = _arrow_scales()
         for label in arrows:
-            glyph_pt = max(8, int(round(point * scales.get(label.text(), 1.0))))
-            label.setFont(theme.get_mono_font(glyph_pt, bold=True))
-            label.setFixedHeight(int(point * 1.5))   # boxes stay aligned
+            label._arrow_size = max(8, int(round(point * _ARROW_IMG_RATIO)))
+            self._set_arrow_colour(
+                label, getattr(label, "_arrow_colour", theme.VW_TEXT))
+            # Box just wider than the image: the leftover height used to sit
+            # as dead air between the dot and its arrow.
+            label.setFixedHeight(int(label._arrow_size * 1.1))
         for dot in self._tile_dots:
             dot.set_size(max(12, int(point * 0.45)))
         self._tiles_row.setSpacing(int(point * 0.95))
@@ -803,6 +885,7 @@ class AvaDancersWindow(ModuleWindow):
                 host    = self,
             )
             self._settings.auto_restart_changed.connect(self._on_auto_restart)
+            theme.apply_tracking(self._settings)   # built after _build_ui ran
         self._settings.toggle()
 
     def _on_auto_restart(self, enabled: bool):
@@ -913,13 +996,16 @@ class AvaDancersWindow(ModuleWindow):
 
         fitted = _MODE_FONT_MIN
         for size in range(_MODE_FONT_MAX, _MODE_FONT_MIN - 1, -1):
-            metrics = QFontMetricsF(theme.get_mono_font(size, bold=True))
+            metrics = QFontMetricsF(
+                theme.tracked(theme.get_mono_font(size, bold=True)))
             if all(self._label_fits(metrics, text, room_w, room_h)
                    for text in labels):
                 fitted = size
                 break
         size = max(_MODE_FONT_FLOOR, round(fitted / _MODE_FONT_SHRINK))
-        font = theme.get_mono_font(size, bold=True)
+        # Measured and set with the window's tracking, or the labels would be
+        # fitted at one width and drawn at another.
+        font = theme.tracked(theme.get_mono_font(size, bold=True))
         for button in buttons.values():
             button.setFont(font)
             button.update()

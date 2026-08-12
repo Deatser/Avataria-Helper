@@ -41,6 +41,68 @@ class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         # if it were the garden.
         exclude_from_capture(self)
 
+    # ── Running state, seen from outside ─────────────────────────────────────
+    # Каждый мод называет свою кнопку по-своему («Запустить бота», «Начать
+    # уборку»), и снаружи это всегда был чужой приватный метод. Здесь — три
+    # общих ответа на вопросы, которые задаёт восстановление после зависания
+    # игры (см. app/core/pause_watch.py и Overlay._on_pause_detected): мод
+    # сейчас работает? выключись. включись обратно.
+    #
+    # Имена перечислены, а не заданы каждым модом отдельно, ровно потому,
+    # что они уже существуют и все разные; мод, который заведёт четвёртое
+    # имя, переопределит эти методы у себя.
+
+    # Порядок важен: у Ava Dancers `_bot_active` — это намерение (мод
+    # считается включённым и между раундами), а `_running` — живой ли поток
+    # прямо сейчас.
+    _RUN_FLAGS   = ("_bot_active", "_running")
+    _RUN_TOGGLES = ("_toggle_bot", "_toggle_running", "_toggle_cleaning")
+
+    def _run_toggle(self):
+        for name in self._RUN_TOGGLES:
+            toggle = getattr(self, name, None)
+            if callable(toggle):
+                return toggle
+        return None
+
+    def module_is_running(self) -> bool:
+        for name in self._RUN_FLAGS:
+            if hasattr(self, name):
+                return bool(getattr(self, name))
+        return False
+
+    def module_stop(self) -> bool:
+        """Выключить мод, если он работает. True — выключили."""
+        toggle = self._run_toggle()
+        if toggle is None or not self.module_is_running():
+            return False
+        toggle()
+        return True
+
+    def module_start(self) -> bool:
+        """Включить мод, если он не работает. True — включили."""
+        toggle = self._run_toggle()
+        if toggle is None or self.module_is_running():
+            return False
+        toggle()
+        return True
+
+    def module_is_playing(self) -> bool:
+        """Мод не просто включён, а действительно работает по игре.
+
+        Разница важна после перезапуска: включённым мод считается сразу, а
+        дошёл ли он до игры — видно только по тому, что он в ней делает. Мод,
+        которому нечем это подтвердить, отвечает «включён — значит работает»;
+        Ava Dancers переопределяет и смотрит на пойманные ноты.
+        """
+        return self.module_is_running()
+
+    def module_log(self, message: str, level: str = "info"):
+        """Строка в лог самого мода — молча, если лога у него нет."""
+        log = getattr(self, "_log", None)
+        if log is not None and hasattr(log, "add_log"):
+            log.add_log(message, level=level)
+
     # ── Position / size ──────────────────────────────────────────────────────
 
     def restore_position(self):

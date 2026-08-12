@@ -38,6 +38,11 @@ RECLICK_INTERVAL = 0.3
 POLL_INTERVAL = 0.4    # UI navigation, not gameplay — no need to be fast
 STEP_TIMEOUT  = 30.0   # give up on a button rather than spin forever
 
+# Кнопка, которая осталась на месте после стольких нажатий, уже не «не
+# успела» — игра под ней подвисла. Ждать до конца таймаута в этом случае
+# бессмысленно: см. `click_limits` и сигнал `stuck`.
+DEFAULT_CLICK_LIMIT = 6   # первое нажатие плюс пять повторов
+
 
 def confirmed_gone(peak: float, score: float,
                    drop: float = CONFIRM_DROP) -> bool:
@@ -58,10 +63,17 @@ class ClickFlow(QThread):
     clicked      = Signal(str, float, int, int)  # label, score, x, y
     confirmed    = Signal(str)                   # label — the screen moved on
     flow_done    = Signal()
+    stuck        = Signal(str, int)               # label, сколько раз нажали
     error        = Signal(str)
 
     poll_interval = POLL_INTERVAL
     step_timeout  = STEP_TIMEOUT
+
+    # {label: сколько нажатий этой кнопке отпущено}. Пусто — значит никому не
+    # ограничено, и шаг живёт до таймаута, как раньше. Заполняется у
+    # подклассов: ограничение осмысленно там, где кнопка, не сработавшая
+    # шесть раз подряд, означает подвисшую игру, а не медленный экран.
+    click_limits: dict[str, int] = {}
 
     def __init__(self, game_hwnd: int):
         super().__init__()
@@ -139,6 +151,8 @@ class ClickFlow(QThread):
         peak       = 0.0
         seen       = False
         last_click = 0.0
+        clicks     = 0
+        limit      = self.click_limits.get(label, 0)
         first_poll = True
         next_useless = False   # the next button was already up when we began
         low_polls    = 0       # consecutive polls reading below the peak
@@ -179,8 +193,16 @@ class ClickFlow(QThread):
                 if continue_clicking and score >= BUTTON_THRESHOLD:
                     peak = max(peak, score)
                     now  = time.monotonic()
+                    if limit and clicks >= limit:
+                        # Кнопка на месте, нажата столько раз, сколько ей
+                        # отпущено — дальше жать нечего, это уже не «экран
+                        # думает». Шаг заканчивается здесь, а что с этим
+                        # делать, решает тот, кто слушает `stuck`.
+                        self.stuck.emit(label, clicks)
+                        return False
                     if now - last_click >= RECLICK_INTERVAL:
                         last_click = now
+                        clicks += 1
                         cx, cy = x + w // 2, y + h // 2
                         click_at(self._hwnd, cx, cy)
                         # Only the first click is announced: the repeats are

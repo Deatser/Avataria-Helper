@@ -8,6 +8,10 @@ __pycache__/
 # в репозиторий не попадает никогда.
 .env
 
+# Ключ сервисного аккаунта Firebase — полный админский доступ к проекту.
+*firebase-adminsdk*.json
+service-account*.json
+
 # Virtual envs
 .venv/
 venv/
@@ -33,3 +37,8 @@ desktop.ini
 
 # Per-day activity totals — see app/core/daily_log.py
 /logs/
+
+# Записка помощника самому себе через перезапуск игры — живёт секунды
+# (см. app/core/restart_state.py)
+/restart.json
+/restart_logs.json

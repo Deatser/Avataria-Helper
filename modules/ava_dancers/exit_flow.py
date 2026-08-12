@@ -6,13 +6,21 @@ import time
 from app.core.input_sender import click_at
 from app.core.template_match import (best_match, load_template,
                                      primary_monitor_region)
-from modules.ava_dancers.click_flow import ClickFlow
+from modules.ava_dancers.click_flow import DEFAULT_CLICK_LIMIT, ClickFlow
+from modules.ava_dancers.game_over_watch import (GAMEOVER_TEMPLATE,
+                                                 MATCH_THRESHOLD)
 
 # The screens that follow a finished round, in the order they appear.
+START_LABEL = "Кнопка НАЧАТЬ"
 RESTART_STEPS = [
     ("Кнопка ЗАНОВО", "leave_repeat.png"),
-    ("Кнопка НАЧАТЬ", "leave_start.png"),
+    (START_LABEL,     "leave_start.png"),
 ]
+
+# НАЧАТЬ — то место, где подвисшая игра видна лучше всего: кнопка нарисована,
+# нажатие проходит, а лобби не открывается. Шесть нажатий подряд без реакции —
+# это уже не медленный экран (2026-08-12).
+START_CLICK_LIMITS = {START_LABEL: DEFAULT_CLICK_LIMIT}
 
 # Still how EntryFlow recognises the results screen when the bot is started
 # on one, which is a different job: there it has to work out where it is
@@ -31,8 +39,12 @@ OK_STEP = ("Кнопка ОК", "leave_ok.png")
 # banner rather than on the button turns "is this exact artwork on screen"
 # into "are we on the right screen", which is the question that actually
 # matters.
+# One banner, one crop, one bar: the same ones GameOverWatch uses. Two
+# templates of the same artwork with two different thresholds lived here
+# until 2026-08-12 and only made it possible for one half of the chain to
+# see the screen the other half was already sure of.
 OK_LABEL    = "Кнопка ОК"
-OK_BANNER   = "AvaDancers_gameover.png"
+OK_BANNER   = GAMEOVER_TEMPLATE
 OK_POINT    = (1283, 842)   # hand-marked 2026-08-11 over the live game:
                             # x 1139 y 798, 289x89 — this is its centre
 OK_WAIT_S   = 10.0          # …and if the banner never turns up, click anyway
@@ -43,6 +55,8 @@ OK_SETTLE_S = 1.2           # how long one click gets to clear it
 
 class ExitFlow(ClickFlow):
     """Clicks the round out: ОК, then optionally Повтор and Начать."""
+
+    click_limits = START_CLICK_LIMITS
 
     def __init__(self, game_hwnd: int, restart: bool):
         super().__init__(game_hwnd)
@@ -120,5 +134,5 @@ class ExitFlow(ClickFlow):
 
     # Looser than the button bar: the banner is large, flat text and always
     # renders the same, but it sits over whatever the results screen is
-    # animating behind it.
-    banner_threshold = 0.90
+    # animating behind it. Shared with GameOverWatch — see OK_BANNER.
+    banner_threshold = MATCH_THRESHOLD

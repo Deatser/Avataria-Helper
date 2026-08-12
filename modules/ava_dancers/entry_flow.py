@@ -6,7 +6,8 @@ from PySide6.QtCore import Signal
 from app.core.template_match import (best_match, load_template,
                                      primary_monitor_region)
 from modules.ava_dancers.click_flow import BUTTON_THRESHOLD, ClickFlow
-from modules.ava_dancers.exit_flow import OK_STEP, RESTART_STEPS
+from modules.ava_dancers.exit_flow import (OK_STEP, RESTART_STEPS,
+                                           START_CLICK_LIMITS)
 
 # The in-game EXIT sign — the one piece of chrome that is on screen during a
 # round and nowhere else, which makes it the cheapest possible answer to "are
@@ -78,6 +79,9 @@ class EntryFlow(ClickFlow):
     # to come up, and every poll is a full screen capture anyway. Re-clicks
     # stay on their own slower clock — see RECLICK_INTERVAL.
     poll_interval = 0.05
+
+    # Единственная кнопка с потолком нажатий — см. START_CLICK_LIMITS.
+    click_limits = START_CLICK_LIMITS
 
     def steps(self) -> list[tuple[str, str]]:
         return ENTRY_STEPS
