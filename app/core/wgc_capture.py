@@ -120,24 +120,39 @@ class WindowSession:
                     return False
         return self._frame is not None
 
-    def grab(self, region: dict | None = None) -> np.ndarray:
+    def grab(self, region: dict | None = None,
+             fresh: bool = True) -> np.ndarray:
         """The newest frame this thread has not seen yet, cropped to region.
 
         Blocking on novelty rather than returning whatever is in hand is the
         whole point: a detector that reads the same picture twice measures a
         note as having stood still, and its speed fit is made of exactly
         those measurements.
+
+        `fresh=False` is for the callers that are not measuring anything —
+        a poller reading a counter off the screen, a one-off look to see
+        whether the window is there. They get whatever frame is in hand,
+        without waiting and without marking it seen.
+
+        That second half matters more than it looks. The marker is per
+        *thread*, and a window that drives every poll off one thread — as
+        the hockey module does, off the GUI thread — has them all drawing
+        from the same marker. A strip reader consuming frames there is not
+        merely slow: it takes every other frame away from the loop whose
+        timestamps are the measurement.
         """
-        last = getattr(self._seen, "index", 0)
-        deadline = time.monotonic() + _FRAME_WAIT_S
         with self._cv:
-            while self._index <= last and not self._closed:
-                if not self._cv.wait(max(0.0, deadline - time.monotonic())):
-                    break
+            if fresh:
+                last = getattr(self._seen, "index", 0)
+                deadline = time.monotonic() + _FRAME_WAIT_S
+                while self._index <= last and not self._closed:
+                    if not self._cv.wait(max(0.0, deadline - time.monotonic())):
+                        break
             if self._frame is None:
                 raise RuntimeError("WGC: кадров от окна ещё не было")
             frame = self._frame
-            self._seen.index = self._index
+            if fresh:
+                self._seen.index = self._index
         if region is None:
             return frame
 

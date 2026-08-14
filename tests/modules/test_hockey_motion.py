@@ -631,9 +631,19 @@ def test_a_stander_outlives_being_hidden_far_longer_than_a_patrol():
 
 def test_a_patrol_crossing_two_standers_is_timed_by_its_turns():
     """Row 3 of the real game: two defenders standing and a third crossing
-    them both. Every track in the row comes apart — one followed out of
-    three (2026-08-10) — but the ice past the last stander holds nobody
-    else, and the patrol runs out of it and turns round once a cycle.
+    them both. The ice past the last stander holds nobody else, so the
+    patrol runs out of it and turns round once a cycle, and the gap between
+    two turns is its period however badly it is being followed.
+
+    This row used to defeat the trackers outright — one followed out of
+    three (2026-08-10) — and the assertion here was that it did. It no
+    longer does: _real_tracks used to measure a track's share against every
+    tick ever taken while the track itself only kept thirty seconds, so the
+    bar climbed for as long as a watch ran and eventually dropped every
+    track in every row. With both sides counted over the same stretch, all
+    three survive. What the turns say is checked all the same — the zone is
+    what a row this crowded falls back on, and it has to be right before it
+    is needed rather than after.
     """
     low, high, period = 1047.0, 1498.0, 3.4
     standing = [1180.0, 1300.0]
@@ -652,8 +662,6 @@ def test_a_patrol_crossing_two_standers_is_timed_by_its_turns():
         row.feed(t, merged)
         t += _TICK
 
-    assert row.struggling() is True                    # tracking did fail
-    assert row.by_board_ready() is True
     assert abs(row.board_patrol().period - period) < 0.1
     assert [round(x) for x in row.standing_spots()] == [1180, 1300]
 
@@ -670,8 +678,13 @@ def test_the_zone_is_the_free_end_of_the_row_not_the_middle():
     """A middle stretch would show the patrol crossing and say nothing about
     when — there is no board in it to turn at. Of the two ends, the wider.
 
-    And only for a row that is actually stuck: where the trackers are
-    coping, they are the better answer and nothing is chosen.
+    Asked of the choice itself rather than through choose_zones, which only
+    reaches it for a row the trackers have given up on. Which rows those are
+    moves whenever tracking gets better or worse, and it did (see
+    test_a_patrol_crossing_two_standers_is_timed_by_its_turns); where the
+    ice is, given who is standing in it, does not. The other half — that a
+    row the trackers can follow is offered nothing at all — is
+    test_and_nothing_is_chosen_for_a_row_the_trackers_can_follow.
     """
     from modules.hockey.motion import MotionModel
 
@@ -703,15 +716,15 @@ def test_the_zone_is_the_free_end_of_the_row_not_the_middle():
                 merged.append(x)
         row.feed(t, merged)
         t += _TICK
-    assert row.struggling() is True
+    assert [round(x) for x in row.standing_spots()] == [1180, 1300]
 
-    chosen = model.choose_zones()
+    zone, far = model._past_the_standers(row, _Lane())
 
-    assert 0 in chosen
-    zone_low, zone_high, toward_right = chosen[0]
+    zone_low, zone_high, toward_right = zone
     assert toward_right is True          # 168px of ice against 103 on the left
     assert zone_high > high              # open at the board end
     assert zone_low > max(standing)      # and starts past the last stander
+    assert far == low                    # the other end of the patrol
 
 
 def test_and_nothing_is_chosen_for_a_row_the_trackers_can_follow():
@@ -779,13 +792,37 @@ def test_the_check_compares_against_what_was_seen_not_against_the_tracks():
 
 
 def _board_row(turns: int):
-    """A row whose zone has watched `turns` turns go by, evenly spaced."""
+    """A row whose zone has watched `turns` turns go by, evenly spaced, and
+    which has been through the handover — so the misses loaded after it are
+    the board's own and nobody else's."""
     row = RowMotion(_HORIZON)
     row.watch_zone(1047.0, 1222.0, toward_right=False, far=1498.0)
     for turn in range(turns):
         row.board_patrol()._turns.append((turn * 2.0, 1050.0, 250.0))
-    row._errors.extend([80.0] * 30)          # nowhere near holding
+    row._doubt_the_board()          # the handover, which empties the window
+    # Nowhere near holding, and measured over a real stretch of time rather
+    # than all at one instant — a mean over one moment is not a verdict.
+    row._errors.extend((n * _SLOW, 80.0) for n in range(30))
     return row
+
+
+def test_the_board_gets_the_misses_made_after_it_took_the_row_over():
+    """And none of the ones made before. A row swaps predictors the moment a
+    third turn makes a patrol, and the window it is judged on still holds
+    whatever the trackers were missing by up to that tick. Judged on those,
+    the board was condemned on arrival every time — at 40 frames a second it
+    never held three turns long enough to be worth anything."""
+    row = RowMotion(_HORIZON)
+    row.watch_zone(1047.0, 1222.0, toward_right=False, far=1498.0)
+    row._errors.extend((n * _SLOW, 80.0) for n in range(30))   # the trackers'
+    for turn in range(4):
+        row.board_patrol()._turns.append((turn * 2.0, 1050.0, 250.0))
+    assert row.by_board_ready() is True          # the board now answers
+
+    row._doubt_the_board()
+
+    assert row.board_patrol().bounces == 4       # not thrown away on arrival
+    assert list(row._errors) == []               # and starts its own record
 
 
 def test_the_board_timing_is_thrown_away_when_it_stops_holding():
@@ -984,3 +1021,140 @@ def test_and_two_patrols_sharing_a_board_are_told_apart_by_their_clocks():
     assert abs(periods[1] - 3.4) < 0.1
     assert report.error < 12
     assert report.ready is True
+
+
+# ── However fast the frames arrive ───────────────────────────────────────
+# Every window in this module used to be counted in frames, tuned against
+# the ~13 a second PrintWindow managed. Windows Graphics Capture hands over
+# some 40, which rescaled all of them at once and silently: a verdict earned
+# over a shot's flight became one earned over a third of it, and the record
+# a zone reads its boards off stopped holding a whole sweep. What follows
+# pins the property that makes the faster capture safe — the model is a
+# function of *when* things were seen, never of how many times.
+
+_SLOW = 0.077     # PrintWindow: 44.6ms a grab, plus the detector
+_FAST = 0.025     # WGC, paced by the game's own redraws
+
+
+def _watch_at(tick: float, seconds: float, shape=None, **kwargs):
+    """One row watched at `tick`, holding a stander unless given a shape."""
+    row = RowMotion(_HORIZON)
+    t = 0.0
+    while t < seconds:
+        row.feed(t, [1200.0 if shape is None else shape(t, **kwargs)])
+        t += tick
+    return row
+
+
+def test_a_patrol_is_modelled_the_same_at_either_capture_rate():
+    period, low, high = 4.0, 1000.0, 1400.0
+    rows = [_watch_at(tick, 20, _triangle, period=period, low=low, high=high)
+            for tick in (_SLOW, _FAST)]
+
+    for row in rows:
+        report = row.report(0)
+        assert abs(report.period - period) < 0.1
+        assert report.settled is True
+        predicted = row.predict(19.9 + _HORIZON)
+        assert predicted is not None
+        assert abs(predicted - _triangle(19.9 + _HORIZON,
+                                         period, low, high)) < 8
+
+
+def test_a_slow_patrol_still_fits_in_the_record_at_the_faster_rate():
+    """The sightings are what a zone's boards get read off, so they have to
+    hold a whole sweep of the slowest patrol the fit will even look for.
+    Two hundred of them was fifteen seconds of PrintWindow and is five of
+    WGC — the zone would be cut out of a third of the patrol."""
+    row = _watch_at(_FAST, 20, _triangle, period=14.0, low=1000.0, high=1400.0)
+
+    seen_low, seen_high = row.seen_span()
+
+    assert seen_high - seen_low > 380
+
+
+def test_a_stander_is_taken_on_trust_by_time_watched_not_by_frames():
+    """Anchoring says a defender has stood still long enough to be known
+    without looking. At WGC's rate the old forty frames is a second and a
+    half of standing, which a patrol dawdling at a board also manages."""
+    early = _watch_at(_FAST, 1.5)
+    late  = _watch_at(_FAST, 5.0)
+
+    assert [track for track in early.tracks() if track.anchored] == []
+    assert [track for track in late.tracks() if track.anchored] != []
+
+
+def test_a_verdict_needs_its_checks_spread_over_a_shots_flight():
+    """A row files predictions once it has settled and they come due a
+    flight later, so its checks start around four and a half seconds in.
+    Fifteen of them is over a second at PrintWindow's rate and a third of
+    one at WGC's, and a mean over a third of a second is not evidence about
+    a patrol — it is evidence about one moment of it."""
+    from modules.hockey.motion import _MIN_CHECKS
+
+    brief = _watch_at(_FAST, 5.0)
+    settled = _watch_at(_FAST, 7.0)
+
+    assert len(brief._errors) >= _MIN_CHECKS   # plenty of them...
+    assert brief.verdict() is None             # ...over far too little time
+    assert settled.verdict() is not None
+
+
+def _visits(board, xs_per_visit, tick: float, visits: int = 20,
+            every: float = 1.0):
+    """Somebody passing through the zone `visits` times, one chain each.
+
+    The empty ticks between visits are what closes a chain, and they are the
+    reason each pass is judged whole rather than a frame at a time.
+    """
+    for turn in range(visits):
+        t = turn * every
+        for x in xs_per_visit:
+            board.feed(t, [x])
+            t += tick
+        while t < (turn + 1) * every:
+            board.feed(t, [])
+            t += tick
+
+
+def _pass_through(tick: float, approach_s: float, retreat_s: float,
+                  start: float = 1222.0, deep: float = 1050.0):
+    """One trip to the board and back, sampled at `tick`."""
+    inward  = max(2, int(approach_s / tick)) + 1
+    outward = max(2, int(retreat_s / tick))
+    step = (start - deep) / (inward - 1)
+    return ([start - step * i for i in range(inward)]
+            + [deep + step * (i + 1) for i in range(outward)])
+
+
+def test_a_wobble_at_the_deep_end_is_not_a_turn_however_fast_the_frames():
+    """The turn gate used to be a count of samples either side of the
+    extreme, and four of them were a third of a second at PrintWindow's rate.
+    At WGC's they are a tenth — so a centroid dipping and recovering inside
+    two hundred milliseconds clears a gate written to refuse exactly that,
+    and the zone starts timing a patrol out of jitter."""
+    from modules.hockey.motion import _Zone
+
+    board = _Zone(1047.0, 1222.0, toward_right=False, far=1498.0)
+    _visits(board, [1200, 1150, 1100, 1060, 1050, 1060, 1100, 1160], _FAST)
+
+    assert board.bounces == 0
+    assert board.period is None
+
+
+def test_but_a_real_turn_is_still_read_at_either_rate():
+    """The same defender, actually turning round: half a second in, a third
+    of a second out. Both rates see it, and neither has to be told which one
+    it is looking at."""
+    from modules.hockey.motion import _Zone
+
+    for tick, step in ((_SLOW, 25.0), (_FAST, 8.0)):
+        board = _Zone(1047.0, 1222.0, toward_right=False, far=1498.0)
+        approach = [1200.0 - step * i for i in range(int(0.55 / tick))]
+        retreat  = [approach[-1] + step * (i + 1)
+                    for i in range(int(0.35 / tick))]
+        _visits(board, approach + retreat, tick, every=2.0)
+
+        assert board.bounces >= _MIN_BOUNCES
+        assert board.period is not None
+        assert abs(board.period - 2.0) < 0.1

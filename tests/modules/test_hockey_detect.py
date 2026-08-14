@@ -3,8 +3,11 @@
 import cv2
 import numpy as np
 
+import pytest
+
 from app.core.config import HockeyConfig
 from app.core.template_match import TEMPLATES_DIR
+from modules.hockey import detect
 from modules.hockey.detect import HELMET_TEMPLATES, HelmetDetector
 from modules.hockey.rink_area import from_config
 
@@ -134,14 +137,21 @@ def test_scan_all_finds_helmets_before_any_row_exists():
 
 # ── Static marking mask ──────────────────────────────────────────────────
 
-def _run_learning(detector, cfg, frames=80):
+def _run_learning(detector, cfg, seconds=detect._STATIC_S + 1.0,
+                  frames=detect._STATIC_SAMPLES):
     """Feed the detector a moving helmet over a fixed red line, which is the
-    situation the mask exists for."""
+    situation the mask exists for.
+
+    Over a stretch of rink time and not merely a count of frames: the warm-up
+    is a duration with a sample floor under it, so a test that fed it a
+    thousand frames of the same instant would learn nothing.
+    """
+    step = seconds / max(1, frames - 1)
     for i in range(frames):
         frame = _frame(cfg)
         _paint(frame, left=0, top=44, width=200, height=6)        # the line
         _paint(frame, left=10 + i, top=30, width=30, height=30)   # moving
-        detector.scan(frame)
+        detector.scan(frame, now=100.0 + i * step)
 
 
 def test_a_helmet_crossing_a_line_is_lost_without_the_mask():
@@ -162,7 +172,7 @@ def test_the_mask_keeps_a_helmet_crossing_a_line():
     frame = _frame(cfg)
     _paint(frame, left=0, top=44, width=200, height=6)
     _paint(frame, left=60, top=30, width=30, height=30)
-    hits = detector.scan(frame)[0]
+    hits = detector.scan(frame, now=200.0)[0]
 
     assert detector.static_ready()
     assert hits
@@ -175,10 +185,33 @@ def test_the_mask_is_not_ready_until_it_has_seen_enough():
     cfg = _config(static_mask=True)
     detector = _detector(cfg)
 
-    _run_learning(detector, cfg, frames=10)
+    _run_learning(detector, cfg, seconds=2.0)
 
     assert not detector.static_ready()
-    assert detector.static_progress() == (10, 80)
+    done, needed = detector.static_progress()
+    assert done == pytest.approx(2.0)
+    assert needed == detect._STATIC_S
+
+
+def test_nor_by_a_flood_of_frames_from_the_same_moment():
+    """A faster capture backend is not a shorter warm-up: what it waits for
+    is the defenders moving off the pixels they stand on."""
+    cfg = _config(static_mask=True)
+    detector = _detector(cfg)
+
+    _run_learning(detector, cfg, seconds=1.0, frames=400)
+
+    assert not detector.static_ready()
+
+
+def test_nor_by_a_long_stretch_of_almost_no_frames():
+    """And the other way round: a share of four frames means nothing."""
+    cfg = _config(static_mask=True)
+    detector = _detector(cfg)
+
+    _run_learning(detector, cfg, seconds=30.0, frames=4)
+
+    assert not detector.static_ready()
 
 
 def test_a_detector_without_the_mask_is_ready_immediately():
@@ -305,6 +338,16 @@ def test_but_not_anything_red_that_happens_to_be_expected():
     assert found[0] == []
 
 
+def _watch_still(detector, frame, seconds, fps=40.0):
+    """Show the detector the same frame for `seconds` of rink time, at a
+    plausible capture rate, and hand back the last scan."""
+    found = {}
+    step = 1.0 / fps
+    for i in range(int(seconds * fps) + 1):
+        found = detector.scan(frame, now=100.0 + i * step)
+    return found
+
+
 def test_a_helmet_that_has_not_moved_in_a_while_is_taken_on_trust():
     """A row with two standing defenders reported one of them, in every
     frame, for a whole run — the second player's avatar simply scored under
@@ -315,12 +358,23 @@ def test_a_helmet_that_has_not_moved_in_a_while_is_taken_on_trust():
     detector = _detector(cfg)
     frame = _scuffed_photo()
 
-    assert detector.scan(frame)[0] == []       # under the gate at first
+    assert detector.scan(frame, now=100.0)[0] == []   # under the gate at first
 
-    for _ in range(60):
-        found = detector.scan(frame)
+    found = _watch_still(detector, frame, detect._STEADY_S + 0.5)
 
     assert found[0], "a defender that never moved was never accepted"
+
+
+def test_but_not_before_it_has_stood_there_long_enough():
+    """A patrol pausing at a board holds still for a couple of seconds, and
+    a faster capture backend must not turn that into a stander."""
+    cfg = _config_with_photo_room(player_match_min=0.9)
+    detector = _detector(cfg)
+    frame = _scuffed_photo()
+
+    found = _watch_still(detector, frame, detect._STEADY_S - 1.0)
+
+    assert found[0] == []
 
 
 def test_but_red_scenery_sitting_still_is_still_not_a_defender():
@@ -331,8 +385,7 @@ def test_but_red_scenery_sitting_still_is_still_not_a_defender():
     frame = np.zeros((400, 400, 3), np.uint8)
     frame[40:80, 60:100] = RED
 
-    for _ in range(60):
-        found = detector.scan(frame)
+    found = _watch_still(detector, frame, detect._STEADY_S + 0.5)
 
     assert found[0] == []
 

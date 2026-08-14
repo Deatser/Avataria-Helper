@@ -95,29 +95,35 @@ _SEED_SHARE = 0.6      # of the watched frames
 # as long as that lasts — must keep rising, and each step has to land near
 # where the previous velocity said it would.
 #
-# Ten frames is half a second of not seeing it, which sounds generous until
-# you look at where the puck goes: a left-post shot swings out to x=1363,
-# straight through where the lower rows' defenders stand, and vanishes
-# behind them. Two left shots out of three died there while the puck was
-# plainly visible again further up (2026-08-10).
+# In seconds and pixels per second throughout, never in frames. Half a
+# second of not seeing it sounds generous until you look at where the puck
+# goes: a left-post shot swings out to x=1363, straight through where the
+# lower rows' defenders stand, and vanishes behind them. Two left shots out
+# of three died there while the puck was plainly visible again further up
+# (2026-08-10) — and the ten frames that allowance used to be spelt as would
+# have been a quarter of a second again at the rate the capture now runs.
 #
-# The allowance for a skipped frame grows slowly and then stops: a puck ten
-# frames on is not ten times less predictable, it is very close to where its
-# own speed says, and an allowance that kept growing would let a long jump
-# reach halfway across the rink.
-_MAX_GAP_FRAMES      = 10
-_MIN_RISE_PER_FRAME  = 3.0
-_FIRST_STEP_DRIFT_PX = 60.0    # before there is a velocity to predict from
-_VELOCITY_TOLERANCE  = 26.0
-_GAP_TOLERANCE_PX    = 8.0     # added per extra frame skipped
-_MAX_TOLERANCE_PX    = 70.0    # however long the gap
+# The allowance for a skipped frame grows slowly and then stops: a puck half
+# a second on is not ten times less predictable, it is very close to where
+# its own speed says, and an allowance that kept growing would let a long
+# jump reach halfway across the rink.
+_MAX_GAP_S           = 0.6
+_MIN_RISE_PX_S       = 50.0
+_FIRST_STEP_DRIFT_PX_S = 1000.0  # before there is a velocity to predict from
+_VELOCITY_TOLERANCE  = 26.0      # px from where its own speed said: no rate in it
+_GAP_TOLERANCE_PX_S  = 130.0     # added for every second of gap past an ordinary one
+_MAX_TOLERANCE_PX    = 70.0      # however long the gap
 
 # The widest pair of samples a crossing may be interpolated between. Longer
 # than this and the answer is invented rather than measured — see _cross.
 _MAX_INTERP_GAP_S = 0.15
 
-# Shorter than this is not a flight, it is a coincidence.
-_MIN_CHAIN = 6
+# Shorter than this is not a flight, it is a coincidence. Both halves: six
+# blobs is the least that can describe a path at all, and a third of a
+# second is the least that can be one — at 40 frames a second six of them
+# are a seventh of a second, which any flicker manages.
+_MIN_CHAIN   = 6
+_MIN_CHAIN_S = 0.35
 
 # The chain has to reach the goal line itself, with no slack. Slack was
 # tried and made the two halves of this module disagree: a flight ending
@@ -279,7 +285,9 @@ class PuckFlight:
         for index in range(min(seed_limit, len(self._blobs))):
             for blob in self._blobs[index]:
                 chain, error = self._extend(index, blob)
-                if len(chain) < _MIN_CHAIN or not self._rises_enough(chain):
+                if (len(chain) < _MIN_CHAIN
+                        or chain[-1][1].t - chain[0][1].t < _MIN_CHAIN_S
+                        or not self._rises_enough(chain)):
                     continue
                 # Longest wins; then the steadiest; then the one that began
                 # lowest, which is the one that began nearest the stick.
@@ -297,7 +305,14 @@ class PuckFlight:
 
     def _extend(self, index: int, blob: _Blob) -> tuple[list, float]:
         """Follow one seed forward, always taking the blob nearest where the
-        current velocity says the next one should be."""
+        current velocity says the next one should be.
+
+        The velocity is px per second, off the blobs' own timestamps, rather
+        than px per frame off their positions in the list. Frames do not
+        arrive on a fixed beat — the loop is paced by the game's redraws —
+        so a step counted in frames is a different amount of travel every
+        time, and every allowance measured against it moves with it.
+        """
         chain = [(index, blob)]
         velocity = None
         error = 0.0
@@ -307,33 +322,37 @@ class PuckFlight:
             if step is None:
                 break
             next_index, next_blob, deviation = step
-            skipped = next_index - last_index
-            velocity = ((next_blob.x - last.x) / skipped,
-                        (next_blob.y - last.y) / skipped)
+            gap = next_blob.t - last.t
+            if gap > 0:
+                velocity = ((next_blob.x - last.x) / gap,
+                            (next_blob.y - last.y) / gap)
             error += deviation
             chain.append((next_index, next_blob))
         return chain, error / max(1, len(chain) - 1)
 
     def _next(self, index: int, last: _Blob, velocity):
-        limit = min(index + 1 + _MAX_GAP_FRAMES, len(self._blobs))
-        for candidate_index in range(index + 1, limit):
-            skipped = candidate_index - index
+        ordinary = self._step()
+        for candidate_index in range(index + 1, len(self._blobs)):
+            gap = self._times[candidate_index] - last.t
+            if gap > _MAX_GAP_S:
+                break
             best, best_deviation = None, None
             for blob in self._blobs[candidate_index]:
-                if blob.y > last.y - _MIN_RISE_PER_FRAME * skipped:
+                if blob.y > last.y - _MIN_RISE_PX_S * gap:
                     continue      # not heading for the goal
                 if velocity is None:
                     deviation = abs(blob.x - last.x)
-                    if deviation > _FIRST_STEP_DRIFT_PX * skipped:
+                    if deviation > _FIRST_STEP_DRIFT_PX_S * gap:
                         continue
                 else:
-                    expect = (last.x + velocity[0] * skipped,
-                              last.y + velocity[1] * skipped)
+                    expect = (last.x + velocity[0] * gap,
+                              last.y + velocity[1] * gap)
                     deviation = ((blob.x - expect[0]) ** 2
                                  + (blob.y - expect[1]) ** 2) ** 0.5
-                    allowance = min(_VELOCITY_TOLERANCE
-                                    + _GAP_TOLERANCE_PX * (skipped - 1),
-                                    _MAX_TOLERANCE_PX)
+                    allowance = min(
+                        _VELOCITY_TOLERANCE
+                        + _GAP_TOLERANCE_PX_S * max(0.0, gap - ordinary),
+                        _MAX_TOLERANCE_PX)
                     if deviation > allowance:
                         continue
                 if best_deviation is None or deviation < best_deviation:
@@ -342,11 +361,19 @@ class PuckFlight:
                 return candidate_index, best, best_deviation
         return None
 
+    def _step(self) -> float:
+        """Mean seconds between frames — what "a gap longer than an ordinary
+        one" is measured against, and the resolution every crossing time is
+        ultimately read off."""
+        if len(self._times) < 2:
+            return 0.0
+        return (self._times[-1] - self._times[0]) / (len(self._times) - 1)
+
     @staticmethod
     def _rises_enough(chain) -> bool:
         (_first_index, first), (_last_index, last) = chain[0], chain[-1]
-        frames = chain[-1][0] - chain[0][0]
-        return frames > 0 and (first.y - last.y) / frames >= _MIN_RISE_PER_FRAME
+        elapsed = last.t - first.t
+        return elapsed > 0 and (first.y - last.y) / elapsed >= _MIN_RISE_PX_S
 
     # ── The kept frames ──────────────────────────────────────────────────
 
@@ -365,10 +392,7 @@ class PuckFlight:
         seen = sum(1 for frame in self._blobs if frame)
         highest = min((blob.y for frame in self._blobs for blob in frame),
                       default=None)
-        step = 0.0
-        if len(self._times) > 1:
-            step = (self._times[-1] - self._times[0]) / (len(self._times) - 1)
-        return len(self._times), seen, highest, step * 1000
+        return len(self._times), seen, highest, self._step() * 1000
 
     def candidates(self) -> list[tuple[float, float]]:
         """Every blob that was ever considered, as (x, y).

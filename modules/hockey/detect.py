@@ -24,6 +24,7 @@ settles it by watching rather than by looking at a single frame.
 """
 from __future__ import annotations
 
+import time
 from collections import deque
 from dataclasses import dataclass
 from functools import lru_cache
@@ -79,8 +80,20 @@ _TEMPLATE_BLOB_MIN = 100
 # hold several defenders, so five rows is nowhere near five candidates.
 _MAX_SCORED = 18
 
-# The static-marking mask (see HelmetDetector._freeze_static) is built from
-# this many frames; a pixel red in at least this share of them is scenery.
+# The static-marking mask (see HelmetDetector._freeze_static) is built over
+# this long; a pixel red in at least this share of the frames seen in it is
+# scenery.
+#
+# A duration and not a count of frames, like everything else that is timed
+# in this module: what the warm-up waits for is the defenders to move off
+# the pixels they happen to be standing on, and how long that takes is a
+# fact about the rink rather than about the capture backend. Six seconds is
+# the eighty frames this used to ask for, at the ~13 a second PrintWindow
+# managed; Windows Graphics Capture would have finished the same eighty in
+# two, before a slow patrol had crossed its own helmet's width.
+#
+# The sample floor is the other half of it — the ratio is a share of the
+# frames actually seen, and a share of four frames means nothing.
 #
 # What the mask is for is narrower than it first looks. A marking being
 # reported *as* a helmet is already handled by shape and by the photo score,
@@ -90,8 +103,9 @@ _MAX_SCORED = 18
 # overlaps the line, which is both intermittent and worst near the middle of
 # the rink. Optional, and off by default, because it costs a warm-up and
 # this rink may well have no red lines at all.
-_STATIC_FRAMES = 80
-_STATIC_RATIO  = 0.90
+_STATIC_S       = 6.0
+_STATIC_SAMPLES = 40
+_STATIC_RATIO   = 0.90
 
 # Rows thinner than this cannot be searched meaningfully — see
 # Geometry.lane_rows, which clamps a badly calibrated row to nothing.
@@ -144,7 +158,20 @@ _EXPECTED_FLOOR  = 0.40
 #
 # _EXPECTED_FLOOR still applies, so this admits a helmet the gate was too
 # strict for, not any red thing that happens to sit still.
-_STEADY_FRAMES = 50
+#
+# "A while" is a duration. The fifty frames it used to be were three and
+# three quarter seconds of PrintWindow and would be a second and a quarter
+# of Windows Graphics Capture — and a patrol pausing at a board holds still
+# for longer than that, which is precisely the thing this must not admit.
+#
+# The record is sampled rather than taken every frame. Standing still does
+# not need looking at forty times a second, and _is_steady is asked about
+# every candidate of every scan: at the full rate it would be comparing
+# every candidate against a hundred and fifty frames of every other
+# candidate, in Python, inside the loop whose pace is the measurement.
+# Sampling keeps that cost where it was however fast the frames arrive.
+_STEADY_S      = 3.75
+_STEADY_EVERY_S = 0.075
 _STEADY_SHARE  = 0.70
 _STEADY_PX     = 10
 
@@ -286,9 +313,16 @@ class HelmetDetector:
         self._use_static = bool(getattr(cfg, "static_mask", False))
         self._counter: np.ndarray | None = None   # per-pixel red tally
         self._counted = 0
+        self._learning_since: float | None = None
         self._static: np.ndarray | None = None    # frozen mask, bool
-        # Recent frames' plausible blobs, for _is_steady.
-        self._recent: deque[tuple[float, ...]] = deque(maxlen=_STEADY_FRAMES)
+        # (t, plausible blobs) sampled from recent frames, for _is_steady.
+        self._recent: deque[tuple[float, tuple[complex, ...]]] = deque()
+        self._sampled_at: float | None = None
+        # The moment of the last frame this detector was shown. Every window
+        # here is measured against it rather than against the wall clock: a
+        # warm-up is however much rink went past, and a detector that is not
+        # being fed is not watching, whatever the time says.
+        self._last_seen: float | None = None
 
     # ── Static marking mask ──────────────────────────────────────────────
 
@@ -297,21 +331,30 @@ class HelmetDetector:
         the mask is switched off, which is the default."""
         return not self._use_static or self._static is not None
 
-    def static_progress(self) -> tuple[int, int]:
-        return self._counted, _STATIC_FRAMES
+    def static_progress(self) -> tuple[float, float]:
+        """Seconds of warm-up done and seconds needed."""
+        return self._learning_for(), _STATIC_S
 
     def reset_static(self):
         self._counter = None
         self._counted = 0
+        self._learning_since = None
         self._static  = None
 
-    def _learn_static(self, red: np.ndarray):
+    def _learning_for(self) -> float:
+        if self._learning_since is None or self._last_seen is None:
+            return 0.0
+        return max(0.0, self._last_seen - self._learning_since)
+
+    def _learn_static(self, red: np.ndarray, now: float):
         if self._counter is None or self._counter.shape != red.shape:
             self._counter = np.zeros(red.shape, np.int32)
             self._counted = 0
+            self._learning_since = now
         self._counter += (red > 0)
         self._counted += 1
-        if self._counted >= _STATIC_FRAMES:
+        if (self._learning_for() >= _STATIC_S
+                and self._counted >= _STATIC_SAMPLES):
             self._static = self._freeze_static()
 
     def _freeze_static(self) -> np.ndarray:
@@ -406,7 +449,7 @@ class HelmetDetector:
 
     # ── Scanning ─────────────────────────────────────────────────────────
 
-    def _red_mask(self, frame: np.ndarray) -> np.ndarray:
+    def _red_mask(self, frame: np.ndarray, now: float) -> np.ndarray:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         low = cv2.inRange(hsv, (_HUE_LOW[0], self._sat_min, self._val_min),
                                 (_HUE_LOW[1], 255, 255))
@@ -416,14 +459,28 @@ class HelmetDetector:
 
         if self._use_static:
             if self._static is None:
-                self._learn_static(red)
+                self._learn_static(red, now)
             if self._static is not None and self._static.shape == red.shape:
                 red[self._static] = 0
         return red
 
+    def _clock(self, now: float | None) -> float:
+        """The moment this frame was taken, and the bookkeeping that goes
+        with having been shown one.
+
+        Every window in this module is in seconds, so every entry point has
+        to know when it is. Callers that are timing something pass their own
+        `now` — the scan loop's, which is the same one the tracker stamps
+        its samples with — and the rest get the clock.
+        """
+        if now is None:
+            now = time.monotonic()
+        self._last_seen = now
+        return now
+
     def scan(self, frame: np.ndarray,
-             expected: dict[int, list[float]] | None = None
-             ) -> dict[int, list[LaneHit]]:
+             expected: dict[int, list[float]] | None = None,
+             now: float | None = None) -> dict[int, list[LaneHit]]:
         """One entry per configured row: every defender in it, left to
         right. An empty list is a row with nobody in it, which is normal —
         a level shows some subset of the rows, not all of them.
@@ -437,12 +494,15 @@ class HelmetDetector:
         `expected` is where the model believes each row's defenders are, by
         row index. Candidates landing on one of those are held to a lower
         photo score — see _EXPECTED_RELIEF.
+
+        `now` is when this frame was taken — see _clock.
         """
-        found, _candidates = self.scan_debug(frame, expected)
+        found, _candidates = self.scan_debug(frame, expected, now)
         return found
 
     def scan_debug(self, frame: np.ndarray,
-                   expected: dict[int, list[float]] | None = None
+                   expected: dict[int, list[float]] | None = None,
+                   now: float | None = None
                    ) -> tuple[dict[int, list[LaneHit]], list[LaneHit]]:
         """The same scan, plus every candidate it considered — accepted or
         not. What the debug snapshot draws.
@@ -457,7 +517,8 @@ class HelmetDetector:
         both its area and its shape. Neither can happen to a component found
         whole and assigned once.
         """
-        red  = self._red_mask(frame)
+        now  = self._clock(now)
+        red  = self._red_mask(frame, now)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         candidates = self._candidates(self._band(red), gray, _MAX_SCORED)
@@ -466,7 +527,7 @@ class HelmetDetector:
         for hit in candidates:
             hit.lane = self._nearest_lane(hit.y)
             if not hit.accepted and (self._was_expected(hit, expected)
-                                     or self._is_steady(hit)):
+                                     or self._is_steady(hit, now)):
                 hit.accepted = True
                 hit.relieved = True
         # Last, so that a jersey cannot be let back in by having sat still:
@@ -477,8 +538,25 @@ class HelmetDetector:
                 found[hit.lane].append(hit)
         for hits in found.values():
             hits.sort(key=lambda hit: hit.x)
-        self._recent.append(tuple(complex(hit.x, hit.y) for hit in candidates))
+        self._remember(candidates, now)
         return found, candidates
+
+    def _remember(self, candidates: list[LaneHit], now: float):
+        """Add this frame to the record _is_steady reads, at most every
+        _STEADY_EVERY_S, and drop what has fallen out of the window.
+
+        One sample more than the window is kept on purpose: the oldest one
+        has to be a full _STEADY_S old for the record to cover the whole
+        stretch, and a record trimmed to exactly the window never has one.
+        """
+        if (self._sampled_at is not None
+                and now - self._sampled_at < _STEADY_EVERY_S):
+            return
+        self._sampled_at = now
+        self._recent.append((now, tuple(complex(hit.x, hit.y)
+                                        for hit in candidates)))
+        while self._recent and now - self._recent[0][0] > _STEADY_S + _STEADY_EVERY_S:
+            self._recent.popleft()
 
     def _drop_body_parts(self, candidates: list[LaneHit]):
         """Un-accept red that belongs to somebody already found.
@@ -515,14 +593,22 @@ class HelmetDetector:
                 and lower.y <= top + height
                 and abs(lower.x - upper.x) <= width / _BODY_PART_WIDTH)
 
-    def _is_steady(self, hit: LaneHit) -> bool:
+    def _is_steady(self, hit: LaneHit, now: float) -> bool:
         """Whether a helmet-shaped blob has been sitting right here for a
-        while — see _STEADY_FRAMES."""
-        if hit.match < _EXPECTED_FLOOR or len(self._recent) < _STEADY_FRAMES:
+        while — see _STEADY_S.
+
+        The record has to reach back the whole of that stretch before the
+        question can be answered at all: a detector three seconds into a run
+        has no idea whether anything has been standing for three and three
+        quarter, however many frames it has seen in the meantime.
+        """
+        if hit.match < _EXPECTED_FLOOR or not self._recent:
+            return False
+        if now - self._recent[0][0] < _STEADY_S:
             return False
         here = complex(hit.x, hit.y)
-        seen = sum(any(abs(spot - here) <= _STEADY_PX for spot in frame)
-                   for frame in self._recent)
+        seen = sum(any(abs(spot - here) <= _STEADY_PX for spot in blobs)
+                   for _at, blobs in self._recent)
         return seen >= _STEADY_SHARE * len(self._recent)
 
     def _was_expected(self, hit: LaneHit,
@@ -576,8 +662,9 @@ class HelmetDetector:
         reports something when rows are what is misconfigured."""
         return [hit for hit in self.scan_all_debug(frame) if hit.accepted]
 
-    def scan_all_debug(self, frame: np.ndarray) -> list[LaneHit]:
-        red  = self._red_mask(frame)
+    def scan_all_debug(self, frame: np.ndarray,
+                       now: float | None = None) -> list[LaneHit]:
+        red  = self._red_mask(frame, self._clock(now))
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return self._candidates(red, gray, _MAX_SCORED)
 

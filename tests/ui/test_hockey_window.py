@@ -26,6 +26,17 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def _leave_the_backend_as_found():
+    """Starting a watch asks for Windows Graphics Capture, and nothing ever
+    asks for it back — which is right in the app and wrong in a suite. Left
+    on, every later test that captures anything spends two seconds failing
+    to open a session against a window that was never real."""
+    yield
+    from app.core import capture
+    capture.set_wgc_enabled(False)
+
+
 class _WM:
     def get_game_hwnd(self): return 0
     def is_game_alive(self): return False
@@ -54,14 +65,16 @@ def _with_game(monkeypatch, window, frame=None, hwnd=4242):
     itself is never really touched."""
     monkeypatch.setattr(window._wm, "get_game_hwnd", lambda: hwnd,
                         raising=False)
+    # `fresh` is taken and ignored: which backend is answering and whether
+    # it had to wait for a redraw is not what any of these tests are about.
     if frame is None:
         monkeypatch.setattr(
             window_module, "grab_window",
-            lambda h, region: np.zeros(
+            lambda h, region, fresh=True: np.zeros(
                 (region["height"], region["width"], 3), np.uint8))
     else:
         monkeypatch.setattr(window_module, "grab_window",
-                            lambda h, region: frame)
+                            lambda h, region, fresh=True: frame)
 
 
 def _frame_with_helmet(left, top, size=24):
@@ -474,7 +487,7 @@ def test_a_still_defender_is_predicted_where_it_stands(
     window._toggle_running()
     monkeypatch.setattr(window_module, "time", _Clock())
 
-    for _ in range(60):        # enough to decide nobody here is moving
+    for _ in range(140):       # past motion._MIN_STILL_S of model time
         window._scan_tick(window._geometry())
 
     report = window._motion.reports()[0]
@@ -702,7 +715,7 @@ def test_the_checking_switch_takes_effect_at_once(tmp_path, monkeypatch, app):
     _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
     window._toggle_running()
     monkeypatch.setattr(window_module, "time", _Clock())
-    for _ in range(60):
+    for _ in range(140):       # past motion._MIN_STILL_S of model time
         window._scan_tick(window._geometry())
     assert window._checking() is False
 
@@ -746,7 +759,7 @@ def test_nothing_is_fired_without_a_measured_trajectory(
     _with_game(monkeypatch, window, frame=_frame_with_helmet(left=80, top=188))
     window._toggle_running()
     monkeypatch.setattr(window_module, "time", _Clock())
-    for _ in range(60):
+    for _ in range(140):       # past motion._MIN_STILL_S of model time
         window._scan_tick(window._geometry())
     assert window._motion.ready()
     lines = _capture_log(monkeypatch, window)

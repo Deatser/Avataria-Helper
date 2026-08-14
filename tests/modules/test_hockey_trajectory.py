@@ -264,17 +264,21 @@ def test_the_puck_survives_being_hidden_behind_a_defender():
 
 def test_a_gap_too_long_to_bridge_is_not_bridged():
     """The allowance stops growing, so a jump cannot reach halfway across
-    the rink and call it the same puck."""
+    the rink and call it the same puck. Out of sight for longer than
+    _MAX_GAP_S — a duration, so the same shot is judged the same way however
+    fast the frames were arriving."""
     cfg = _config()
+    step = 0.03
 
     def moving(i):
-        if 8 <= i <= 25:       # eighteen frames — beyond reach
+        if 0.45 <= i * step < 1.05:        # 0.63s, past the allowance
             return []
         return [(1200, 1050 - 9 * i, 14)]
 
-    samples = _fly(cfg, moving, frames=40).resolve().samples
+    samples = _fly(cfg, moving, frames=45, step=step).resolve().samples
 
-    assert not samples or samples[-1].y > 850
+    assert samples, "the run before the gap is a chain in its own right"
+    assert samples[-1].y > 850             # and it ends there
 
 
 def test_the_games_own_aim_guide_is_not_a_candidate():
@@ -564,3 +568,61 @@ def test_and_nothing_is_spread_without_a_straight_shot_to_spread_from():
                                  x_enter=1360.0, x_exit=1360.0, spread=0.0)]}
 
     assert spread_aims(only_side) == only_side
+
+
+# ── However fast the frames arrive ───────────────────────────────────────
+# The chain used to be built in frame numbers: how far the puck must rise
+# per frame, how many frames it may go unseen, how many of them make a
+# flight rather than a coincidence. All of it was tuned against the ~13 a
+# second PrintWindow managed, and none of it is a fact about a puck. A
+# flight is the one measurement here that the faster capture exists for —
+# every crossing time is interpolated across one frame gap, and there were
+# 22 of them in a whole flight.
+
+_SLOW_STEP = 0.077     # PrintWindow: 44.6ms a grab, plus the encode
+_FAST_STEP = 0.025     # WGC, paced by the game's own redraws
+
+
+def _rising(step, speed=300.0, hidden=None):
+    """A puck leaving the stick at `speed` px/s, optionally invisible over
+    the (from, to) seconds it spends behind somebody."""
+    def moving(i):
+        t = i * step
+        if hidden is not None and hidden[0] <= t < hidden[1]:
+            return []
+        return [(1200, 1050 - speed * t, 14)]
+    return moving
+
+
+def test_a_flight_measures_the_same_at_either_capture_rate():
+    cfg = _config()
+    geom = from_config(cfg)
+
+    both = [crossings(geom, _fly(cfg, _rising(step), frames=int(1.5 / step),
+                                 step=step).resolve())
+            for step in (_SLOW_STEP, _FAST_STEP)]
+
+    slow, fast = both
+    assert len(slow) == len(fast) == 2
+    for one, other in zip(slow, fast):
+        assert abs(one.t_enter - other.t_enter) < 0.08
+        assert abs(one.t_exit - other.t_exit) < 0.08
+
+
+def test_the_puck_may_be_hidden_for_as_long_however_many_frames_that_is():
+    """It passes behind the defenders it is being timed against and a
+    difference image loses it for as long as that lasts. Ten frames was half
+    a second of PrintWindow and is a quarter of one at WGC's rate — and two
+    left-post shots in three already died in exactly this gap when the
+    allowance was measured in frames (2026-08-10)."""
+    cfg = _config()
+
+    for step in (_SLOW_STEP, _FAST_STEP):
+        flight = _fly(cfg, _rising(step, hidden=(0.5, 0.95)),
+                      frames=int(1.5 / step), step=step)
+
+        samples = flight.resolve().samples
+
+        assert samples, f"nothing followed at {step}s a frame"
+        assert min(s.y for s in samples) < 750, (
+            f"the chain stopped at the gap at {step}s a frame")

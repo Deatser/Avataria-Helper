@@ -173,7 +173,8 @@ def _wgc_session(hwnd: int):
         return session
 
 
-def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
+def grab_window(hwnd: int, region: dict | None = None,
+                fresh: bool = True) -> np.ndarray:
     """Capture hwnd's own content, wherever it sits in the window stack.
 
     ScreenCapture.grab reads the screen, which only ever shows whatever is
@@ -185,6 +186,11 @@ def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
     other region in this codebase uses; it is converted to window-relative
     pixels here using hwnd's own current position.
 
+    `fresh=False` says this caller is not building a time series and will
+    take whatever picture is already in hand — see WindowSession.grab, which
+    is the only backend the flag means anything to. PrintWindow draws the
+    window on the spot, so everything it returns is new either way.
+
     The GDI calls below transiently fail under load — the same reason
     ScreenCapture.grab retries its own BitBlt — so a failure here gets a
     couple of fresh attempts before it is allowed to propagate.
@@ -193,7 +199,7 @@ def grab_window(hwnd: int, region: dict | None = None) -> np.ndarray:
         session = _wgc_session(hwnd)
         if session is not None:
             try:
-                return session.grab(region)
+                return session.grab(region, fresh=fresh)
             except Exception:
                 # Minimised, closed, moved — whatever it was, PrintWindow can
                 # still answer. Tear the session down so the next call starts

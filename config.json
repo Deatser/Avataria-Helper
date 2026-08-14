@@ -1,35 +1,36 @@
 {
     "overlay": {
-        "x": 169,
-        "y": 102,
-        "width": 678,
-        "height": 569,
+        "x": 42,
+        "y": 99,
+        "width": 713,
+        "height": 828,
         "opacity": 220,
         "skip_close_confirm": true,
         "background": "",
         "video_background": false,
-        "show_links": true
+        "show_links": true,
+        "log_animation": false
     },
     "ava_dancers": {
-        "favorite": true,
+        "favorite": false,
         "position_saved": true,
-        "x": 165,
-        "y": 718,
-        "width": 478,
-        "height": 654,
+        "x": 291,
+        "y": 409,
+        "width": 479,
+        "height": 707,
         "lit_share": 0.008,
         "red_share": 0.03,
         "hue_share": 0.15,
         "background": "",
         "video_background": false,
-        "finish_on": "silver",
+        "finish_on": "gold",
         "auto_restart": true
     },
     "gardener": {
         "favorite": false,
         "position_saved": true,
-        "x": 985,
-        "y": 174,
+        "x": 1228,
+        "y": 118,
         "width": 531,
         "height": 700,
         "show_kind_buttons": false,
@@ -38,8 +39,8 @@
     "janitor": {
         "favorite": false,
         "position_saved": true,
-        "x": 619,
-        "y": 764,
+        "x": 1644,
+        "y": 360,
         "width": 621,
         "height": 622,
         "show_kind_buttons": true,
@@ -58,21 +59,170 @@
     "hockey": {
         "favorite": false,
         "position_saved": true,
-        "x": 1015,
-        "y": 255,
+        "x": 90,
+        "y": 343,
         "width": 755,
         "height": 888,
         "background": "",
-        "video_background": false
+        "video_background": false,
+        "rink_left": 899,
+        "rink_top": 385,
+        "rink_width": 761,
+        "rink_height": 652,
+        "lanes": [
+            {
+                "y": 574,
+                "height": 44,
+                "wall_left": 1056,
+                "wall_right": 1495,
+                "body_w": 41,
+                "body_h": 123,
+                "body_dy": -19
+            },
+            {
+                "y": 602,
+                "height": 49,
+                "wall_left": 1048,
+                "wall_right": 1522,
+                "body_w": 51,
+                "body_h": 144,
+                "body_dy": -25
+            },
+            {
+                "y": 636,
+                "height": 51,
+                "wall_left": 1024,
+                "wall_right": 1531,
+                "body_w": 63,
+                "body_h": 155,
+                "body_dy": -26
+            },
+            {
+                "y": 686,
+                "height": 62,
+                "wall_left": 1008,
+                "wall_right": 1564,
+                "body_w": 69,
+                "body_h": 162,
+                "body_dy": -28
+            },
+            {
+                "y": 738,
+                "height": 54,
+                "wall_left": 971,
+                "wall_right": 1606,
+                "body_w": 73,
+                "body_h": 200,
+                "body_dy": -44
+            }
+        ],
+        "wall_left": 1036,
+        "wall_right": 1532,
+        "shooter_x": 1280,
+        "shooter_y": 1007,
+        "goal_y": 665,
+        "goal_left": 1136,
+        "goal_right": 1409,
+        "goalie_half_w": 50,
+        "puck_radius": 10,
+        "red_sat_min": 120,
+        "red_val_min": 80,
+        "blob_area_min": 150,
+        "player_match_min": 0.6,
+        "lane_height": 120,
+        "static_mask": false,
+        "predict_now": false,
+        "verbose_log": true,
+        "fine_aim": true,
+        "light_log": false,
+        "hide_overlays": false,
+        "orange_mode": true,
+        "auto_shot": false,
+        "level_cells": [
+            {
+                "left": 1025,
+                "top": 427,
+                "width": 40,
+                "height": 40
+            },
+            {
+                "left": 1076,
+                "top": 428,
+                "width": 40,
+                "height": 40
+            },
+            {
+                "left": 1128,
+                "top": 427,
+                "width": 40,
+                "height": 40
+            },
+            {
+                "left": 1180,
+                "top": 426,
+                "width": 40,
+                "height": 40
+            },
+            {
+                "left": 1233,
+                "top": 426,
+                "width": 38,
+                "height": 40
+            },
+            {
+                "left": 1285,
+                "top": 428,
+                "width": 40,
+                "height": 40
+            },
+            {
+                "left": 1336,
+                "top": 427,
+                "width": 40,
+                "height": 40
+            },
+            {
+                "left": 1390,
+                "top": 428,
+                "width": 40,
+                "height": 40
+            },
+            {
+                "left": 1439,
+                "top": 426,
+                "width": 40,
+                "height": 40
+            }
+        ]
     },
     "stats_window": {
         "favorite": false,
         "position_saved": true,
-        "x": 1633,
-        "y": 169,
+        "x": 192,
+        "y": 273,
         "width": 519,
         "height": 657,
         "background": "",
         "video_background": false
+    },
+    "promo": {
+        "position_saved": true,
+        "x": 1736,
+        "y": 184,
+        "width": 556,
+        "height": 888,
+        "background": "",
+        "video_background": false,
+        "detect_enabled": false
+    },
+    "energy": {
+        "favorite": false,
+        "position_saved": true,
+        "x": 1727,
+        "y": 338,
+        "width": 763,
+        "height": 543,
+        "bar_amount": 1000,
+        "pay_with": "silver"
     }
 }

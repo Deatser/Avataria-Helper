@@ -30,7 +30,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout
 
 import cv2
 
-from app.core.capture import grab_window
+from app.core.capture import grab_window, set_wgc_enabled
 from app.core.input_sender import mouse_down_at, mouse_move_to, mouse_up_at
 from app.core.template_match import best_match, load_template
 from app.ui import theme
@@ -233,15 +233,24 @@ _CALIB_DEFAULT_H = 200
 # Detection cadence. The old template-matching detector could not come close
 # to keeping up with its own 70ms timer (six full-rink matchTemplate passes,
 # ~250ms of work), which is half of why tracking never settled; one HSV pass
-# over the rink costs a few milliseconds, so the limit is now how smoothly
-# the boxes should move rather than how fast the scan can go.
-_SCAN_MS = 30
+# over the rink costs a few milliseconds.
+#
+# Asked for far more often than it can be given, on purpose. Windows
+# Graphics Capture blocks until the window has drawn a frame nobody on this
+# thread has read, so the game's own redraws set the pace — some 40 a second
+# — and the timer only has to stop adding to it. At 30ms the loop was
+# measured taking 61ms a frame with PrintWindow doing 44.6 of it; the point
+# of the faster backend is that the wait is now the game drawing rather than
+# the helper photographing.
+_SCAN_MS = 10
 
-# Consecutive failed captures before tracking gives up and says so. A single
-# failure is routine (grab_window's own GDI calls fail transiently under
-# load), but swallowing them forever would leave the boxes frozen on stale
-# positions with nothing in the log to say why.
-_MAX_SCAN_FAILURES = 20
+# How long capture may go on failing before tracking gives up and says so. A
+# single failure is routine (grab_window's own GDI calls fail transiently
+# under load), but swallowing them forever would leave the boxes frozen on
+# stale positions with nothing in the log to say why. In seconds and not in
+# ticks: twenty ticks was over a second of PrintWindow and is a fifth of one
+# now, which is a hiccup rather than a broken window.
+_SCAN_FAIL_S = 1.5
 
 # How long "Тест детекции" records for. Long enough that a patrol crosses a
 # stander and a helmet passes behind another — the moments detection is
@@ -251,16 +260,19 @@ _MAX_SCAN_FAILURES = 20
 _BURST_S = 5.0
 
 # And how long a watch counts heads before it tries to calibrate anything.
-# Long enough to tell a stander from a patrol — that takes _MIN_STILL_FRAMES
-# of watching, which at the ~13 frames a second this rink actually manages
-# is about three seconds.
+# Long enough to tell a stander from a patrol, which motion._MIN_STILL_S
+# puts at three seconds — a duration now rather than a count of frames, so
+# the census is over the same stretch of rink life whatever the capture
+# backend is managing.
 _CENSUS_S = 5.0
 
 # The flight is watched as fast as the machine manages rather than on a
 # fixed beat. At 30ms the loop was measured taking 61ms a frame — the timer
 # was never the limit, the capture and the encode were — so a whole flight
 # came to 22 frames and every crossing time was interpolated across a 60ms
-# gap (2026-08-10). Asking for 10ms simply stops the timer adding to it.
+# gap (2026-08-10). Asking for 10ms simply stops the timer adding to it,
+# and Windows Graphics Capture takes the other half of that cost away: the
+# gap a crossing is interpolated across is now the game's own redraw.
 _FLIGHT_SCAN_MS = 10
 
 # How often a watch reports its own accuracy. Watching a ghost and waiting
@@ -402,7 +414,7 @@ class HockeyWindow(ModuleWindow):
         self._forced = False
         self._forcing = False
         self._started_at: float | None = None
-        self._scan_failures = 0
+        self._failing_since: float | None = None
         self._field_shown = False
         self._row_shown   = False
         self._dragging    = False
@@ -660,14 +672,39 @@ class HockeyWindow(ModuleWindow):
     def _geometry(self):
         return from_config(self.config)
 
-    def _grab(self, geom):
-        """One rink-sized frame, or None with the reason already logged."""
+    @staticmethod
+    def _fast_capture():
+        """Ask for Windows Graphics Capture before anything is measured.
+
+        Always, and not a setting: it is the same picture some three times as
+        often, it falls back to PrintWindow by itself if the game is ever
+        minimised, and everything this window reports is worked out from how
+        far a defender moved between two frames — so how often frames arrive
+        is the resolution of every answer it gives.
+
+        Here rather than in __init__, because the switch is the whole
+        application's and not this window's. The overlay builds every
+        module's window at startup, so setting it there put the gardener and
+        the rest onto a backend they had not asked for, before the helper had
+        been told to do anything at all.
+        """
+        set_wgc_enabled(True)
+
+    def _grab(self, geom, fresh: bool = True):
+        """One rink-sized frame, or None with the reason already logged.
+
+        `fresh` is for the difference between a look and a measurement — see
+        grab_window. A one-off check that the rink can be photographed at all
+        wants whatever is on screen; anything recording a series of frames
+        has to have one nobody has read, or two of its samples are the same
+        picture and the defender between them stood still.
+        """
         hwnd = self._wm.get_game_hwnd()
         if not hwnd:
             self._log.add_log("Игровое окно не найдено", level="error")
             return None
         try:
-            return grab_window(hwnd, geom.region)
+            return grab_window(hwnd, geom.region, fresh=fresh)
         except Exception as exc:
             self._log.add_log(f"Не удалось снять каток: {exc}", level="error")
             return None
@@ -697,8 +734,9 @@ class HockeyWindow(ModuleWindow):
                 "Нечего отслеживать — сначала отметьте ряды: цель «Ряд», "
                 "номер ряда, «Отметить область»", level="error")
             return
-        if self._grab(geom) is None:
-            return
+        self._fast_capture()
+        if self._grab(geom, fresh=False) is None:
+            return          # only asking whether it can be photographed
 
         # The model always measures itself over a real shot's flight, even
         # while the boxes are being drawn for *now*: at a zero horizon the
@@ -708,7 +746,7 @@ class HockeyWindow(ModuleWindow):
         # that should ride its defender.
         self._detector = HelmetDetector(geom, self.config)
         self._motion = MotionModel(geom, _PUCK_TRAVEL_S, orange=self._orange())
-        self._scan_failures = 0
+        self._failing_since = None
         self._status_at = 0.0
         self._announced_ready = False
         # Measured from the first frame that actually arrives, not from the
@@ -729,7 +767,8 @@ class HockeyWindow(ModuleWindow):
         self._announce_level()
         self._chatter(
             [("Слежение запущено — ", theme.TEXT_SECONDARY),
-             (f"{len(geom.lanes)} ряд(ов), такт {_SCAN_MS} мс", theme.HK_ICE),
+             (f"{len(geom.lanes)} ряд(ов), кадры по мере отрисовки игры",
+              theme.HK_ICE),
              (f".  Сначала {_CENSUS_S:.0f} с считаю состав — сколько вратарей "
               f"в каждом ряду и кто из них едет.", theme.TEXT_SECONDARY)])
         if self._orange():
@@ -790,14 +829,22 @@ class HockeyWindow(ModuleWindow):
         try:
             frame = grab_window(hwnd, geom.region)
         except Exception as exc:
-            self._scan_failures += 1
-            if self._scan_failures >= _MAX_SCAN_FAILURES:
+            failed_at = time.monotonic()
+            if self._failing_since is None:
+                self._failing_since = failed_at
+            elif failed_at - self._failing_since >= _SCAN_FAIL_S:
                 self._stop_running()
                 self._log.add_log(f"Каток не снимается: {exc}", level="error")
             return   # a transient capture failure costs one tick, not the run
-        self._scan_failures = 0
+        self._failing_since = None
         now = time.monotonic()
-        found = self._detector.scan(frame, self._motion.expectations(now))
+        # The detector is timed off the same clock as the tracker, and not
+        # off its own: everything it decides by watching — a blob that has
+        # been sitting still, the warm-up for the marking mask — is measured
+        # against the moment this frame was taken, which is the moment its
+        # detections are about to be stamped with.
+        found = self._detector.scan(frame, self._motion.expectations(now),
+                                    now=now)
         self._motion.feed(found, now)
         moving, fixed = self._predicted_boxes(geom, now)
         if self._hidden():
@@ -1396,8 +1443,9 @@ class HockeyWindow(ModuleWindow):
         if self._burst is not None:
             return                      # already running, let it finish
         geom = self._geometry()
-        if self._grab(geom) is None:
-            return
+        self._fast_capture()
+        if self._grab(geom, fresh=False) is None:
+            return          # only asking whether it can be photographed
 
         try:
             directory = debug_frame.burst_dir()
@@ -1834,7 +1882,8 @@ class HockeyWindow(ModuleWindow):
         try:
             strip = grab_window(hwnd, {"left": left, "top": top,
                                        "width": right - left,
-                                       "height": bottom - top})
+                                       "height": bottom - top},
+                                fresh=False)
         except Exception:
             return None
         if strip is None or strip.size == 0:
@@ -1962,9 +2011,13 @@ class HockeyWindow(ModuleWindow):
         bottom = max(cell["top"] + cell["height"]
                      for cell in marked) + _LEVEL_PAD
         try:
+            # Not a measurement, and this runs on the same thread as the
+            # scan loop — a strip reader that waited for a frame of its own
+            # would take every other one away from it. See grab_window.
             strip = grab_window(hwnd, {"left": left, "top": top,
                                        "width": right - left,
-                                       "height": bottom - top})
+                                       "height": bottom - top},
+                                fresh=False)
         except Exception:
             return None     # a transient capture failure costs one reading
         if strip is None or strip.size == 0:
@@ -2403,6 +2456,7 @@ class HockeyWindow(ModuleWindow):
         the shooter's own avatar animates the instant the button comes up,
         right where the puck starts, and a wrong first choice defends itself
         for the rest of the flight."""
+        self._fast_capture()
         self._flight = trajectory.PuckFlight(geom, aim, geom.shooter)
         self._flight_started = time.monotonic()
         self._flight_timer = QTimer(self)
@@ -2411,11 +2465,17 @@ class HockeyWindow(ModuleWindow):
         self._flight_timer.start(_FLIGHT_SCAN_MS)
 
     def _flight_tick(self, hwnd: int, geom, aim: float):
-        elapsed = time.monotonic() - self._flight_started
         try:
             frame = grab_window(hwnd, geom.region)
         except Exception:
             return   # one lost frame out of fifty changes nothing
+        # Stamped after the capture returns and not before it. Windows
+        # Graphics Capture blocks until the window has drawn a frame nobody
+        # has read, so a timestamp taken before the call belongs to the
+        # previous frame — every crossing time would be read a frame early,
+        # and by a different amount each time, which is exactly the jitter
+        # the faster capture was for.
+        elapsed = time.monotonic() - self._flight_started
         if not self._flight.feed(frame, elapsed):
             self._finish_flight(geom, aim)
 

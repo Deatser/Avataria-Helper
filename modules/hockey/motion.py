@@ -44,11 +44,21 @@ shoot — and it costs nothing to measure, since it never fires anything.
 from __future__ import annotations
 
 import math
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
+
+# Everything here is measured in seconds, never in frames.
+#
+# It used to be both, and the frame counts were all tuned against the ~13 a
+# second PrintWindow managed. Windows Graphics Capture hands over some 40,
+# which rescaled every one of them at once and without saying so: the window
+# a verdict is earned over shrank from a shot's flight to a third of it, and
+# the record a zone reads its boards off stopped holding a whole sweep of a
+# slow patrol. A number of frames is not a fact about the rink. How long
+# something was watched for is.
 
 # How much history is kept. Two full patrols is the minimum the period
 # search can work with at all, and more only makes it sharper, so this is
@@ -58,7 +68,12 @@ _BUFFER_S = 30.0
 
 # Samples arrive on a timer, so their spacing wobbles; the period search
 # needs an even one. Everything is resampled onto this grid first.
-_GRID_S = 0.04
+#
+# Finer than the old 40ms, which was already coarser than the frames now
+# arriving: interpolating real 25ms samples up onto a 40ms grid throws away
+# the resolution that was the point of capturing faster. The grid is what
+# the period is read off, and _sharpen notes what a coarse one costs.
+_GRID_S = 0.025
 
 # The band of patrol periods worth looking for. Below the first, nothing in
 # this game moves; above the second, a 30s buffer cannot hold the two full
@@ -80,8 +95,20 @@ _HARMONIC_MARGIN = 0.05
 # no period at all.
 _STILL_SPAN_PX = 14
 
-# Frames watched before anything is judged.
-_MIN_STILL_FRAMES = 40
+# How long anything has to be watched before it is judged at all — whether a
+# row has settled, whether a defender is standing rather than dawdling at a
+# board, whether a track is a defender or a stray blob.
+_MIN_STILL_S = 3.0
+
+# And the fewest samples a track may claim that on. Detection runs at 63-89%,
+# so three seconds is always tens of sightings; this only rules out the
+# degenerate track that was seen twice, three seconds apart, and has a span
+# to show for it but no record in between.
+_MIN_STILL_SAMPLES = 12
+
+# How long a stander's position is averaged over before it is reported. He
+# does not move, so this is pure smoothing of the centroid's own jitter.
+_STILL_MEAN_S = 2.3
 
 # How far a detection may sit from where a track expected to be and still be
 # that track. Generous enough to survive a defender being hidden for a
@@ -121,17 +148,35 @@ _MIN_TRACK_SHARE = 0.35
 # for a few frames of each sweep.
 _STANDING_SHARE = 0.50
 
-# How many turns at the board are remembered, and how far the defender has
-# to have moved between frames for the direction to count as read — below
-# that it is centroid jitter and every frame would look like a turn.
-_BOUNCE_MEMORY = 6
+# How far back "the record" reaches — every sighting of this row, whoever it
+# was of. Longer than the slowest patrol the fit will look for, because this
+# is what a zone's boards get read off and half a sweep gives half a board.
+_SIGHTING_WINDOW_S = 16.0
 
-# Frames the defender must be watched for on the way in and on the way out
-# before the point between them counts as a turn. A patrol too fast for its
-# zone never manages them, and then nothing is claimed at all — which is the
-# right answer, not a defect.
+# And how far back the head count looks. Shorter on purpose: how many
+# defenders a row holds is a fact about the level, so the recent past is the
+# whole of the evidence and a long memory only carries the last one in.
+_COUNT_WINDOW_S = 4.5
+
+# How long the defender must be watched for on the way in and on the way out
+# before the point between them counts as a turn, and the fewest detections
+# that may say so. A patrol too fast for its zone never manages them, and
+# then nothing is claimed at all — which is the right answer, not a defect.
+#
+# Both halves, and for once neither is redundant. The counts alone were what
+# this asked for, and they were tuned at the ~13 frames a second PrintWindow
+# managed, where four of them are a third of a second of approach; at the
+# ~40 Windows Graphics Capture hands over, the same four are a tenth, and a
+# centroid wobbling at the deep end of the zone clears them. That is the
+# failure this was written against in the first place (2026-08-10: row 5's
+# period flickering between 1.21, 1.31 and 3.63 seconds). The durations are
+# what those counts used to mean, so the gate stays where it was tuned
+# whatever rate the frames arrive at, while the counts still rule out a turn
+# read off two lonely detections either side of a long gap.
 _MIN_ZONE_SAMPLES = 4
-_MIN_RETREAT = 2
+_MIN_RETREAT      = 2
+_MIN_APPROACH_S   = 0.30
+_MIN_RETREAT_S    = 0.15
 
 # And what the fallback's own predictions may be missing by before its
 # timing is thrown away and measured again — three times the gate below. A
@@ -193,10 +238,20 @@ _ZONE_OPEN_PX = 400.0
 # drawn over a longer gap can miss the turn entirely — see _Track.at.
 _MAX_SAMPLE_GAP_S = 0.30
 
-# How many recent samples a track's speed is measured over. One pair of
-# helmet centroids is mostly jitter; half a dozen frames is still short
-# enough to catch a turn at the boards.
-_SPEED_SAMPLES = 6
+# How far back a track's speed is measured over — the one place where a
+# count of samples is still the right thing to ask for, alongside a limit in
+# seconds rather than instead of it. They bound different mistakes and the
+# window is whichever of them is shorter.
+#
+# Too few samples and the "speed" is the jitter of two helmet centroids. Too
+# long a stretch and it is averaged across a turn at the boards, which is
+# where it is read most and matters most: a patrol of period 1.3s spends
+# 0.65s on a sweep, so half a second of history spans a reversal and reports
+# a defender at rest. That second failure is the one the faster capture
+# actually cures — six samples is half a second of PrintWindow and 0.15s of
+# WGC, so the same six now fit comfortably inside a sweep.
+_SPEED_SAMPLES  = 6
+_SPEED_WINDOW_S = 0.45
 
 # Two defenders expected this close together are inside one blob: the
 # detector's overlap suppression has already merged them and returns a
@@ -211,9 +266,17 @@ _COAST_S = 1.0
 # The rolling prediction error, and how good it has to be before this row
 # counts as predictable. 12px is comfortably inside the clearance a shot is
 # planned with, and comfortably outside the jitter of a helmet centroid.
-_ERROR_WINDOW = 30
+_ERROR_WINDOW_S = 2.3
 _MAX_ERROR_PX = 12.0
-_MIN_CHECKS   = 15      # comparisons needed before the error means anything
+
+# Comparisons needed before the error means anything, and — the half that
+# has to be counted in seconds — how much of the patrol they have to be
+# spread over. Either alone is cheap to satisfy and says nothing: fifteen
+# checks off consecutive frames at 40 a second all describe the same third
+# of a second of one sweep, and a mean over that is not evidence about a
+# patrol but about one moment of it.
+_MIN_CHECKS       = 15
+_MIN_CHECK_SPAN_S = 1.15
 
 # And no single check may be wilder than this. With the confidence gate
 # loosened, a period that is simply wrong can still average well for a
@@ -235,6 +298,18 @@ _FIT_DRIFT = 0.05
 # still says. Twice the threshold: visibility thickens the average, a wrong
 # period buries it.
 _VERDICT_VOID_PX = 2 * _MAX_ERROR_PX
+
+
+def _trim(record: deque, now: float, window: float):
+    """Drop everything older than `window` from a deque of (t, value).
+
+    What every record in this module is bounded by, in place of a maxlen. A
+    maxlen counts frames, and how many frames a second arrive is a fact
+    about the capture backend rather than about the rink.
+    """
+    cutoff = now - window
+    while record and record[0][0] < cutoff:
+        record.popleft()
 
 
 @dataclass(frozen=True)
@@ -336,6 +411,17 @@ class _Track:
         return len(self._t)
 
     @property
+    def watched(self) -> float:
+        """Seconds between this track's first surviving sample and its last.
+        Not its age: the record is trimmed to _BUFFER_S behind it."""
+        return (self._t[-1] - self._t[0]) if len(self._t) > 1 else 0.0
+
+    def samples_since(self, t: float) -> int:
+        """How often this track was seen from `t` onwards — the numerator of
+        every "in what share of the record" question asked about it."""
+        return len(self._t) - bisect_left(self._t, t)
+
+    @property
     def span(self) -> float:
         return (max(self._x) - min(self._x)) if self._x else 0.0
 
@@ -368,8 +454,14 @@ class _Track:
     @property
     def anchored(self) -> bool:
         """Stood still long enough to be taken on trust. Nothing about him
-        has to be worked out again: he is where he has always been."""
-        return self.still and len(self._t) >= _MIN_STILL_FRAMES
+        has to be worked out again: he is where he has always been.
+
+        Long enough is three seconds, not forty frames — at WGC's rate those
+        are a second and a half of standing, which a patrol dawdling at a
+        board manages without being a stander at all.
+        """
+        return (self.still and self.watched >= _MIN_STILL_S
+                and self.samples >= _MIN_STILL_SAMPLES)
 
     @property
     def patrolling(self) -> bool:
@@ -412,7 +504,7 @@ class _Track:
         if not self._t:
             return None
         if self.still:
-            return float(np.mean(self._x[-_ERROR_WINDOW:]))
+            return self._settled_x()
         if t <= self._t[-1]:
             return self.at(t)
         if self.period is None or self.confidence < _MIN_CONFIDENCE:
@@ -439,7 +531,7 @@ class _Track:
         otherwise the speed it was last seen at, folded inside its own
         bounds so it stays on the ice."""
         if self.still:
-            return float(np.mean(self._x[-_ERROR_WINDOW:]))
+            return self._settled_x()
         if self.period:
             steps = math.ceil((t - self._t[-1]) / self.period)
             for back in range(steps, steps + _MAX_LOOKBACKS):
@@ -472,12 +564,28 @@ class _Track:
         guess = self.predict(t)
         return guess if guess is not None else self._coast(gap)
 
+    def _settled_x(self) -> float:
+        """Where a track that does not move is, its jitter averaged out."""
+        return float(np.mean(self._x[self._back_to(_STILL_MEAN_S):]))
+
+    def _back_to(self, window: float) -> int:
+        """The first sample no older than `window`, but never the last one
+        on its own — two points are what any of this is measured from."""
+        if len(self._t) < 2:
+            return 0
+        cutoff = self._t[-1] - window
+        return min(bisect_right(self._t, cutoff), len(self._t) - 2)
+
     def _speed(self) -> float:
-        """Recent px per second, over a few samples rather than two — one
-        pair of helmet centroids is mostly jitter."""
+        """Recent px per second, over the shorter of a few samples and a
+        fraction of a second — see _SPEED_SAMPLES and _SPEED_WINDOW_S. Both
+        are ceilings on how far back to reach, so the later of the two
+        starting points wins.
+        """
         if len(self._t) < 2:
             return 0.0
-        back = max(0, len(self._t) - _SPEED_SAMPLES)
+        back = max(len(self._t) - _SPEED_SAMPLES,
+                   self._back_to(_SPEED_WINDOW_S))
         elapsed = self._t[-1] - self._t[back]
         if elapsed <= 0:
             return 0.0
@@ -766,10 +874,10 @@ class _Zone:
         Reading it a frame at a time called every wobble a turn: a fast
         patrol crosses a narrow zone in two or three frames, and row 5's
         period flickered between 1.21, 1.31 and 3.63 seconds from one status
-        line to the next (2026-08-10). Demanding frames either side of the
-        extreme also settles, for free, whether this zone can time this
-        patrol at all — too fast or too narrow and no chain ever qualifies,
-        so nothing is claimed.
+        line to the next (2026-08-10). Demanding a stretch of ice either side
+        of the extreme also settles, for free, whether this zone can time
+        this patrol at all — too fast or too narrow and no chain ever
+        qualifies, so nothing is claimed.
         """
         if len(chain) < _MIN_ZONE_SAMPLES + _MIN_RETREAT:
             return
@@ -777,6 +885,9 @@ class _Zone:
         turn = pick(range(len(chain)), key=lambda i: chain[i][1])
         if turn < _MIN_ZONE_SAMPLES or len(chain) - turn - 1 < _MIN_RETREAT:
             return                    # only saw him arrive, or only leave
+        if (chain[turn][0] - chain[0][0] < _MIN_APPROACH_S
+                or chain[-1][0] - chain[turn][0] < _MIN_RETREAT_S):
+            return                    # too brief either side to be a turn
         t, x = chain[turn]
         elapsed = t - chain[0][0]
         speed = abs(x - chain[0][1]) / elapsed if elapsed > 0 else 0.0
@@ -900,13 +1011,16 @@ class RowMotion:
                  width: float = 2000.0):
         self._horizon = float(horizon_s)
         self._tracks: list[_Track] = []
-        self._y: deque[float] = deque(maxlen=400)
+        self._y: deque[tuple[float, float]] = deque()
         self._pending: deque[tuple[float, tuple[float, ...]]] = deque()
-        self._errors: deque[float] = deque(maxlen=_ERROR_WINDOW)
+        self._errors: deque[tuple[float, float]] = deque()
         self._best: _Verdict | None = None
         self._green = False
         self._zone: tuple[float, float, bool] | None = None   # lo, hi, right
         self._board: _Zone | None = None
+        # Whether the zone was the one answering last tick — see
+        # _doubt_the_board, which empties the error window at every handover.
+        self._board_answering = False
         # Predict this row from its board zone and nothing else — see
         # MotionModel.orange.
         self.orange = False
@@ -916,11 +1030,16 @@ class RowMotion:
         self._refit_at = 0.0
         self._ticks = 0
         self._seen  = 0
-        self._counts: deque[int] = deque(maxlen=60)
+        self._last_tick = 0.0
+        # (t, how many were seen) per tick, for the head count.
+        self._counts: deque[tuple[float, int]] = deque()
         # (t, xs) per tick — the timestamp is what _seen_at needs. Long
         # enough to hold a whole sweep of a slow patrol, since the span of
         # what has been seen is where a zone's boards come from.
-        self._sightings: deque = deque(maxlen=200)
+        self._sightings: deque = deque()
+        # Standing spots as of the last tick, or None when they have to be
+        # worked out again — see standing_spots.
+        self._spots: list[float] | None = None
         self._first_seen: float | None = None
 
     # ── Taking observations ──────────────────────────────────────────────
@@ -935,10 +1054,14 @@ class RowMotion:
         self._last_tick = t
         if xs:
             self._seen += 1
-        self._counts.append(len(xs))
+        self._counts.append((t, len(xs)))
         self._sightings.append((t, tuple(float(x) for x in xs)))
         for y in (ys or ()):
-            self._y.append(float(y))
+            self._y.append((t, float(y)))
+        _trim(self._counts, t, _COUNT_WINDOW_S)
+        _trim(self._sightings, t, _SIGHTING_WINDOW_S)
+        _trim(self._y, t, _BUFFER_S)
+        self._spots = None      # the record moved; the tally is stale
 
         if self._board is not None and self._zone is not None:
             low, high, _right = self._zone
@@ -1068,6 +1191,7 @@ class RowMotion:
         """Compare predictions whose moment has arrived against what really
         happened. This is the whole verification story: no shot is fired to
         find out whether the model works."""
+        _trim(self._errors, now, _ERROR_WINDOW_S)
         while self._pending and self._pending[0][0] <= now:
             due, predicted = self._pending[0]
             latest = max((track._t[-1] for track in self._tracks
@@ -1091,9 +1215,21 @@ class RowMotion:
             # a stander at 700, and reads as a 500px failure when nothing
             # was wrong. What a shot actually needs to know is whether
             # anybody turned up somewhere unforeseen.
-            self._errors.append(float(np.mean(
+            self._errors.append((due, float(np.mean(
                 [min(abs(seen - guess) for guess in predicted)
-                 for seen in actual])))
+                 for seen in actual]))))
+
+    def _error_values(self) -> list[float]:
+        """The misses alone, without the moments they were measured at."""
+        return [error for _due, error in self._errors]
+
+    def _checks_ready(self) -> bool:
+        """Whether the checks in hand say anything yet: enough of them, and
+        spread over enough of a patrol to be about the patrol rather than
+        about one moment of it — see _MIN_CHECK_SPAN_S."""
+        if len(self._errors) < _MIN_CHECKS:
+            return False
+        return self._errors[-1][0] - self._errors[0][0] >= _MIN_CHECK_SPAN_S
 
     def _doubt_the_board(self):
         """Throw the bounce timing away when its own predictions do not hold.
@@ -1106,19 +1242,32 @@ class RowMotion:
         rather than switched off: with the turns re-counted it either
         measures something better or measures nothing, and nothing is an
         honest answer that puts the row back on its trackers.
+
+        Whose misses these are has to be settled first. The row swaps
+        predictors the moment a third turn makes a patrol — and the window
+        it is judged on still holds the misses whoever answered *before*
+        made. Judging the board on those is what the guard below was for,
+        but the guard is read now and the misses were made then: at 40
+        frames a second the board was condemned the tick it arrived, over
+        and over, and never held three turns long enough to be worth
+        anything. So the window is emptied at the handover, and each of them
+        answers for its own.
+
+        The None is real and not defensive: in orange mode a row where
+        everybody stands is ready without a zone at all, since there is
+        nothing in it to time (2026-08-11).
         """
-        if self._board is None or not self.by_board_ready():
-            # Not the board's predictions being checked, so not the board's
-            # fault. It was throwing its timing away over the trackers'
-            # misses, before it had answered a single question.
-            #
-            # The None is real and not defensive: in orange mode a row where
-            # everybody stands is ready without a zone at all, since there
-            # is nothing in it to time (2026-08-11).
+        answering = self._board is not None and self.by_board_ready()
+        if answering != self._board_answering:
+            self._board_answering = answering
+            self._errors.clear()
+            self._pending.clear()
             return
-        if len(self._errors) < _MIN_CHECKS:
+        if not answering:
             return
-        if float(np.mean(self._errors)) <= _HOPELESS_PX:
+        if not self._checks_ready():
+            return
+        if float(np.mean(self._error_values())) <= _HOPELESS_PX:
             return
         self._board.forget()
         self._errors.clear()
@@ -1152,12 +1301,13 @@ class RowMotion:
         different patrol — so the fit alone cannot say "this is a different
         row" in time, and the misses can.
         """
-        if len(self._errors) < _MIN_CHECKS:
+        if not self._checks_ready():
             return
         signature = self._signature()
-        now = _Verdict(mean=float(np.mean(self._errors)),
-                       worst=max(self._errors),
-                       checks=len(self._errors),
+        errors = self._error_values()
+        now = _Verdict(mean=float(np.mean(errors)),
+                       worst=max(errors),
+                       checks=len(errors),
                        signature=signature)
         void = (self._best is None
                 or not self._best.describes(signature)
@@ -1237,7 +1387,7 @@ class RowMotion:
         return self._zone
 
     def settled(self) -> bool:
-        return self._ticks >= _MIN_STILL_FRAMES
+        return self.watched_for() >= _MIN_STILL_S
 
     def movers(self) -> int:
         """How many of this row's defenders are not standing still — by the
@@ -1273,8 +1423,21 @@ class RowMotion:
         and he is there in nearly every frame, so his position shows up as
         a spike in the tally whatever the tracker makes of it. A patrol
         contributes a frame here and a frame there and never a spike.
+
+        Worked out once per tick and then handed out. It reads the whole
+        sighting record — sixteen seconds of it, which at the rate frames
+        now arrive is some six hundred entries — and half a dozen callers
+        ask for it between one observation and the next, feed() itself
+        among them. The answer cannot change in between: _sightings only
+        moves when a tick is fed.
         """
-        if len(self._sightings) < _MIN_STILL_FRAMES:
+        if self._spots is not None:
+            return list(self._spots)
+        self._spots = self._find_standing_spots()
+        return list(self._spots)
+
+    def _find_standing_spots(self) -> list[float]:
+        if self.watched_for() < _MIN_STILL_S:
             return []
         tally: dict[int, int] = {}
         for _when, frame in self._sightings:
@@ -1318,11 +1481,26 @@ class RowMotion:
         — a neighbouring row's helmet bobbing over the boundary, a flicker
         of red scenery. One of those cannot be fitted to any patrol, so a
         row containing one would never make a prediction and never gather a
-        single check."""
-        if self._ticks < _MIN_STILL_FRAMES:
+        single check.
+
+        Both sides of the share are counted over the same stretch of time,
+        which is what makes it a share at all. It used to compare a track's
+        whole sample count against the ticks that fit in the buffer at grid
+        resolution — two different clocks, and neither of them the one the
+        frames actually arrived on.
+
+        Anchoring is deliberately *not* a way past this. Standing still in
+        one place is not on its own evidence of being a defender: red that
+        flashes three ticks in every forty, always at the same spot, stands
+        perfectly still by every measure this class has and is a goal
+        animation. Being seen often is the part that tells them apart.
+        """
+        if self.watched_for() < _MIN_STILL_S:
             return list(self._tracks)
-        needed = _MIN_TRACK_SHARE * min(self._ticks, _BUFFER_S / _GRID_S)
-        return [track for track in self._tracks if track.samples >= needed]
+        needed = _MIN_TRACK_SHARE * len(self._sightings)
+        since = self._last_tick - _SIGHTING_WINDOW_S
+        return [track for track in self._tracks
+                if track.samples_since(since) >= needed]
 
     def has_mover(self) -> bool:
         if self.orange:
@@ -1345,9 +1523,10 @@ class RowMotion:
         """
         if not self._counts:
             return 0
-        needed = max(1, int(_MIN_TRACK_SHARE * len(self._counts)))
-        for count in range(max(self._counts), 0, -1):
-            if sum(seen >= count for seen in self._counts) >= needed:
+        counts = [seen for _when, seen in self._counts]
+        needed = max(1, int(_MIN_TRACK_SHARE * len(counts)))
+        for count in range(max(counts), 0, -1):
+            if sum(seen >= count for seen in counts) >= needed:
                 return count
         return 0
 
@@ -1355,7 +1534,7 @@ class RowMotion:
         """Everyone in this row at `t_future`, or None when any of them
         cannot be predicted — which the caller must treat as "do not shoot"
         rather than as "the row is clear"."""
-        if self._ticks < _MIN_STILL_FRAMES:
+        if self.watched_for() < _MIN_STILL_S:
             # A helmet seen once is not a prediction: it may be parked or it
             # may be crossing the row at speed, and nothing here can tell
             # yet. Until the row has settled there is no answer to give.
@@ -1491,7 +1670,8 @@ class RowMotion:
         if self.occupants() == 0:
             return 0.0
         verdict = self.verdict()
-        worst = max(self._errors) if self._errors else 0.0
+        errors = self._error_values()
+        worst = max(errors) if errors else 0.0
         return max(worst, verdict.worst if verdict else 0.0)
 
     def error(self) -> float | None:
@@ -1503,7 +1683,8 @@ class RowMotion:
         return self.live_error()
 
     def live_error(self) -> float | None:
-        return float(np.mean(self._errors)) if self._errors else None
+        errors = self._error_values()
+        return float(np.mean(errors)) if errors else None
 
     def ready(self) -> bool:
         """Whether this row may be planned against.
@@ -1522,7 +1703,7 @@ class RowMotion:
         """
         if self._green:
             return True
-        if self._ticks < _MIN_STILL_FRAMES:
+        if self.watched_for() < _MIN_STILL_S:
             return False
         if self.occupants() == 0:
             return True          # nothing to dodge, and nothing to latch
@@ -1559,7 +1740,8 @@ class RowMotion:
             return False
         # The average is the row's best; the wildest miss is always the one
         # that just happened.
-        if not self._errors or max(self._errors) >= _MAX_WORST_PX:
+        errors = self._error_values()
+        if not errors or max(errors) >= _MAX_WORST_PX:
             return False
         return self._latch()
 
@@ -1604,12 +1786,15 @@ class RowMotion:
         # defenders, and a new level arranges them differently.
         self._zone = None
         self._board = None
+        self._board_answering = False
         self._first_seen = None
         self._errors.clear()
         self._pending.clear()
         self._tracks.clear()
         self._counts.clear()
         self._sightings.clear()
+        self._spots = None
+        self._y.clear()
         self._ticks = 0
         self._seen = 0
 
@@ -1623,6 +1808,7 @@ class RowMotion:
     def report(self, index: int) -> RowReport:
         tracks = self._real_tracks()
         verdict = self.verdict()
+        errors = self._error_values()
         movers = [track for track in tracks if not track.still]
         # The widest patrol is the one worth naming when there are several.
         lead = max(movers, key=lambda track: track.span, default=None)
@@ -1639,20 +1825,20 @@ class RowMotion:
             # whether it is printed at all.
             occupants=self.occupants(),
             tracked=len(tracks),
-            settled=self._ticks >= _MIN_STILL_FRAMES,
+            settled=self.settled(),
             fitted=(lead is None or (lead.period is not None
                                      and lead.confidence >= _MIN_CONFIDENCE)),
             standing=self.standing(),
-            mean_y=float(np.mean(self._y)) if self._y else None,
+            mean_y=(float(np.mean([y for _when, y in self._y]))
+                    if self._y else None),
             period=lead.period if lead is not None else None,
             confidence=lead.confidence if lead is not None else 0.0,
             min_x=bounds[0] if bounds else None,
             max_x=bounds[1] if bounds else None,
             speed=speed,
             error=self.error(),
-            worst=max(self._errors) if self._errors else None,
-            checks=(verdict.checks if verdict is not None
-                    else len(self._errors)),
+            worst=max(errors) if errors else None,
+            checks=(verdict.checks if verdict is not None else len(errors)),
             live_error=self.live_error(),
             loose=self.unfollowed(),
             bounces=self._board.bounces if self._board else 0,
