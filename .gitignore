@@ -35,6 +35,10 @@ desktop.ini
 # Raw frame dumps from the "Сохранить последние кадры" button
 /debug_frames/
 
+# Кадры, на которых хоккейная ловля увидела красное — по снимку на въезд,
+# несколько мегабайт за минуту наблюдения (см. modules/hockey/red_watch.py)
+/templates/red_catch/
+
 # Per-day activity totals — see app/core/daily_log.py
 /logs/
 
@@ -42,3 +46,8 @@ desktop.ini
 # (см. app/core/restart_state.py)
 /restart.json
 /restart_logs.json
+
+# Видеофонов в репозитории больше нет: фон окна - это картинка из templates/
+# или нарисованная панелью сцена (см. app/ui/widgets/vw_panel.py). Видео
+# весило сотни мегабайт и не пролезало в GitHub.
+*.mp4
