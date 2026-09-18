@@ -8,22 +8,30 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QApplication, QDialog, QSizePolicy)
-from PySide6.QtCore import Qt, QPoint, QTimer
+from PySide6.QtCore import Qt, QPoint, QRect, QTimer
 
-from app.core.pause_watch import (PLACES_WAIT_S, GameReadyWatch, PauseRecovery,
-                                  PauseWatch)
+from app.core.freeze_watch import CHECK_INTERVAL as FREEZE_INTERVAL_S
+from app.core.freeze_watch import FreezeWatch
+from app.core.pause_watch import (BREAK_REPEAT_S, PLACES_WAIT_S, GameReadyWatch,
+                                  PauseRecovery, PauseWatch)
+from app.core.daily_reward import DailyRewardCollect, DailyRewardWatch
 from app.core.promo_activate import PromoAutoLoop
-from app.core.restart_state import (HELPER_LOG, REASON_BREAK, REASON_MANUAL,
-                                    REASON_PAUSE, REASON_STUCK, RestartInfo,
-                                    take_logs, write_logs, write_restart)
+from app.core.restart_state import (HELPER_LOG, REASON_AFK, REASON_BREAK,
+                                    REASON_MANUAL, REASON_PAUSE, REASON_REWARD,
+                                    REASON_STUCK,
+                                    RestartInfo, take_logs, write_logs,
+                                    write_restart)
 from app.core.stats import StatsManager
 from app.ui.promo_window import PromoWindow
 from app.ui import theme
+from app.ui.calibration_overlay import CalibrationOverlay
 from app.ui.crt_power_mixin import CrtPowerMixin
 from app.ui.energy_window import EnergyWindow
 from app.ui.helper_settings_panel import HelperSettingsPanel
 from app.ui.module_window import _SAVE_DELAY_MS
 from app.ui.drag_mixin import BackgroundDragMixin
+from app.ui.game_fit import GameFitMixin
+from app.ui.game_layer import GameLayer
 from app.ui.node_links import NodeLinkCanvas
 from app.ui.resize_mixin import ResizeMixin
 from app.ui.stats_window import StatsWindow
@@ -36,6 +44,7 @@ from app.ui.widgets import log_panel as log_panel_mod
 from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_confirm_dialog import NtConfirmDialog
 from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
+from app.core.game_watch import GameWatch
 from app.module_registry import MODULES
 
 # Same auto-pick rule every module's own backdrop uses — see
@@ -77,6 +86,12 @@ _TILE_H = 58
 # window now; its yellow lives in the theme as EN_YELLOW.)
 _COOK_ROSE = "#ef4b6b"
 
+# Моды, за которыми код есть, но доводить его ещё есть куда. Их тайлы стоят
+# на доске погашенными (NtButton(wip=True)): тусклее соседей, под курсором
+# пишут «В разработке» и не открываются ни по клику, ни из автозагрузки, ни
+# при возврате модов после перезапуска — см. _toggle_module.
+_WIP_MODULES = ("Сноуборд", "Хоккей", "Садовник", "Уборщик")
+
 # Как часто можно перезапускаться из-за техперерыва. Перерыв длится часами и
 # перезапуском не лечится — это просто регулярная проверка, не кончился ли он.
 BREAK_RETRY_S = 300.0
@@ -90,6 +105,13 @@ _BOARD_TOP_GAP = 22   # separator → column captions
 _TILE_GAP      = 14   # between tiles inside a column
 _ICON_BTN   = 26    # < NtButton._SMALL_W → centred glyph, no accent bar
 
+# Разметка окна ежедневной награды — см. Overlay.mark_zone. Две области: по
+# чему это окно узнать и куда в нём нажать. Рамка появляется посреди игры и
+# такого размера, чтобы её было за что схватить.
+_ZONE_SLOTS = 2
+_ZONE_W     = 240
+_ZONE_H     = 120
+
 # Button faces are English; module_cls.name stays Russian — it is the key
 # for open windows, logs and config, and none of that is on screen here.
 _DISPLAY_NAMES = {
@@ -101,7 +123,7 @@ _DISPLAY_NAMES = {
 }
 
 
-class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
+class Overlay(GameFitMixin, CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
               ResizeMixin, QWidget):
     _RESIZE_MIN_W = 3 * _TILE_W + 2 * theme.SPACING + theme.PADDING * 2
     _RESIZE_MIN_H = 430   # header + three tile rows + log + handle
@@ -113,6 +135,19 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self.stats = stats if stats is not None else StatsManager()
         self._stats_window: StatsWindow | None = None
         self._settings_panel: HelperSettingsPanel | None = None
+        # Разметка двух областей окна ежедневной награды — см. mark_zone.
+        self._zone_calib: CalibrationOverlay | None = None
+        self._zone_slot = 0
+        self._zones_marked: dict[int, QRect] = {}
+        # Игру можно свернуть в окно любого размера и любой формы; всё, что
+        # помощник знает про её координаты, считано при развёрнутой. Здесь
+        # заводится то, что замечает смену размера, а fit_to_game — то, что
+        # переставляет под неё окна. См. app/core/game_watch.py.
+        self._game_watch = GameWatch(window_manager, config, self)
+        self._game_watch.changed.connect(self._on_game_resized)
+        self._game_watch.recorded.connect(self._on_reference_recorded)
+        self._game_watch.hint.connect(
+            lambda text: self.add_log(text, level="error"))
         self._links = NodeLinkCanvas(window_manager)
         self._links.set_enabled(getattr(config.data.overlay, "show_links", True))
         # Before any LogPanel is built, so the very first startup line
@@ -137,8 +172,22 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._pause_watch.break_seen.connect(self._on_break_detected)
         self._pause_watch.error.connect(
             lambda msg: self.add_log(f"[Пауза] {msg}", level="error"))
+        self._freeze_watch = FreezeWatch(get_hwnd=self.wm.get_game_hwnd)
+        self._freeze_watch.frozen.connect(self._on_game_afk)
+        self._freeze_watch.error.connect(
+            lambda msg: self.add_log(f"[Пауза] {msg}", level="error"))
         self._pause_recovery: PauseRecovery | None = None
         self._paused_modules: list[str] = []
+        # Окно ежедневного подарка: вотч смотрит всегда, сборщик появляется
+        # только на время двух кликов — см. _on_reward_seen.
+        self._reward_watch = DailyRewardWatch(get_hwnd=self.wm.get_game_hwnd)
+        self._reward_watch.seen.connect(self._on_reward_seen)
+        self._reward_watch.error.connect(
+            lambda msg: self.add_log(f"[Подарок] {msg}", level="error"))
+        self._reward_collect: DailyRewardCollect | None = None
+        self._reward_modules: list[str] = []
+        self._reward_outcome: str | None = None
+        self._break_seen_at = 0.0   # monotonic последней заставки техперерыва
         # Записка от прошлого запуска (см. app/core/restart_state.py) и
         # признак того, что мы сами сейчас уходим на перезапуск.
         self._restart_info = None
@@ -158,19 +207,31 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         self._init_crt_power()
         self._init_collapse(self._panel, self.wm)
 
-        # Keep the header dot honest if the game window disappears
-        self._game_watch = QTimer(self)
-        self._game_watch.setInterval(2000)
-        self._game_watch.timeout.connect(self.refresh_game_status)
-        self._game_watch.start()
+        # Keep the header dot honest if the game window disappears.
+        # Не _game_watch: под этим именем выше уже лежит слежение за
+        # размером игры, и второе присваивание затирало его целиком.
+        # Оверлей при этом ничего не замечал — GameWatch остаётся жив как
+        # ребёнок QObject, — но start_game_watch() из main.py запускал
+        # вместо него вот этот таймер, размер игры не мерил никто, и весь
+        # перевод координат оставался тождественным: клики модов уходили
+        # по числам развёрнутой игры куда бы её ни ужали.
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(2000)
+        self._status_timer.timeout.connect(self.refresh_game_status)
+        self._status_timer.start()
 
         self.set_promo_watch_enabled(
             getattr(config.data.promo, "detect_enabled", False))
 
         # Зависания игры караулятся всегда, а не только пока включён какой-то
         # мод: окно «Пауза» встаёт поверх игры само по себе, и увидеть его
-        # некому, если каждый мод смотрит только за своим экраном.
+        # некому, если каждый мод смотрит только за своим экраном. По той же
+        # причине глобален и FreezeWatch — застывший экран не привязан к моду.
         self._pause_watch.start()
+        self._freeze_watch.start()
+        # И окно ежедневного подарка — по той же причине: оно встаёт поверх
+        # игры само, чаще всего после перезапуска, но и на смене суток тоже.
+        self._reward_watch.start()
 
     def _build_ui(self):
         self._panel = VwPanel(self)
@@ -239,15 +300,20 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         jobs  = [m for m in MODULES if getattr(m, "panel_slot", "top") == "bottom"]
 
         def module_tile(module_cls) -> NtButton:
+            wip = module_cls.name in _WIP_MODULES
             btn = self._tile(self._module_label(module_cls.name, False),
-                             getattr(module_cls, "color", None))
+                             getattr(module_cls, "color", None), wip=wip)
+            if wip:
+                # Ни обработчика, ни места в _module_buttons: тайл ничего не
+                # открывает, а значит и «активным» ему становиться не с чего.
+                return btn
             btn.clicked.connect(lambda _, m=module_cls: self._toggle_module(m))
             self._module_buttons[module_cls.name] = btn
             return btn
 
         # Not modules yet — placeholders holding their slot (and their colour)
         # on the board until there is something behind them to switch on.
-        cook   = self._tile("Кулинар", _COOK_ROSE)
+        cook   = self._tile("Кулинар", _COOK_ROSE, wip=True)
         energy = self._tile("Энергия", theme.EN_YELLOW, self._toggle_energy)
 
         columns = [
@@ -315,9 +381,10 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         return label
 
     @staticmethod
-    def _tile(text: str, accent: str, on_click=None) -> NtButton:
+    def _tile(text: str, accent: str, on_click=None,
+              wip: bool = False) -> NtButton:
         """One slab on the board — the launcher's main surface."""
-        btn = NtButton(text, accent=accent)
+        btn = NtButton(text, accent=accent, wip=wip)
         btn.setFixedSize(_TILE_W, _TILE_H)
         btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn.setFont(theme.get_mono_font(theme.FONT_SIZE_M))
@@ -341,20 +408,87 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
     # ── ResizeMixin hooks ────────────────────────────────────────────────────
 
     def _on_resize_panel(self):
-        if self._panel is not None:
-            self._panel.setGeometry(0, 0, self.width(), self.height())
+        self.layout_panel()
         if self._settings_panel is not None:
             self._settings_panel.keep_inside_host()
 
     def _on_resize_done(self):
-        self.config.data.overlay.width  = self.width()
-        self.config.data.overlay.height = self.height()
+        # Эталонный размер, а не нынешний — см. app/ui/game_fit.py.
+        (self.config.data.overlay.width,
+         self.config.data.overlay.height) = self.to_reference_size(
+            self.width(), self.height())
         self.config.save()
+
+    # ── Размер игры ──────────────────────────────────────────────────────────
+
+    def start_game_watch(self):
+        """Начать следить за размером игры — зовётся из main, когда игра
+        найдена и объявлена основной."""
+        self._game_watch.start()
+
+    def _fit_config(self):
+        """GameFitMixin спрашивает, где эталонные числа этого окна.
+
+        У окон модов в self.config лежит их собственная секция, а здесь —
+        весь ConfigManager, поэтому ответ свой.
+        """
+        return self.config.data.overlay
+
+    def live_geometry(self) -> tuple[int, int, int, int]:
+        """Где и какого размера окно помощника должно лечь прямо сейчас.
+
+        config хранит эталонные числа; на игре другого размера от них
+        считается это. См. app/ui/game_fit.py.
+        """
+        box = self.fit_box()
+        if box is not None:
+            return box
+        # Игры нет или эталон не записан — эталонные числа и есть ответ.
+        cfg = self.config.data.overlay
+        return cfg.x, cfg.y, cfg.width, cfg.height
+
+    def _on_game_resized(self):
+        """Игра стала другого размера — переставить всё, что над ней висит."""
+        self.fit_to_game()
+        for window in list(self._open_windows.values()):
+            fit = getattr(window, "fit_to_game", None)
+            if fit is not None:
+                fit()
+        for window in (self._stats_window, self._promo_window,
+                       self._energy_window):
+            if window is not None and hasattr(window, "fit_to_game"):
+                window.fit_to_game()
+        if self._settings_panel is not None:
+            self._settings_panel.keep_inside_host()
+        # Прямоугольники, нарисованные поверх самой игры, принадлежат модам,
+        # а не этому окну, и списка их тут нет — зато все они верхнеуровневые
+        # и все GameLayer. Те, что перерисовываются тактом мода, на refit не
+        # делают ничего.
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, GameLayer):
+                widget.refit()
+        # Провода между окнами перечитывают геометрию своим тактом — см.
+        # NodeLinkCanvas._sync, догонят сами.
+
+    def _on_reference_recorded(self, frame):
+        self.add_log(f"Эталонный размер игры записан: "
+                     f"{frame.width}×{frame.height}")
+
+    def record_game_reference(self):
+        """«Запомнить нынешний размер игры как эталонный» — из настроек."""
+        if self._game_watch.record_reference() is None:
+            self.add_log("Не удалось измерить окно игры", level="error")
+            return
+        self._on_game_resized()
 
     # ── Module management ────────────────────────────────────────────────────
 
     def _toggle_module(self, module_cls):
         name = module_cls.name
+        if name in _WIP_MODULES:
+            # Одна проверка на все три входа сюда: клик по тайлу,
+            # автозагрузка избранного и возврат модов после перезапуска.
+            return
         if name in self._open_windows and self._open_windows[name].isVisible():
             self._open_windows[name].close()
             return
@@ -435,6 +569,89 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         if self._settings_panel is None:
             self._settings_panel = HelperSettingsPanel(self)
         self._settings_panel.toggle()
+
+    # ── Разметка окна ежедневной награды ─────────────────────────────────────
+    # После перезапуска игра иногда встречает окном ежедневной награды: пока
+    # его не забрать, возвращать моды некуда — они будут кликать по окну,
+    # которого не ждут. Чтобы научить помощника его закрывать, нужны две
+    # области: по чему понять, что окно вообще на экране, и куда нажать.
+    # Разметить их можно только руками, поэтому здесь кнопка, а не константы.
+    #
+    # Ничего не сохраняется: числа идут в лог, откуда переезжают в код. Это
+    # разовая работа, и заводить под неё поле в конфиге незачем.
+
+    def mark_zone(self):
+        """Показать рамку над игрой, а вторым нажатием записать, где она встала.
+
+        Одна кнопка на обе области по очереди: первое нажатие показывает
+        первую, второе её записывает и так далее по кругу. Отмеченная область
+        при следующем заходе открывается там, где её оставили, — поправить
+        уже размеченное не значит размечать заново.
+        """
+        if self._zone_calib is None:
+            self._zone_calib = CalibrationOverlay(self.wm, reference=self)
+
+        if self._zone_calib.isVisible():
+            # Рамку тянут по живому экрану, а выписать её надо в эталонных
+            # координатах: числа отсюда уходят в код, а код считает в них.
+            box = self._zone_calib.reference_rect(self._zone_calib.bounds())
+            self._zone_calib.clear()
+            self._record_zone(box)
+            return
+
+        hwnd = self.wm.get_game_hwnd()
+        rect = self.wm.window_rect_screen(hwnd) if hwnd else None
+        if rect is None:
+            self.add_log("Игровое окно не найдено — размечать нечего",
+                         level="error")
+            return
+        origin_x, origin_y, width, height = rect
+        marked = self._zones_marked.get(self._zone_slot)
+        box = (self._zone_calib.live_rect(marked) if marked is not None
+               else QRect(origin_x + (width - _ZONE_W) // 2,
+                          origin_y + (height - _ZONE_H) // 2,
+                          _ZONE_W, _ZONE_H))
+        self._zone_calib.show_at(box)
+        self.add_log_segments(
+            [(f"Область {self._zone_slot + 1} из {_ZONE_SLOTS} — ",
+              theme.ACCENT),
+             ("тяните за середину, чтобы подвинуть, за край — чтобы изменить "
+              "размер, потом нажмите кнопку ещё раз.", theme.TEXT_SECONDARY)],
+            level="plain")
+
+    def _record_zone(self, box: QRect):
+        """Запомнить область и выписать её числа — все, какие могут
+        понадобиться: и прямоугольник для снимка, и центр для клика."""
+        slot = self._zone_slot
+        self._zones_marked[slot] = QRect(box)
+        centre = box.center()
+        self.add_log_segments(
+            [(f"Область {slot + 1} — ", theme.ACCENT_GREEN),
+             (f"{box.width()}×{box.height()} @ ({box.left()}, {box.top()})",
+              theme.TEXT_PRIMARY),
+             ("   центр ", theme.TEXT_SECONDARY),
+             (f"({centre.x()}, {centre.y()})", theme.TEXT_PRIMARY),
+             ("   правый низ ", theme.TEXT_SECONDARY),
+             (f"({box.right()}, {box.bottom()})", theme.TEXT_PRIMARY)],
+            level="plain")
+
+        self._zone_slot = (slot + 1) % _ZONE_SLOTS
+        if len(self._zones_marked) < _ZONE_SLOTS:
+            return
+        # Обе размечены — одной строкой, чтобы можно было скопировать целиком.
+        summary = "   ".join(
+            f"{i + 1}: ({r.left()},{r.top()},{r.width()},{r.height()}) "
+            f"центр ({r.center().x()},{r.center().y()})"
+            for i, r in sorted(self._zones_marked.items()))
+        self.add_log_segments(
+            [("Обе области — ", theme.ACCENT_GREEN),
+             (summary, theme.TEXT_PRIMARY)], level="plain")
+
+    def zone_button_text(self) -> str:
+        """Подпись кнопки под текущий шаг — её просит панель настроек."""
+        if self._zone_calib is not None and self._zone_calib.isVisible():
+            return f"📐  Записать область {self._zone_slot + 1}"
+        return f"📐  Отметить область {self._zone_slot + 1} из {_ZONE_SLOTS}"
 
     # ── Promo codes ──────────────────────────────────────────────────────────
 
@@ -559,6 +776,7 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
         повод придёт сам: PauseWatch повторяет сигнал раз в пять минут, пока
         заставка висит.
         """
+        self._break_seen_at = time.monotonic()
         self.add_log(f"[Пауза] Технический перерыв — заставка на экране "
                      f"({score:.0%}), игре нужен перезапуск",
                      level="error")
@@ -748,10 +966,33 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
                      level="error")
         self.request_restart(REASON_STUCK, stuck)
 
+    def _on_game_afk(self, ratio: float):
+        """Картинка не изменилась за три минуты — игра афк.
+
+        Ни меню паузы, ни заставки: экран просто застыл, и жать в него
+        бессмысленно. Кликами это не лечится, поэтому сразу перезапуск.
+        Кого включить обратно, request_restart соберёт сам — работавшие моды
+        (тот же Ava Dancers) вернутся после «Мест», как после залипшей
+        кнопки.
+        """
+        if self._restarting or self._pause_recovery is not None:
+            return   # уже разбираемся с этим же зависанием
+        if time.monotonic() - self._break_seen_at < BREAK_REPEAT_S:
+            # Заставка техперерыва тоже неподвижна. Она лечится не нами, и
+            # у неё свой счётчик попыток — не мешаем.
+            return
+        self._freeze_watch.pause_checks()
+        self._pause_log(
+            f"Игра афк — картинка не менялась "
+            f"{int(FREEZE_INTERVAL_S // 60)} мин ({ratio:.0%} кадра совпало), "
+            f"перезапускаем", level="error")
+        self.request_restart(REASON_AFK)
+
     def _on_pause_detected(self, score: float):
         if self._pause_recovery is not None:
             return   # уже разбираемся с этим же зависанием
         self._pause_watch.pause_checks()
+        self._freeze_watch.pause_checks()
 
         stopped = self._running_module_windows()
         self._pause_log(f"Игра зависла — на экране меню паузы ({score:.0%})",
@@ -823,9 +1064,102 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             self._pause_recovery.stop_flow()
             self._pause_recovery.finished.connect(self._clear_pause_recovery)
         self._pause_watch.resume_checks()
+        self._freeze_watch.resume_checks()
 
     def _clear_pause_recovery(self):
         self._pause_recovery = None
+
+    # ── Окно ежедневного подарка ─────────────────────────────────────────────
+
+    def _reward_log(self, message: str, level: str = "info",
+                    windows: list[QWidget] | None = None):
+        self.add_log(f"[Подарок] {message}", level=level)
+        for window in (self._running_module_windows() if windows is None
+                       else windows):
+            if hasattr(window, "module_log"):
+                window.module_log(f"[Подарок] {message}", level=level)
+
+    def _reward_module_windows(self) -> list[QWidget]:
+        return [self._open_windows[name] for name in self._reward_modules
+                if name in self._open_windows]
+
+    def _on_reward_seen(self, score: float):
+        """Подарок на экране: гасим моды, забираем, возвращаем.
+
+        Моды гасятся до первого клика, а не после. Пока окно висит, они всё
+        равно жмут в пустоту, а два наших клика вперемешку с их собственными —
+        верный способ нажать не туда.
+
+        Пока разбираемся с зависанием, сюда не лезем: там своя очередь кликов
+        и свой перезапуск, и два таких разбирательства разом переспорят друг
+        друга.
+        """
+        if (self._restarting or self._pause_recovery is not None
+                or self._reward_collect is not None):
+            return
+        self._reward_watch.pause_checks()
+        self._pause_watch.pause_checks()
+        self._freeze_watch.pause_checks()
+
+        stopped = self._running_module_windows()
+        self._reward_log(f"Окно ежедневного подарка на экране ({score:.0%}) — "
+                         f"забираю", windows=stopped)
+        self._reward_modules = []
+        for window in stopped:
+            if window.module_stop():
+                self._reward_modules.append(window.module_name)
+                self._reward_log(f"Выключаю мод {window.module_name}",
+                                 windows=[window])
+
+        collect = DailyRewardCollect(get_hwnd=self.wm.get_game_hwnd)
+        collect.collected.connect(self._on_reward_collected)
+        collect.stuck.connect(self._on_reward_stuck)
+        collect.error.connect(
+            lambda msg: self.add_log(f"[Подарок] {msg}", level="error"))
+        # Разбор итога висит на finished, а не на самих сигналах: сборщик
+        # может кончиться и ошибкой, а вернуть моды и разбудить вотчи надо в
+        # любом случае — иначе один сбой оставит помощник выключенным навсегда.
+        collect.finished.connect(self._after_reward)
+        self._reward_outcome = None
+        self._reward_collect = collect
+        collect.start()
+
+    def _on_reward_collected(self, score: float):
+        self._reward_outcome = "collected"
+        self._reward_log(f"Подарок забран, окно закрылось ({score:.0%})",
+                         level="success", windows=self._reward_module_windows())
+
+    def _on_reward_stuck(self, score: float):
+        self._reward_outcome = "stuck"
+        self._reward_log(f"Окно подарка не закрылось ({score:.0%}) — "
+                         f"перезапускаем игру", level="error",
+                         windows=self._reward_module_windows())
+
+    def _after_reward(self):
+        """Сборщик отработал — что бы с ним ни случилось.
+
+        Ссылка на поток снимается именно здесь, по его собственному finished:
+        run() к этому моменту уже вернулся, и уронить поток сборщиком мусора
+        нельзя (та же причина, что у _clear_pause_recovery).
+        """
+        outcome, self._reward_outcome = self._reward_outcome, None
+        self._reward_collect = None
+
+        if outcome == "stuck":
+            # Моды уже выключены, так что список берётся из своего, а не из
+            # работающих — как и на неудавшемся разборе зависания.
+            modules, self._reward_modules = self._reward_modules, []
+            self.request_restart(REASON_REWARD, modules=modules)
+            return
+
+        for window in self._reward_module_windows():
+            if window.module_start():
+                self._reward_log(f"Включаю мод обратно: {window.module_name}",
+                                 windows=[window])
+        self._reward_modules = []
+        self._reward_watch.resume_checks()
+        self._pause_watch.resume_checks()
+        self._freeze_watch.resume_checks()
 
     def _stop_pause_watch(self):
         if self._ready_watch is not None:
@@ -836,8 +1170,16 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             self._pause_recovery.stop_flow()
             self._pause_recovery.wait(2000)
             self._pause_recovery = None
+        if self._reward_collect is not None:
+            self._reward_collect.stop_flow()
+            self._reward_collect.wait(2000)
+            self._reward_collect = None
         self._pause_watch.stop_watch()
         self._pause_watch.wait(2000)
+        self._freeze_watch.stop_watch()
+        self._freeze_watch.wait(2000)
+        self._reward_watch.stop_watch()
+        self._reward_watch.wait(2000)
 
     # ── Energy ───────────────────────────────────────────────────────────────
 
@@ -945,8 +1287,9 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
                                 self.width(), self.height())
         else:
             self.move(target.x(), target.y())
-        self.config.data.overlay.x = target.x()
-        self.config.data.overlay.y = target.y()
+        (self.config.data.overlay.x,
+         self.config.data.overlay.y) = self.to_reference_offset(target.x(),
+                                                                target.y())
         self._save_later.start()   # not once per mouse event — see the module window
 
     # ── Startup sequence ────────────────────────────────────────────────────
@@ -1027,6 +1370,8 @@ class Overlay(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
             self._energy_window.close()
 
         self._links.clear()   # nothing left to connect to
+        if self._zone_calib is not None:
+            self._zone_calib.clear()   # живёт в своём окне и само не закроется
         self.set_promo_watch_enabled(False)
         self._stop_pause_watch()
         self.crt_close_started()
