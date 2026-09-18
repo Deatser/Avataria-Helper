@@ -9,11 +9,10 @@ from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QTimer, Signal
 
 from app.core import energy_bar
-from app.core.duration import from_seconds
 from app.core.stats import shown
 from app.ui import theme
 from app.ui.module_window import ModuleWindow
-from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
+from app.ui.widgets.vw_panel import VwPanel
 from app.ui.widgets.neon_section import NeonSection
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
@@ -29,8 +28,11 @@ _PERIOD_LABELS = ("всё время", "сегодня", "месяц")
 # Set by hand (2026-08-04) to the size the window was actually left at —
 # smaller than this and the period/view controls, tiles and scroll area
 # start crowding each other rather than just scrolling past the edge.
+# Высота пересчитана после того, как из окна уехали два ряда игр и обе
+# плитки отсчёта: со старым минимумом окно уже нельзя было подобрать по
+# содержимому, под ним оставалась пустая полоса.
 _MIN_W = 519
-_MIN_H = 657
+_MIN_H = 470
 
 _COUNTDOWN_MS = 1000
 
@@ -41,25 +43,21 @@ _PROJECT_ROOT   = Path(__file__).resolve().parents[2]
 _TEMPLATES      = _PROJECT_ROOT / "templates"
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
+# Верхние строки лежат прямо на фоне окна, а фон бывает светлым — видео
+# AvaStats светлее собственной заставки, и светлые буквы на нём таяли.
+# Поэтому ореол под текстом теперь не «свечение своим цветом», а тёмная
+# подложка: буквы остаются светлыми и читаются на любом кадре.
+_HALO_COLOR = "#05040a"
+_HALO_BLUR  = 18.0
 
-def _default_backdrop(video: bool = True) -> str:
+
+def _default_backdrop() -> str:
     """First existing templates/AvaStats.* file."""
-    moving = VIDEO_SUFFIXES + (".gif",)
-    order  = moving + _STILL_SUFFIXES if video else _STILL_SUFFIXES + moving
-    for suffix in order:
+    for suffix in _STILL_SUFFIXES:
         candidate = _TEMPLATES / f"{_BACKDROP_STEM}{suffix}"
         if candidate.is_file():
             return str(candidate)
     return ""
-
-
-def _countdown_text(remaining_seconds: int) -> str:
-    """The live H:MM:SS still left, worked out from wall-clock time — so
-    it reads correctly even after the mod was closed for a while, not
-    whatever was last written to disk — or "Доступна!" once it hits 0."""
-    if remaining_seconds > 0:
-        return from_seconds(remaining_seconds)
-    return "Доступна!"
 
 
 class StatsWindow(ModuleWindow):
@@ -93,11 +91,9 @@ class StatsWindow(ModuleWindow):
         self._init_collapse(self._panel, window_manager)
         self.refresh()
 
-        # One timer for everything that has to move on its own while this
-        # window sits open: the countdown reads real wall-clock time, and
-        # stats.json can change under us too — another module recording a
-        # run, or a hand edit — so both get checked on the same second-by-
-        # second beat. See _poll.
+        # stats.json меняется под нами — другой мод записал прогон, или
+        # файл поправили руками, — а окно должно это показывать, не дожидаясь
+        # повторного открытия. Отсюда и посекундный такт. См. _poll.
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll)
         self._poll_timer.start(_COUNTDOWN_MS)
@@ -125,7 +121,7 @@ class StatsWindow(ModuleWindow):
 
         outer.addWidget(self._build_scroll_area(), stretch=1)
 
-        # ── Backdrop: templates/AvaStats.* by default, video first ───────────
+        # ── Backdrop: templates/AvaStats.* by default ────────────────────────
         self._panel.background_failed.connect(self._on_background_failed)
         self._apply_backdrop(fade=False)
 
@@ -137,8 +133,7 @@ class StatsWindow(ModuleWindow):
     # ── Backdrop ─────────────────────────────────────────────────────────────
 
     def _apply_backdrop(self, fade: bool = True):
-        video    = getattr(self.config, "video_background", True)
-        backdrop = getattr(self.config, "background", "") or _default_backdrop(video)
+        backdrop = getattr(self.config, "background", "") or _default_backdrop()
         if backdrop and not self._panel.set_background(backdrop, fade=fade):
             self._on_background_failed(f"Фон не загружен: {backdrop}")
 
@@ -215,7 +210,8 @@ class StatsWindow(ModuleWindow):
         col.setSpacing(6)
 
         self._period_label = QLabel()
-        self._period_label.setFont(theme.get_display_font(theme.FONT_SIZE_S))
+        self._period_label.setFont(
+            theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         self._period_label.setStyleSheet(
             f"color:{theme.TEXT_PRIMARY}; background:transparent;")
         self._glow(self._period_label)
@@ -239,31 +235,25 @@ class StatsWindow(ModuleWindow):
         self.refresh(animate=True)
 
     def _build_games_section(self) -> NeonSection:
+        """Пока только Ava Dancers: Хоккей и Сноуборд стоят на доске мода
+        погашенными (см. overlay._WIP_MODULES), и считать по ним нечего."""
         section = NeonSection("Игры", theme.ACCENT_CYAN)
         body = section.body()
 
         body.addWidget(self._section_label("AVA DANCERS", theme.VW_MAGENTA))
         body.addLayout(self._build_tiles())
-        body.addSpacing(6)
-
-        body.addWidget(self._section_label("ХОККЕЙ", theme.HK_ICE))
-        body.addLayout(self._build_hockey_tiles())
-        body.addSpacing(6)
-
-        body.addWidget(self._section_label("СНОУБОРД", theme.SB_STEEL))
-        body.addLayout(self._build_snowboard_tiles())
         return section
 
     def _build_professions_section(self) -> NeonSection:
+        """Обе профессии одним блоком — по плитке в ряд, и на каждой ровно
+        одно число: сколько смен закрыто. Отсчёт до новой смены занимал тут
+        целую строку на всю ширину и про накопленное ничего не говорил."""
         section = NeonSection("Профессии", theme.ACCENT_GREEN)
         body = section.body()
 
-        body.addWidget(self._section_label("УБОРЩИК", theme.JN_AMBER))
-        body.addLayout(self._build_janitor_tiles())
-        body.addSpacing(6)
-
-        body.addWidget(self._section_label("САДОВНИК", theme.GD_OLIVE))
-        body.addLayout(self._build_gardener_tiles())
+        body.addWidget(self._section_label("СМЕН ЗАВЕРШЕНО",
+                                           theme.ACCENT_GREEN))
+        body.addLayout(self._build_profession_tiles())
         return section
 
     def _build_panel_section(self) -> NeonSection:
@@ -311,8 +301,9 @@ class StatsWindow(ModuleWindow):
     def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
         title = QLabel("СТАТИСТИКА")
-        title.setFont(theme.get_display_font(theme.FONT_SIZE_M))
+        title.setFont(theme.get_display_font(theme.FONT_SIZE_M, bold=True))
         title.setStyleSheet(f"color:{theme.ACCENT_SOFT}; background:transparent;")
+        self._glow(title)
         title.setCursor(Qt.SizeAllCursor)
         title.mousePressEvent = self.start_drag
         title.mouseMoveEvent  = lambda e: self.do_drag(e, self._wm)
@@ -338,74 +329,31 @@ class StatsWindow(ModuleWindow):
         return header
 
     def _build_tiles(self) -> QGridLayout:
-        grid, self._games_tile, self._gold_tile, self._silver_tile = \
-            self._build_run_tiles(theme.ACCENT)
-        return grid
-
-    def _build_snowboard_tiles(self) -> QGridLayout:
-        grid, self._sb_games_tile, self._sb_gold_tile, self._sb_silver_tile = \
-            self._build_run_tiles(theme.SB_STEEL)
-        return grid
-
-    def _build_hockey_tiles(self) -> QGridLayout:
-        grid, self._hk_games_tile, self._hk_gold_tile, self._hk_silver_tile = \
-            self._build_run_tiles(theme.HK_ICE)
-        return grid
-
-    def _build_run_tiles(self, games_accent: str):
-        """The three-wide games/gold/silver row every "farming run" module
-        gets — same shape, only the "игр сыграно" tile's own accent
-        changes between modules; gold and silver always read in their own
-        colour no matter whose row they are in."""
+        """Ряд Ava Dancers: сыграно / золото / серебро. Золото и серебро
+        всегда читаются в своём цвете, счёт игр — в цвете самого мода."""
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)   # QGridLayout's own default
                                               # margins were stacking on top
                                               # of the label above it
         grid.setSpacing(theme.SPACING)
-        games_tile  = StatTile("игр сыграно", accent=games_accent)
-        gold_tile   = StatTile("золота",  accent=theme.ACCENT_AMBER)
-        silver_tile = StatTile("серебра", accent=theme.ACCENT_STEEL)
-        for column, tile in enumerate((games_tile, gold_tile, silver_tile)):
+        self._games_tile  = StatTile("игр сыграно", accent=theme.ACCENT)
+        self._gold_tile   = StatTile("золота",  accent=theme.ACCENT_AMBER)
+        self._silver_tile = StatTile("серебра", accent=theme.ACCENT_STEEL)
+        for column, tile in enumerate((self._games_tile, self._gold_tile,
+                                       self._silver_tile)):
             grid.addWidget(tile, 0, column)
-        return grid, games_tile, gold_tile, silver_tile
-
-    def _build_gardener_tiles(self) -> QGridLayout:
-        """Same three-wide row Ava Dancers gets, but only one number
-        belongs in a square of its own — the rest is a single wide tile,
-        since a countdown reads better with room to breathe than squeezed
-        into a square next to its neighbours."""
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(theme.SPACING)
-        self._cleanup_tile = StatTile("уборок сделано", accent=theme.GD_OLIVE)
-        self._next_tile    = StatTile("Новая смена", accent=theme.GD_OLIVE)
-        grid.addWidget(self._cleanup_tile, 0, 0)
-        grid.addWidget(self._next_tile, 0, 1, 1, 2)
-        # Without this, an unspanned column and a pair a span shares do not
-        # reliably end up in the 1:2 ratio their column counts imply — Qt
-        # sizes each from its own widgets' hints first and only falls back
-        # to stretch for what is left over, which read backwards here.
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
         return grid
 
-    def _build_janitor_tiles(self) -> QGridLayout:
-        """Same layout as Садовник's own row — one square tile plus one
-        wide one, for the same reason: its own countdown, independent of
-        Садовник's."""
+    def _build_profession_tiles(self) -> QGridLayout:
+        """По плитке на профессию, рядом — каждая в своём цвете."""
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(theme.SPACING)
-        self._janitor_cleanup_tile = StatTile("уборок сделано",
-                                              accent=theme.JN_AMBER)
-        self._janitor_next_tile    = StatTile("Новая смена",
-                                              accent=theme.JN_AMBER)
-        grid.addWidget(self._janitor_cleanup_tile, 0, 0)
-        grid.addWidget(self._janitor_next_tile, 0, 1, 1, 2)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+        self._janitor_shifts_tile  = StatTile("Уборщик", accent=theme.JN_AMBER)
+        self._gardener_shifts_tile = StatTile("Садовник", accent=theme.GD_OLIVE)
+        for column, tile in enumerate((self._janitor_shifts_tile,
+                                       self._gardener_shifts_tile)):
+            grid.addWidget(tile, 0, column)
         return grid
 
     # ── Small parts ──────────────────────────────────────────────────────────
@@ -418,13 +366,15 @@ class StatsWindow(ModuleWindow):
 
     def _section_label(self, text: str, accent: str) -> QLabel:
         label = QLabel(f"◈  {text}")
-        label.setFont(theme.get_display_font(theme.FONT_SIZE_S))
+        label.setFont(theme.get_display_font(theme.FONT_SIZE_S, bold=True))
         label.setStyleSheet(f"color:{accent}; background:transparent;")
+        self._glow(label)
         return label
 
     def _add_row(self, layout: QVBoxLayout, caption: str) -> QLabel:
-        """Caption on the left, value on the right — the same bright,
-        glowing white both, not a dim label next to a lit-up value."""
+        """Подпись слева, значение справа — обе жирным поверх тёмной
+        подложки, но значение чисто белое: строка читается сразу, и
+        глазу есть за что зацепиться."""
         row = QHBoxLayout()
         row.setSpacing(theme.SPACING)
         name = QLabel(f"{caption}:")
@@ -433,6 +383,8 @@ class StatsWindow(ModuleWindow):
         self._glow(name)
         value = QLabel("—")
         value.setFont(theme.get_mono_font(theme.FONT_SIZE_S, bold=True))
+        value.setStyleSheet(
+            f"color:{theme.ACCENT_WHITE}; background:transparent;")
         value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._glow(value)
         row.addWidget(name)
@@ -441,13 +393,17 @@ class StatsWindow(ModuleWindow):
         layout.addLayout(row)
         return value
 
-    def _glow(self, widget: QLabel, color: str = None, radius: float = 12.0):
-        """A soft halo the label's own colour, not a plain drop shadow —
-        what actually reads as "glowing" rather than just "bright"."""
+    def _glow(self, widget: QLabel, color: str = None, radius: float = None):
+        """Ореол под текстом — тёмный, а не «свечение своим цветом».
+
+        Раньше он подсвечивал буквы их же цветом: на тёмном кадре фона это
+        читалось как свечение, а на светлом светлое по светлому попросту
+        сливалось. Тёмная подложка держит контраст на любом кадре, и
+        буквы при этом остаются светлыми — см. _HALO_COLOR."""
         effect = QGraphicsDropShadowEffect(widget)
-        effect.setBlurRadius(radius)
+        effect.setBlurRadius(_HALO_BLUR if radius is None else radius)
         effect.setOffset(0, 0)
-        effect.setColor(QColor(color or theme.TEXT_PRIMARY))
+        effect.setColor(QColor(color or _HALO_COLOR))
         widget.setGraphicsEffect(effect)
 
     # ── Favorite ─────────────────────────────────────────────────────────────
@@ -533,8 +489,6 @@ class StatsWindow(ModuleWindow):
             return getattr(owner, module_key)
 
         ava       = source("ava_dancers")
-        hockey    = source("hockey")
-        snowboard = source("snowboard")
         gardener  = source("gardener")
         janitor   = source("janitor")
         promo     = source("promo")
@@ -546,16 +500,10 @@ class StatsWindow(ModuleWindow):
         self._set_tile(self._gold_tile, ava.gold_won, animate)
         self._set_tile(self._silver_tile, ava.silver_won, animate)
 
-        self._set_tile(self._sb_games_tile, snowboard.games_played, animate)
-        self._set_tile(self._sb_gold_tile, snowboard.gold_won, animate)
-        self._set_tile(self._sb_silver_tile, snowboard.silver_won, animate)
-
-        self._set_tile(self._hk_games_tile, hockey.games_played, animate)
-        self._set_tile(self._hk_gold_tile, hockey.gold_won, animate)
-        self._set_tile(self._hk_silver_tile, hockey.silver_won, animate)
-
-        self._set_tile(self._cleanup_tile, gardener.shifts_finished, animate)
-        self._set_tile(self._janitor_cleanup_tile, janitor.shifts_finished, animate)
+        self._set_tile(self._janitor_shifts_tile,
+                       janitor.shifts_finished, animate)
+        self._set_tile(self._gardener_shifts_tile,
+                       gardener.shifts_finished, animate)
 
         self._set_tile(self._energy_tile, energy.energy_bought, animate)
         self._set_tile(self._energy_gold_tile, energy.gold_spent, animate)
@@ -564,8 +512,6 @@ class StatsWindow(ModuleWindow):
         self._set_tile(self._cheesecake_tile, energy.cheesecake_bought, animate)
         self._set_tile(self._brownie_tile, energy.brownie_bought, animate)
 
-        self._update_countdown()
-
     def _set_tile(self, tile: StatTile, value: int, animate: bool):
         text = str(value)
         if animate:
@@ -573,22 +519,10 @@ class StatsWindow(ModuleWindow):
         else:
             tile.set_value(text)
 
-    def _update_countdown(self):
-        # sync_*_countdown, not *_remaining_seconds: this timer is the one
-        # place in the whole app that ticks once a second, so it is also
-        # the one place that writes the live value back to stats.json —
-        # see StatsManager.sync_gardener_countdown / sync_janitor_countdown.
-        # One timer, two independent countdowns — Уборщик's own cooldown
-        # never touches Садовник's.
-        self._next_tile.set_value(
-            _countdown_text(self._stats.sync_gardener_countdown()))
-        self._janitor_next_tile.set_value(
-            _countdown_text(self._stats.sync_janitor_countdown()))
-
     def _set_value(self, label: QLabel, text: str):
         """Unfilled values are marked, not hidden — that is the point of them."""
         empty  = text.startswith("%") and text.endswith("%")
-        colour = theme.ACCENT_AMBER if empty else theme.TEXT_PRIMARY
+        colour = theme.ACCENT_AMBER if empty else theme.ACCENT_WHITE
         label.setText(text)
         label.setStyleSheet(f"color:{colour}; background:transparent;")
 

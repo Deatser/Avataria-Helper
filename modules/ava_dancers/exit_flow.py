@@ -5,7 +5,7 @@ import time
 
 from app.core.input_sender import click_at
 from app.core.template_match import (best_match, load_template,
-                                     primary_monitor_region)
+                                     game_region)
 from modules.ava_dancers.click_flow import DEFAULT_CLICK_LIMIT, ClickFlow
 from modules.ava_dancers.game_over_watch import (GAMEOVER_TEMPLATE,
                                                  MATCH_THRESHOLD)
@@ -104,7 +104,7 @@ class ExitFlow(ClickFlow):
         there, not a permission slip — a round that stalls here because the
         artwork changed is exactly the outcome this replaced.
         """
-        region   = primary_monitor_region()
+        region   = game_region()
         deadline = time.monotonic() + OK_WAIT_S
         while time.monotonic() < deadline and not self._stop_event.is_set():
             try:
@@ -120,7 +120,7 @@ class ExitFlow(ClickFlow):
     def _banner_gone(self, banner) -> bool:
         """Has the click cleared the screen — the only evidence there is that
         it landed, now that the button itself is not being matched."""
-        region   = primary_monitor_region()
+        region   = game_region()
         deadline = time.monotonic() + OK_SETTLE_S
         while time.monotonic() < deadline and not self._stop_event.is_set():
             self._stop_event.wait(OK_POLL_S)

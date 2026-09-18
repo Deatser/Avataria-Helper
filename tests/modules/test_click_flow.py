@@ -116,7 +116,7 @@ def _run_one_step(monkeypatch, frames, reclick=None, timeout=None,
     clicks   = []
 
     monkeypatch.setattr(click_flow, "grab_window", _ScriptedCapture(frames))
-    monkeypatch.setattr(click_flow, "primary_monitor_region", lambda: {})
+    monkeypatch.setattr(click_flow, "game_region", lambda: {})
     monkeypatch.setattr(click_flow, "click_at",
                         lambda hwnd, x, y: clicks.append((x, y)) or True)
     if reclick is not None:
@@ -192,7 +192,7 @@ def _run_with_scores(monkeypatch, scores, timeout=2.0):
     monkeypatch.setattr(click_flow, "best_match", fake_match)
     monkeypatch.setattr(click_flow, "grab_window",
                         _ScriptedCapture([_empty_scene()]))
-    monkeypatch.setattr(click_flow, "primary_monitor_region", lambda: {})
+    monkeypatch.setattr(click_flow, "game_region", lambda: {})
     monkeypatch.setattr(click_flow, "click_at",
                         lambda hwnd, x, y: clicks.append((x, y)) or True)
     monkeypatch.setattr(click_flow, "RECLICK_INTERVAL", 0)

@@ -2,11 +2,11 @@
 """Following the puck, and turning that into per-row timings."""
 import numpy as np
 
-from app.core.config import HockeyConfig
 from modules.hockey.rink_area import from_config
 from modules.hockey.trajectory import (PuckFlight, PuckSample, RowTiming,
                                        ShotTrack, append, arrived, averaged,
                                        crossings, load, mirror_fill, puck_at)
+from tests.modules.hockey_legacy_config import HockeyConfig
 
 # Rink at (1000, 500), 400x600. Two rows whose defenders occupy known
 # bands, so a crossing time can be checked against arithmetic.

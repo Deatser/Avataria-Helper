@@ -39,7 +39,7 @@ from app.core import activated_promo_log
 from app.core.capture import grab_window
 from app.core.input_sender import click_at, type_text
 from app.core.promo_watch import PromoEntry, fetch_available
-from app.core.template_match import best_match, load_template, primary_monitor_region
+from app.core.template_match import best_match, load_template, game_region
 
 SEARCH_INTERVAL = 1.0
 AUTO_INTERVAL   = 60.0
@@ -104,7 +104,7 @@ def _locate(hwnd: int, filename: str, threshold: float):
     template = load_template(filename)
     if template is None:
         return None
-    region = primary_monitor_region()
+    region = game_region()
     gray = _grab_gray(hwnd, region)
     score, (x, y) = best_match(gray, template)
     if score < threshold:

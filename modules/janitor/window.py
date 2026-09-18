@@ -19,7 +19,7 @@ import cv2
 from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QWidget
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 
-from app.core.capture import ScreenCapture, grab_window
+from app.core.capture import ScreenCapture, grab_screen_region, grab_window
 from app.core.input_sender import click_at
 from app.core.template_match import TEMPLATES_DIR, best_match, load_template
 from app.ui import theme
@@ -621,7 +621,7 @@ class JanitorWindow(ModuleWindow):
         if template is None:
             return
         try:
-            gray = cv2.cvtColor(ScreenCapture.get().grab(_POPUP_REGION),
+            gray = cv2.cvtColor(grab_screen_region(_POPUP_REGION),
                                 cv2.COLOR_BGR2GRAY)
         except Exception:
             return
@@ -644,7 +644,7 @@ class JanitorWindow(ModuleWindow):
         if template is None:
             return
         try:
-            gray = cv2.cvtColor(ScreenCapture.get().grab(_POPUP_REGION),
+            gray = cv2.cvtColor(grab_screen_region(_POPUP_REGION),
                                 cv2.COLOR_BGR2GRAY)
         except Exception:
             return
@@ -778,8 +778,14 @@ class JanitorWindow(ModuleWindow):
 
         self._log.setMinimumHeight(_LOG_H_RUN if wanted else _LOG_H)
 
-        room = self.screen().availableGeometry().height() if self.screen() else 0
-        height = max(_MIN_H, self.height() + delta)
+        # Высота окна — живая, а _MIN_H и delta посчитаны по содержимому,
+        # то есть в расчётных пикселях: на ужатой игре окно обязано вырасти
+        # во столько же раз меньше, иначе полоски бота выталкивают его за
+        # край игры. Предел — тоже по игре, а не по монитору (game_fit.py).
+        scale  = self.ui_scale
+        room   = self.fit_room_height()
+        height = max(int(round(_MIN_H * scale)),
+                     self.height() + int(round(delta * scale)))
         self.resize(self.width(), min(height, room) if room else height)
 
     def _put_board_away(self):

@@ -136,3 +136,44 @@ def test_a_cleanup_also_bumps_todays_log(tmp_path, monkeypatch):
     log = _todays_log(tmp_path)
     assert log["gardener"]["shifts_finished"] == 1
     assert log["janitor"]["shifts_finished"] == 1
+
+
+# ── Cooldown ────────────────────────────────────────────────────────────────
+# Окно статистики отсчёт больше не показывает, но stats.json его помнит, и
+# считаться он обязан от настоящего времени, а не от того, что записано.
+
+def test_the_gardener_countdown_counts_down(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    stats = StatsManager()
+    stats.data.gardener.clean_next_time = "1:02:03"
+    stats.data.gardener.clean_was_time = datetime.now().isoformat()
+
+    assert stats.gardener_remaining_seconds() in (3723, 3722)   # tick skew
+
+
+def test_the_gardener_countdown_catches_up_after_being_closed(tmp_path,
+                                                              monkeypatch):
+    """The mod does not run while it's closed, so nothing decrements
+    clean_next_time by hand — the countdown has to be worked out from how
+    long ago clean_was_time was instead."""
+    from datetime import timedelta
+
+    monkeypatch.chdir(tmp_path)
+    stats = StatsManager()
+    stats.data.gardener.clean_next_time = "1:00:00"
+    stats.data.gardener.clean_was_time = (
+        datetime.now() - timedelta(minutes=45)).isoformat()
+
+    assert stats.gardener_remaining_seconds() in (900, 899)     # tick skew
+
+
+def test_a_finished_cooldown_reads_zero_not_a_negative(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    monkeypatch.chdir(tmp_path)
+    stats = StatsManager()
+    stats.data.janitor.clean_next_time = "0:10:00"
+    stats.data.janitor.clean_was_time = (
+        datetime.now() - timedelta(hours=3)).isoformat()
+
+    assert stats.janitor_remaining_seconds() == 0

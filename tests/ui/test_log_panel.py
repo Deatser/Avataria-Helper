@@ -6,6 +6,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from app.ui import theme
+from app.ui.widgets import log_panel
 from app.ui.widgets.log_panel import LogPanel
 
 
@@ -70,6 +71,48 @@ def test_a_second_press_mid_wipe_finishes_it_at_once(app):
     panel.clear_logs()          # impatient
 
     assert panel.toPlainText().strip() == ""
+
+
+# ── The animation switch ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def no_animation():
+    log_panel.set_animation_enabled(False)
+    yield
+    log_panel.set_animation_enabled(True)
+
+
+def test_a_line_lands_whole_with_the_animation_off(app, no_animation):
+    panel = LogPanel()
+
+    panel.add_log_segments([("строка", theme.TEXT_PRIMARY)], level="plain")
+
+    # No pumping: the text is there before the event loop gets a turn, and
+    # it is the settled text, not scramble.
+    assert "строка" in panel.toPlainText()
+
+
+def test_clearing_is_instant_with_the_animation_off(app, no_animation):
+    panel = LogPanel()
+    for i in range(4):
+        panel.add_log_segments([(f"строка номер {i}", theme.TEXT_PRIMARY)],
+                               level="plain")
+
+    panel.clear_logs()
+
+    assert panel.toPlainText().strip() == ""
+    assert panel._wiping is False
+
+
+def test_on_done_still_fires_with_the_animation_off(app, no_animation):
+    panel = LogPanel()
+    calls = []
+
+    panel.animate_log([("строка", theme.TEXT_PRIMARY)], include_ts=False,
+                      on_done=lambda: calls.append(1))
+
+    assert calls == [1]
 
 
 # ── The frame builder, driven directly ──────────────────────────────────────

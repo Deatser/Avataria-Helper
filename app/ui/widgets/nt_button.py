@@ -11,6 +11,14 @@ _BAR_W   = 3    # left accent bar width
 _BAR_X   = 7    # bar inset from the left edge
 _BAR_PAD = 8    # bar inset from top/bottom edge
 
+# ── «В разработке» ───────────────────────────────────────────────────────────
+# Кнопка мода, за которым ещё ничего нет. Не setEnabled(False): выключенный
+# виджет в Qt не получает событий мыши, а значит ни подсветки при наведении,
+# ни подсказки — а именно они и должны объяснить, почему тайл не нажимается.
+# Поэтому кнопка живая, просто нарисована вполсилы и глотает клики.
+WIP_TEXT           = "В разработке"
+_WIP_OPACITY       = 0.42   # весь тайл — заметно тусклее соседей
+_WIP_HOVER_OPACITY = 0.92   # …кроме надписи под курсором: она загорается
 
 def _blend(base: QColor, tint: QColor, t: float) -> QColor:
     """Mix `tint` into `base` by factor t (0..1)."""
@@ -31,11 +39,13 @@ class NtButton(QPushButton):
     - upper=False to disable text uppercasing
     - outline=True keeps an accent-coloured border at rest
     - filled=True keeps the accent wash at rest
+    - wip=True dims the whole button, swallows clicks and says why on hover
     """
 
     def __init__(self, text: str = "", parent=None,
                  accent: str = None, upper: bool = True,
-                 outline: bool = False, filled: bool = False):
+                 outline: bool = False, filled: bool = False,
+                 wip: bool = False):
         super().__init__(text, parent)
         self._active  = False
         self._hovered = False
@@ -43,6 +53,7 @@ class NtButton(QPushButton):
         self._upper   = upper
         self._outline = outline
         self._filled  = filled
+        self._wip     = wip
 
         # Hover sweep
         self._sweep_x     = -60.0
@@ -52,9 +63,12 @@ class NtButton(QPushButton):
         self._sweep_timer.timeout.connect(self._tick_sweep)
 
         self.setFlat(True)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.ArrowCursor if wip else Qt.PointingHandCursor)
         self.setMinimumHeight(34)
         self.setFont(theme.get_mono_font(theme.FONT_SIZE_M))
+        if wip:
+            self.setToolTip(WIP_TEXT)
+            self.setFocusPolicy(Qt.NoFocus)   # и с клавиатуры тоже не нажать
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -84,7 +98,7 @@ class NtButton(QPushButton):
     def enterEvent(self, event):
         super().enterEvent(event)
         self._hovered = True
-        if self.width() >= _SMALL_W:
+        if self.width() >= _SMALL_W and not self._wip:
             self._sweep_x   = -60.0
             self._sweep_dir = 1
             self._sweep_timer.start()
@@ -96,6 +110,22 @@ class NtButton(QPushButton):
         self._sweep_timer.stop()
         self._sweep_dir = 0
         self.update()
+
+    # ── Clicks ────────────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        if self._wip:
+            event.accept()   # съеден здесь: ни clicked, ни окно под тайлом
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._wip:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    # ── Sweep ─────────────────────────────────────────────────────────────────
 
     def _tick_sweep(self):
         self._sweep_x += self.width() * 0.06
@@ -112,6 +142,11 @@ class NtButton(QPushButton):
         w, h   = self.width(), self.height()
         small  = w < _SMALL_W
         accent = QColor(self._accent)
+
+        # Тайл «в разработке» рисуется тем же кодом, просто вполсилы — он
+        # держит своё место и свой цвет на доске, но читается как погасший.
+        if self._wip:
+            painter.setOpacity(_WIP_OPACITY)
 
         path = QPainterPath()
         path.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), _RADIUS, _RADIUS)
@@ -163,24 +198,33 @@ class NtButton(QPushButton):
         painter.restore()
 
         # ── Text ──────────────────────────────────────────────────────────────
-        if self._active:
-            text_c = QColor(theme.ACCENT_WHITE)
-        elif self._hovered:
+        # Под курсором тайл «в разработке» меняет своё имя на причину, по
+        # которой он не нажимается, и она горит ярче остального тайла.
+        wip_hover = self._wip and self._hovered
+        if wip_hover:
+            text_c = QColor(theme.ACCENT_AMBER)
+        elif self._active or self._hovered:
             text_c = QColor(theme.ACCENT_WHITE)
         else:
             text_c = QColor(theme.TEXT_PRIMARY)
+
+        painter.save()
+        if wip_hover:
+            painter.setOpacity(_WIP_HOVER_OPACITY)
         painter.setPen(text_c)
         painter.setFont(self.font())
 
+        label = WIP_TEXT if wip_hover else self.text()
         if small:
-            painter.drawText(self.rect(), Qt.AlignCenter, self.text())
+            painter.drawText(self.rect(), Qt.AlignCenter, label)
         else:
-            display = self.text().upper() if self._upper else self.text()
+            display = label.upper() if self._upper else label
             painter.drawText(
                 self.rect().adjusted(_BAR_X + _BAR_W + 11, 0, -12, 0),
                 Qt.AlignVCenter | Qt.AlignLeft,
                 display,
             )
+        painter.restore()
 
         # ── Border ────────────────────────────────────────────────────────────
         # Every button gets its own accent-tinted border now, not just the

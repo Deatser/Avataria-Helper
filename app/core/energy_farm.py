@@ -26,7 +26,7 @@ from PySide6.QtCore import QThread, Signal
 from app.core import energy_bar
 from app.core.capture import grab_window
 from app.core.input_sender import click_at
-from app.core.template_match import best_match, load_template, primary_monitor_region
+from app.core.template_match import best_match, load_template, game_region
 
 STEP_MENU   = "button_menu.png"
 STEP_PLACES = "button_places.png"
@@ -64,7 +64,7 @@ def _locate(hwnd: int, filename: str, threshold: float = MATCH_THRESHOLD):
     template = load_template(filename)
     if template is None:
         return None
-    gray = _grab_gray(hwnd, primary_monitor_region())
+    gray = _grab_gray(hwnd, game_region())
     score, (x, y) = best_match(gray, template)
     if score < threshold:
         return None
@@ -105,7 +105,7 @@ class CafeRun:
             return False
         next_template = None if following is None else load_template(following)
 
-        region     = primary_monitor_region()
+        region     = game_region()
         deadline   = time.monotonic() + STEP_TIMEOUT
         h, w       = template.shape[:2]
         peak       = 0.0

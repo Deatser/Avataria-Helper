@@ -157,7 +157,7 @@ def _bare_session(picture):
 
     session = wgc_capture.WindowSession.__new__(wgc_capture.WindowSession)
     session.hwnd = 1
-    session.origin = (0, 0)
+    session._origin = (0, 0)
     session._frame = picture
     session._index = 1
     session._cv = threading.Condition()
@@ -219,3 +219,36 @@ def test_printwindow_ignores_freshness(monkeypatch):
     monkeypatch.setattr(capture, "_print_window", lambda hwnd: (fallback, 0, 0))
 
     assert np.array_equal(capture.grab_window(123, fresh=False), fallback)
+
+
+# ── Где лежал кадр ──────────────────────────────────────────────────────────
+# origin запоминался один раз, при заведении сессии, и жил до её конца. А
+# разворот игры из полноэкранки двигает окно всегда: кусок под детект после
+# него вырезался не оттуда, найденная точка переводилась в экран не туда, и
+# картинка игры мерилась по чужому месту — окна помощника слипались в углу.
+
+def test_a_frame_brings_the_place_the_window_was_at(monkeypatch):
+    from app.core import wgc_capture
+
+    session = _bare_session(np.zeros((4, 4, 3), np.uint8))
+    monkeypatch.setattr(wgc_capture, "frame_origin", lambda hwnd: (700, 400))
+
+    session._store_frame(np.full((4, 4, 3), 9, np.uint8))
+
+    assert session.origin == (700, 400)
+
+
+def test_the_last_known_place_survives_a_window_that_will_not_answer(
+        monkeypatch):
+    """Окно закрывается — кадр от этого не становится хуже."""
+    from app.core import wgc_capture
+
+    session = _bare_session(np.zeros((4, 4, 3), np.uint8))
+
+    def _gone(hwnd):
+        raise OSError("окна больше нет")
+
+    monkeypatch.setattr(wgc_capture, "frame_origin", _gone)
+    session._store_frame(np.zeros((4, 4, 3), np.uint8))
+
+    assert session.origin == (0, 0)

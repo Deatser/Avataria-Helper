@@ -23,7 +23,7 @@ import win32gui
 
 from app.core.capture import grab_window, window_frame_origin
 from app.core.input_sender import click_at
-from app.core.template_match import best_match, load_template, primary_monitor_region
+from app.core.template_match import best_match, load_template, game_region
 from app.core.term_log import tlog
 
 LAUNCHER_TITLE = "Tortuga Game Club"

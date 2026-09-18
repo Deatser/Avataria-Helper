@@ -25,7 +25,7 @@ _PULSE_AMP = 0.18
 
 @dataclass
 class Marker:
-    x: int          # screen coordinates, as reported by the scan
+    x: int          # эталонные экранные координаты, как их назвал детект
     y: int
     colour: str
     solid: bool = True   # a near miss is drawn hollow — same colour, less claim
@@ -51,13 +51,18 @@ class MarkerOverlay(GameLayer):
     # ── Public API ───────────────────────────────────────────────────────────
 
     def show_markers(self, markers: list[Marker]):
-        self._markers = self._inside_game(markers)
+        self._markers = self._inside_game([self._live(m) for m in markers])
         if not self._markers:
             self.clear()
             return
         self._sync()
         self._follow.start()
         self._pulse.start()
+
+    def _live(self, marker: Marker) -> Marker:
+        """Точка названа в эталоне — нарисовать её надо там, где она сейчас."""
+        x, y = self.live_point(marker.x, marker.y)
+        return Marker(x, y, marker.colour, marker.solid)
 
     def _inside_game(self, markers: list[Marker]) -> list[Marker]:
         """Only what is on the game's own window; the rest is not the garden."""

@@ -84,7 +84,7 @@ class WindowSession:
         self.hwnd = hwnd
         self._frame: np.ndarray | None = None
         self._index = 0
-        self.origin = frame_origin(hwnd)
+        self._origin = frame_origin(hwnd)
         self._cv = threading.Condition()
         self._closed = False
         self._seen = threading.local()
@@ -98,11 +98,7 @@ class WindowSession:
             # this returns, so it has to be copied out. Dropping the alpha
             # channel here rather than per reader keeps every consumer on
             # the plain BGR the rest of the codebase expects.
-            picture = np.ascontiguousarray(frame.frame_buffer[:, :, :3])
-            with self._cv:
-                self._frame = picture
-                self._index += 1
-                self._cv.notify_all()
+            self._store_frame(np.ascontiguousarray(frame.frame_buffer[:, :, :3]))
 
         @capture.event
         def on_closed():
@@ -111,6 +107,42 @@ class WindowSession:
                 self._cv.notify_all()
 
         self._control = capture.start_free_threaded()
+
+    def _store_frame(self, picture: np.ndarray):
+        """Новый кадр — и место, где было окно, когда его сняли.
+
+        Место раньше бралось один раз, при заведении сессии, и жило до её
+        конца. Стоит подвинуть окно игры — а разворот из полноэкранки
+        двигает его всегда, — и всё, что считается от начала кадра, уезжает
+        на величину этого сдвига: кусок под детект вырезается не оттуда,
+        найденная точка переводится в экран не туда, а промер самой
+        картинки игры даёт масштаб, которого нет. Снаружи это выглядит как
+        «окна слиплись в углу и не двигаются, а моды бьют мимо».
+
+        Окно, которое не ответило, где оно, — закрывается прямо сейчас:
+        держим последнее известное место, кадр от этого хуже не станет.
+        """
+        try:
+            origin = frame_origin(self.hwnd)
+        except Exception:
+            origin = None
+        with self._cv:
+            self._frame = picture
+            if origin is not None:
+                self._origin = origin
+            self._index += 1
+            self._cv.notify_all()
+
+    @property
+    def origin(self) -> tuple[int, int]:
+        """Экранные координаты левого верхнего пикселя последнего кадра.
+
+        Пара к кадру, а не к сессии: то и другое пишется в один заход из
+        on_frame_arrived, и читающий получает начало координат именно того
+        кадра, который у него в руках.
+        """
+        with self._cv:
+            return self._origin
 
     def wait_ready(self, timeout: float = _START_TIMEOUT_S) -> bool:
         deadline = time.monotonic() + timeout

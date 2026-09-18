@@ -5,11 +5,11 @@ import numpy as np
 
 import pytest
 
-from app.core.config import HockeyConfig
 from app.core.template_match import TEMPLATES_DIR
 from modules.hockey import detect
 from modules.hockey.detect import HELMET_TEMPLATES, HelmetDetector
 from modules.hockey.rink_area import from_config
+from tests.modules.hockey_legacy_config import HockeyConfig
 
 RED = (0, 0, 255)   # BGR, straight into the low hue band
 

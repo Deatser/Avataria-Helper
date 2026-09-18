@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 import mss
 
+from app.core.game_geometry import geometry
+
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 
 # Which reward a run is farmed for — stored in config as `finish_on` and
@@ -85,3 +87,18 @@ def find_all(scene: np.ndarray, template: np.ndarray, threshold: float,
 def primary_monitor_region() -> dict:
     with mss.mss() as sct:
         return dict(sct.monitors[1])
+
+
+def game_region() -> dict:
+    """«Вся игра» — прямоугольник в эталонных координатах.
+
+    Раньше это место занимал весь монитор: игра была развёрнута, и одно
+    сходилось с другим. Свёрнутая в окно игра рвёт это равенство сразу — и
+    корреляция начинает считаться по трём мегапикселям обоев, среди которых
+    искомой кнопки нет.
+
+    Пока эталон не записан, ответ прежний — весь монитор, то есть прежнее
+    поведение помощника слово в слово.
+    """
+    frame = geometry().reference
+    return frame.region if frame is not None else primary_monitor_region()

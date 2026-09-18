@@ -21,6 +21,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtWidgets import QWidget
 
+from app.core.game_geometry import geometry
 from app.ui.no_capture import exclude_from_capture
 
 
@@ -88,3 +89,40 @@ class GameLayer(QWidget):
             return None
         rect = self._wm.window_rect_screen(self._wm.get_game_hwnd())
         return QRect(*rect) if rect is not None else None
+
+    # ── Из эталона на экран ──────────────────────────────────────────────────
+    # Детекторы читают кадр, приведённый к эталонному размеру игры, и точки
+    # называют в тех же координатах (см. app/core/capture.py). Нарисовать их
+    # можно только там, где они на экране на самом деле.
+
+    def _geometry(self):
+        hwnd = self._wm.get_game_hwnd() if self._wm is not None else None
+        return geometry(hwnd)
+
+    def live_point(self, x: int, y: int) -> tuple[int, int]:
+        return self._geometry().point(x, y)
+
+    def live_rect(self, rect: QRect) -> QRect:
+        left, top     = self.live_point(rect.left(), rect.top())
+        right, bottom = self.live_point(rect.left() + rect.width(),
+                                        rect.top() + rect.height())
+        return QRect(left, top, max(1, right - left), max(1, bottom - top))
+
+    # ── Смена размера игры ───────────────────────────────────────────────────
+
+    def refit(self):
+        """Игра стала другого размера — встать по-новому.
+
+        Слои, которые перерисовываются тактом мода (метки найденного мусора,
+        зоны, едущие рамки), пересчитывают своё место сами на каждом кадре и
+        здесь ничего не делают. Переопределяют это те, что выставлены один
+        раз и висят до конца прохода.
+        """
+
+    def reference_rect(self, rect: QRect) -> QRect:
+        """И обратно — то, что пользователь выделил мышью, в эталон."""
+        geom = self._geometry()
+        left, top     = geom.to_reference(rect.left(), rect.top())
+        right, bottom = geom.to_reference(rect.left() + rect.width(),
+                                          rect.top() + rect.height())
+        return QRect(left, top, max(1, right - left), max(1, bottom - top))

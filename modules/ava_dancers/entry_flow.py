@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 
 from app.core.template_match import (best_match, load_template,
-                                     primary_monitor_region)
+                                     game_region)
 from modules.ava_dancers.click_flow import BUTTON_THRESHOLD, ClickFlow
 from modules.ava_dancers.exit_flow import (OK_STEP, RESTART_STEPS,
                                            START_CLICK_LIMITS)
@@ -112,7 +112,7 @@ class EntryFlow(ClickFlow):
     def _screen(self):
         """One grab, shared by every check below; None if the grab failed."""
         try:
-            return self.grab_gray(self._hwnd, primary_monitor_region())
+            return self.grab_gray(self._hwnd, game_region())
         except Exception as exc:
             self.error.emit(str(exc))
             return None

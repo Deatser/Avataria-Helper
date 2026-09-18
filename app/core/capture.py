@@ -11,6 +11,8 @@ import cv2
 import win32gui
 import win32ui
 
+from app.core.game_geometry import geometry
+
 _RETRIES     = 3      # BitBlt can fail transiently — a retry usually succeeds
 _RETRY_DELAY = 0.015  # seconds between attempts
 
@@ -113,8 +115,8 @@ def wgc_enabled() -> bool:
     return _use_wgc
 
 
-def window_frame_origin(hwnd: int) -> tuple[int, int]:
-    """Screen coordinates of the top-left pixel grab_window(hwnd) returns.
+def _live_frame_origin(hwnd: int) -> tuple[int, int]:
+    """Экранные координаты левого верхнего пикселя снятого кадра, как есть.
 
     The two backends do not agree on this and the difference is not
     cosmetic. GetWindowRect counts in the invisible resize border — on the
@@ -130,6 +132,18 @@ def window_frame_origin(hwnd: int) -> tuple[int, int]:
             return session.origin
     left, top, _, _ = win32gui.GetWindowRect(hwnd)
     return left, top
+
+
+def window_frame_origin(hwnd: int) -> tuple[int, int]:
+    """Где лежит левый верхний пиксель того, что вернул grab_window, —
+    в эталонных координатах.
+
+    grab_window отдаёт кадр, приведённый к эталонному масштабу (см. его
+    собственное описание), поэтому точка, найденная в этом кадре,
+    складывается с эталонным началом координат, а не с живым. На игре
+    ровно эталонного размера это одно и то же число.
+    """
+    return geometry(hwnd).to_reference(*_live_frame_origin(hwnd))
 
 
 def wgc_frames_seen(hwnd: int) -> int | None:
@@ -182,14 +196,43 @@ def grab_window(hwnd: int, region: dict | None = None,
     instead of the game. PrintWindow renders the window itself into an
     off-screen bitmap, unaffected by whatever else is in front of it.
 
-    region, if given, is in the same absolute screen coordinates every
-    other region in this codebase uses; it is converted to window-relative
-    pixels here using hwnd's own current position.
+    region, if given, is in **эталонных** экранных координатах — тех самых,
+    в которых записаны все области и точки в этом коде. Сюда она приезжает
+    как есть, здесь переводится в нынешний размер игры, вырезается из кадра
+    и возвращается обратно в эталонном масштабе. Поэтому шаблоны, снятые с
+    развёрнутой игры, совпадают и с игрой, ужатой в четверть экрана, а
+    найденная точка складывается с region["left"]/["top"] ровно так же, как
+    складывалась всегда. На игре эталонного размера здесь не происходит
+    ничего: ни перевода, ни лишнего resize.
+
+    region=None по-прежнему значит «всё окно целиком» — тоже приведённое к
+    эталону, а где лежит его левый верхний пиксель, отвечает
+    window_frame_origin.
 
     `fresh=False` says this caller is not building a time series and will
     take whatever picture is already in hand — see WindowSession.grab, which
     is the only backend the flag means anything to. PrintWindow draws the
     window on the spot, so everything it returns is new either way.
+    """
+    image, origin = _grab_frame(hwnd, fresh)
+    geom = geometry(hwnd)
+
+    if region is not None:
+        live = geom.region(region)
+        # max(0, …) — область, заказанная за краем окна: срез с
+        # отрицательного индекса молча вернул бы кусок с другой стороны
+        # кадра. Обычный путь сюда не заходит: game_region() за пределы
+        # игры не выходит.
+        rel_left = max(0, live["left"] - origin[0])
+        rel_top  = max(0, live["top"]  - origin[1])
+        image = image[rel_top:rel_top + live["height"],
+                      rel_left:rel_left + live["width"]]
+
+    return _to_reference_scale(image, geom)
+
+
+def _grab_frame(hwnd: int, fresh: bool) -> tuple[np.ndarray, tuple[int, int]]:
+    """Кадр всего окна и экранные координаты его левого верхнего пикселя.
 
     The GDI calls below transiently fail under load — the same reason
     ScreenCapture.grab retries its own BitBlt — so a failure here gets a
@@ -199,7 +242,7 @@ def grab_window(hwnd: int, region: dict | None = None,
         session = _wgc_session(hwnd)
         if session is not None:
             try:
-                return session.grab(region, fresh=fresh)
+                return session.grab(None, fresh=fresh), session.origin
             except Exception:
                 # Minimised, closed, moved — whatever it was, PrintWindow can
                 # still answer. Tear the session down so the next call starts
@@ -218,22 +261,50 @@ def grab_window(hwnd: int, region: dict | None = None,
     for _ in range(_RETRIES):
         try:
             img, left, top = _print_window(hwnd)
-            break
+            return img, (left, top)
         except Exception as exc:
             last_error = exc
             _release_thread_cache()   # cached DC/bitmap may be the cause — drop it and retry clean
             time.sleep(_RETRY_DELAY)
-    else:
-        raise last_error
+    raise last_error
 
-    if region is None:
-        return img
 
-    rel_left = region["left"] - left
-    rel_top  = region["top"] - top
-    return np.ascontiguousarray(
-        img[rel_top:rel_top + region["height"],
-           rel_left:rel_left + region["width"]])
+def grab_screen_region(region: dict) -> np.ndarray:
+    """Кусок экрана по эталонному прямоугольнику, в эталонном масштабе.
+
+    Тот же уговор, что у grab_window, только поверх ScreenCapture — для
+    мест, которые читают экран целиком, а не окно игры.
+    """
+    geom = geometry()
+    return _to_reference_scale(ScreenCapture.get().grab(geom.region(region)),
+                               geom)
+
+
+def grab_window_raw(hwnd: int, fresh: bool = True
+                    ) -> tuple[np.ndarray, tuple[int, int]]:
+    """Кадр окна без всякого перевода — и где он лежит на экране.
+
+    Ровно один вызывающий: измерение самого кадра игры (game_geometry).
+    Спрашивать нынешний масштаб у grab_window значило бы мерить масштаб
+    масштабом.
+    """
+    return _grab_frame(hwnd, fresh)
+
+
+def _to_reference_scale(image: np.ndarray, geom) -> np.ndarray:
+    """Живой кусок кадра → тот же кусок в эталонном масштабе."""
+    if geom.identity or image.size == 0:
+        return np.ascontiguousarray(image)
+    height, width = image.shape[:2]
+    out_w = max(1, int(round(width  / geom.scale_x)))
+    out_h = max(1, int(round(height / geom.scale_y)))
+    if (out_w, out_h) == (width, height):
+        return np.ascontiguousarray(image)
+    # INTER_AREA — единственная интерполяция, которая при уменьшении
+    # усредняет, а не выбрасывает пиксели; вверх она вырождается, поэтому
+    # растяжение идёт линейным.
+    interpolation = cv2.INTER_AREA if out_w < width else cv2.INTER_LINEAR
+    return cv2.resize(image, (out_w, out_h), interpolation=interpolation)
 
 
 # One PrintWindow target (window DC + memory DC + bitmap) per calling thread,

@@ -14,13 +14,13 @@ from PySide6.QtCore import Qt, QRectF, QTimer
 from app.core.capture import grab_window, set_wgc_enabled
 from app.core.input_sender import press_key
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
-                                     load_template, primary_monitor_region)
+                                     load_template, game_region)
 from app.core.restart_state import REASON_STUCK
 from app.ui.module_window import ModuleWindow
 from app.ui.settings_panel import SettingsPanel
 from app.ui.widgets.mode_button import ModeButton
 from app.ui.widgets.nt_button import NtButton
-from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
+from app.ui.widgets.vw_panel import VwPanel
 from app.ui.widgets.nt_status_dot import NtStatusDot
 from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.log_actions import build_log_actions
@@ -165,15 +165,10 @@ def _arrow_pixmap(index: int, colour: str, size: int) -> QPixmap:
     return tinted
 
 
-def _default_backdrop(video: bool = True) -> str:
-    """First existing templates/vaporwawe.* file.
-
-    With video on, moving formats come first; with it off, stills do — but
-    either way anything that exists is better than an empty panel.
-    """
-    moving = VIDEO_SUFFIXES + (".gif",)
-    order  = moving + _STILL_SUFFIXES if video else _STILL_SUFFIXES + moving
-    for suffix in order:
+def _default_backdrop() -> str:
+    """First existing templates/vaporwawe.* file — картинка или ничего:
+    нет файла, и панель рисует свою сцену."""
+    for suffix in _STILL_SUFFIXES:
         candidate = _TEMPLATES / f"{_BACKDROP_STEM}{suffix}"
         if candidate.is_file():
             return str(candidate)
@@ -346,7 +341,7 @@ class AvaDancersWindow(ModuleWindow):
 
         layout.addWidget(self._log)
 
-        # ── Backdrop: templates/vaporwawe.* by default, video first ──────────
+        # ── Backdrop: templates/vaporwawe.* by default ───────────────────────
         self._panel.background_failed.connect(
             lambda msg: self._log.add_log(msg, level="error")
         )
@@ -365,8 +360,7 @@ class AvaDancersWindow(ModuleWindow):
     # ── Backdrop ─────────────────────────────────────────────────────────────
 
     def _apply_backdrop(self, fade: bool = True):
-        video    = getattr(self.config, "video_background", True)
-        backdrop = getattr(self.config, "background", "") or _default_backdrop(video)
+        backdrop = getattr(self.config, "background", "") or _default_backdrop()
         if backdrop and not self._panel.set_background(backdrop, fade=fade):
             self._log.add_log(f"Фон не загружен: {backdrop}", level="error")
 
@@ -913,7 +907,7 @@ class AvaDancersWindow(ModuleWindow):
         if template is None:
             self._log.add_log(f"Не найден шаблон: {filename}", level="error")
             return
-        region = LEAVE_REGIONS.get(key) or primary_monitor_region()
+        region = LEAVE_REGIONS.get(key) or game_region()
         try:
             gray = cv2.cvtColor(grab_window(hwnd, region),
                                 cv2.COLOR_BGR2GRAY)

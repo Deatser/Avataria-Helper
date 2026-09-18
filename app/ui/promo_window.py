@@ -16,7 +16,7 @@ from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_button import NtButton
 from app.ui.widgets.nt_drag_handle import NtDragHandle
 from app.ui.widgets.nt_status_dot import NtStatusDot
-from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
+from app.ui.widgets.vw_panel import VwPanel
 
 _DEFAULT_W = 380
 _DEFAULT_H = 440
@@ -56,12 +56,10 @@ _TEMPLATES      = _PROJECT_ROOT / "templates"
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
-def _default_backdrop(video: bool = True) -> str:
+def _default_backdrop() -> str:
     """First existing templates/AvaPromo.* file — same rule every other
     window's own backdrop picker uses."""
-    moving = VIDEO_SUFFIXES + (".gif",)
-    order  = moving + _STILL_SUFFIXES if video else _STILL_SUFFIXES + moving
-    for suffix in order:
+    for suffix in _STILL_SUFFIXES:
         candidate = _TEMPLATES / f"{_BACKDROP_STEM}{suffix}"
         if candidate.is_file():
             return str(candidate)
@@ -180,8 +178,7 @@ class PromoWindow(ModuleWindow):
         layout.addWidget(drag)
 
     def _apply_backdrop(self, fade: bool = True):
-        video    = getattr(self.config, "video_background", True)
-        backdrop = getattr(self.config, "background", "") or _default_backdrop(video)
+        backdrop = getattr(self.config, "background", "") or _default_backdrop()
         if backdrop and not self._panel.set_background(backdrop, fade=fade):
             self._log.add_log(f"Фон не загружен: {backdrop}", level="error")
 

@@ -43,7 +43,7 @@ from app.ui.widgets.log_actions import build_log_actions
 from app.ui.widgets import log_panel as log_panel_mod
 from app.ui.widgets.log_panel import LogPanel
 from app.ui.widgets.nt_confirm_dialog import NtConfirmDialog
-from app.ui.widgets.vw_panel import VwPanel, VIDEO_SUFFIXES
+from app.ui.widgets.vw_panel import VwPanel
 from app.core.game_watch import GameWatch
 from app.module_registry import MODULES
 
@@ -55,11 +55,9 @@ _TEMPLATES      = _PROJECT_ROOT / "templates"
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
-def _default_backdrop(video: bool = True) -> str:
+def _default_backdrop() -> str:
     """First existing templates/AvaHelper.* file."""
-    moving = VIDEO_SUFFIXES + (".gif",)
-    order  = moving + _STILL_SUFFIXES if video else _STILL_SUFFIXES + moving
-    for suffix in order:
+    for suffix in _STILL_SUFFIXES:
         candidate = _TEMPLATES / f"{_BACKDROP_STEM}{suffix}"
         if candidate.is_file():
             return str(candidate)
@@ -357,7 +355,7 @@ class Overlay(GameFitMixin, CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
         layout.addWidget(self.log_panel, stretch=_LOG_SHARE)
 
-        # ── Backdrop: templates/AvaHelper.* by default, video first ──────────
+        # ── Backdrop: templates/AvaHelper.* by default ───────────────────────
         self._panel.background_failed.connect(
             lambda msg: self.add_log(msg, level="error")
         )
@@ -396,8 +394,7 @@ class Overlay(GameFitMixin, CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
     def _apply_backdrop(self, fade: bool = True):
         cfg      = self.config.data.overlay
-        video    = getattr(cfg, "video_background", True)
-        backdrop = getattr(cfg, "background", "") or _default_backdrop(video)
+        backdrop = getattr(cfg, "background", "") or _default_backdrop()
         if backdrop and not self._panel.set_background(backdrop, fade=fade):
             self.add_log(f"Фон не загружен: {backdrop}", level="error")
 

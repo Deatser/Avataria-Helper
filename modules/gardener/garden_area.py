@@ -18,8 +18,8 @@ from dataclasses import dataclass
 
 import cv2
 
-from app.core.capture import ScreenCapture
-from app.core.template_match import (load_template, primary_monitor_region)
+from app.core.capture import grab_screen_region
+from app.core.template_match import (load_template, game_region)
 
 GARDEN_TEMPLATE = "gardener_11.png"
 
@@ -63,9 +63,9 @@ def locate(filename: str = GARDEN_TEMPLATE, screen_gray=None,
     if template is None:
         return None
 
-    region = primary_monitor_region()
+    region = game_region()
     if screen_gray is None:
-        screen_gray = cv2.cvtColor(ScreenCapture.get().grab(region),
+        screen_gray = cv2.cvtColor(grab_screen_region(region),
                                    cv2.COLOR_BGR2GRAY)
         origin = (region["left"], region["top"])
     else:

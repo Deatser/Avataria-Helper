@@ -1,7 +1,7 @@
 # tests/modules/test_hockey_rink.py
 """The rink's geometry — the config numbers turned into rows and regions."""
-from app.core.config import HockeyConfig
 from modules.hockey.rink_area import from_config
+from tests.modules.hockey_legacy_config import HockeyConfig
 
 
 def _lane(y: int, height: int = 120, body_w: int = 90, body_h: int = 140,

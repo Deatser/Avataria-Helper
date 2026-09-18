@@ -1,9 +1,9 @@
 # tests/modules/test_hockey_planner.py
 """Choosing when to let go — and refusing to, which matters more."""
-from app.core.config import HockeyConfig
 from modules.hockey.planner import best_effort, plan, why_not
 from modules.hockey.rink_area import from_config
 from modules.hockey.trajectory import RowTiming
+from tests.modules.hockey_legacy_config import HockeyConfig
 
 
 def _config(**overrides) -> HockeyConfig:

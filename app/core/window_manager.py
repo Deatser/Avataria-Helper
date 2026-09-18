@@ -27,6 +27,31 @@ class WindowRect:
     height: int
 
 
+def clamp_into(x: int, y: int, w: int, h: int,
+               game_w: int, game_h: int) -> tuple[int, int]:
+    """Держать окно в клиентской области игры, не запрещая его двигать.
+
+    Здесь стояло max(0, min(x, game_w - w)). Пока окно помещалось в игру,
+    это работало. Стоит игре стать меньше окна — и game_w - w уходит в
+    минус: обе границы схлопываются в ноль, окно намертво прилипает к углу
+    и не тащится вообще. Именно это ловилось как «свернул игру — окна
+    больше не двигаются»: у окна помощника 713×828 на игре 1000×600 запас
+    по вертикали −228, и вертикаль переставала слушаться первой.
+
+    Окну, которое в игру не помещается, теперь разрешено уезжать за край —
+    ровно настолько, чтобы дотянуться до любой его части, и не дальше:
+    какой-то его кусок остаётся на виду всегда.
+    """
+    return _clamp_axis(x, w, game_w), _clamp_axis(y, h, game_h)
+
+
+def _clamp_axis(position: int, size: int, extent: int) -> int:
+    slack = extent - size
+    if slack >= 0:
+        return max(0, min(position, slack))
+    return max(slack, min(position, 0))
+
+
 class WindowManager:
     def __init__(self):
         self._game_hwnd: int | None = None
@@ -234,8 +259,7 @@ class WindowManager:
         if not self._game_hwnd:
             return x, y
         l, t, r, b = win32gui.GetClientRect(self._game_hwnd)
-        gw, gh = r - l, b - t
-        return max(0, min(x, gw - w)), max(0, min(y, gh - h))
+        return clamp_into(x, y, w, h, r - l, b - t)
 
     def get_game_rect(self) -> WindowRect | None:
         if not self._game_hwnd:

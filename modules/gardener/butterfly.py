@@ -32,9 +32,9 @@ from dataclasses import dataclass
 import cv2
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from app.core.capture import ScreenCapture
+from app.core.capture import ScreenCapture, grab_screen_region
 from app.core.template_match import (find_all, load_template,
-                                     primary_monitor_region)
+                                     game_region)
 from modules.gardener.rotations import variants
 
 TICK_MS      = 70     # how often a followed butterfly is re-measured
@@ -222,7 +222,7 @@ class ButterflyTracker(QObject):
                                   interpolation=cv2.INTER_AREA)
                        for p in self._pictures]
 
-        self._region = primary_monitor_region()
+        self._region = game_region()
         self._tracks = Tracks()
         self._last = self._swept = 0.0   # first tick sweeps everything
         self._timer.start()
@@ -254,8 +254,8 @@ class ButterflyTracker(QObject):
 
     def _sweep(self) -> list:
         """The whole screen at half size, for ones nobody is following yet."""
-        capture = ScreenCapture.get()
-        gray  = cv2.cvtColor(capture.grab(self._region), cv2.COLOR_BGR2GRAY)
+        gray  = cv2.cvtColor(grab_screen_region(self._region),
+                             cv2.COLOR_BGR2GRAY)
         small = cv2.resize(gray, None, fx=SWEEP_SCALE, fy=SWEEP_SCALE,
                            interpolation=cv2.INTER_AREA)
         found = []
@@ -270,13 +270,12 @@ class ButterflyTracker(QObject):
 
     def _follow(self, dt: float) -> list:
         """Only the boxes where the tracks say the butterflies should be."""
-        capture = ScreenCapture.get()
         found = []
         for track in self._tracks.items:
             box = self._box(*track.predicted(dt))
             if box is None:
                 continue
-            gray = cv2.cvtColor(capture.grab(box), cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(grab_screen_region(box), cv2.COLOR_BGR2GRAY)
             hit  = self._best_in(gray, track.picture)
             if hit is None:
                 continue

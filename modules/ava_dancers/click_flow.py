@@ -9,7 +9,7 @@ from PySide6.QtCore import QThread, Signal
 from app.core.capture import grab_window
 from app.core.input_sender import click_at
 from app.core.template_match import (best_match, load_template,
-                                     primary_monitor_region)
+                                     game_region)
 
 # These are fixed pieces of chrome — no number changes inside them the way
 # the reward line's does — so they can be held to a stricter bar than the
@@ -145,7 +145,7 @@ class ClickFlow(QThread):
         the poll interval.
         """
         self.step_started.emit(label)
-        region     = primary_monitor_region()
+        region     = game_region()
         deadline   = time.monotonic() + self.step_timeout
         h, w       = template.shape[:2]
         peak       = 0.0

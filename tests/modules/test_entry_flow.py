@@ -25,8 +25,8 @@ def _screen_showing(*templates, size=(1000, 1600)):
 def _flow_over(monkeypatch, frame):
     """An EntryFlow whose screen is always `frame`, with steps stubbed out."""
     monkeypatch.setattr(click_flow, "grab_window", lambda _hwnd, _region: frame)
-    monkeypatch.setattr(entry_flow, "primary_monitor_region", lambda: {})
-    monkeypatch.setattr(click_flow, "primary_monitor_region", lambda: {})
+    monkeypatch.setattr(entry_flow, "game_region", lambda: {})
+    monkeypatch.setattr(click_flow, "game_region", lambda: {})
 
     flow = EntryFlow(1234)
     seen = {"in_game": False, "in_lobby": None, "score": None,

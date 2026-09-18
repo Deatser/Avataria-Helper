@@ -10,13 +10,14 @@ _SAVE_DELAY_MS = 400
 
 from app.ui.crt_power_mixin import CrtPowerMixin
 from app.ui.drag_mixin import BackgroundDragMixin
+from app.ui.game_fit import GameFitMixin
 from app.ui.resize_mixin import ResizeMixin
 from app.ui.collapse_mixin import CollapseMixin
 from app.ui.no_capture import exclude_from_capture
 
 
-class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
-                   ResizeMixin, QWidget):
+class ModuleWindow(GameFitMixin, CollapseMixin, CrtPowerMixin,
+                   BackgroundDragMixin, ResizeMixin, QWidget):
     """Base for all module windows: drag, position/size persistence, resize."""
 
     def __init__(self, module_name: str, config, save_fn, parent_overlay=None):
@@ -106,13 +107,19 @@ class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
     # ── Position / size ──────────────────────────────────────────────────────
 
     def restore_position(self):
+        # config хранит эталонное место — на ужатой игре окно встаёт ближе
+        # к её углу во столько же раз. См. app/ui/game_fit.py.
         if getattr(self.config, "position_saved", False):
-            self.move(self.config.x, self.config.y)
+            self.move(*self.to_live_offset(self.config.x, self.config.y))
 
     def save_position(self, x: int, y: int):
-        """Remember the position; the file write is deferred — see _init_drag."""
-        self.config.x = x
-        self.config.y = y
+        """Remember the position; the file write is deferred — see _init_drag.
+
+        Записывается эталонное место, а не то, куда окно легло сейчас:
+        иначе каждый перетаск на ужатой игре сохранял бы уменьшенные числа,
+        и окно с каждым сеансом сползало бы к углу.
+        """
+        self.config.x, self.config.y = self.to_reference_offset(x, y)
         self.config.position_saved = True
         self._save_later.start()
 
@@ -180,8 +187,7 @@ class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
     # ── ResizeMixin hooks ────────────────────────────────────────────────────
 
     def _on_resize_panel(self):
-        if self._panel is not None:
-            self._panel.setGeometry(0, 0, self.width(), self.height())
+        self.layout_panel()
 
     def resizeEvent(self, event):
         """Keep the backdrop the size of the window, however it got resized.
@@ -196,8 +202,10 @@ class ModuleWindow(CollapseMixin, CrtPowerMixin, BackgroundDragMixin,
 
     def _on_resize_done(self):
         if hasattr(self.config, "width"):
-            self.config.width  = self.width()
-            self.config.height = self.height()
+            # Тоже эталонный: окно, растянутое на ужатой игре до половины
+            # её ширины, обязано остаться половиной и на развёрнутой.
+            self.config.width, self.config.height = self.to_reference_size(
+                self.width(), self.height())
             self.save_fn()
 
     # ── Close ────────────────────────────────────────────────────────────────

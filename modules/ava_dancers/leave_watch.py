@@ -7,7 +7,7 @@ from PySide6.QtCore import QThread, Signal
 
 from app.core.capture import grab_window, release_window_capture
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
-                                     load_template, primary_monitor_region)
+                                     load_template, game_region)
 
 # Once a second is plenty: the line only ever moves once per run, and a
 # once-a-second grab has no reason to run faster than the tile detector's
@@ -71,7 +71,7 @@ class LeaveWatch(QThread):
                     # can switch currency mid-run, from another thread, and each
                     # currency has its own region.
                     filename = LEAVE_TEMPLATES[self._target]
-                    region = LEAVE_REGIONS.get(self._target) or primary_monitor_region()
+                    region = LEAVE_REGIONS.get(self._target) or game_region()
                     template = load_template(filename)
                     if template is None:
                         self.error.emit(f"Не найден шаблон: {filename}")

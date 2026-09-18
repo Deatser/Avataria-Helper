@@ -26,6 +26,17 @@ class ResizeMixin:
     _RESIZE_MIN_W: int = 220
     _RESIZE_MIN_H: int = 240
 
+    def _min_size(self) -> tuple[int, int]:
+        """Предел, ниже которого окно не ужимается — в живых пикселях.
+
+        Сами пределы записаны в расчётных: окно, показанное вполовину
+        (см. app/ui/game_fit.py), и упираться должно вполовину раньше,
+        иначе на ужатой игре его вообще нельзя уменьшить.
+        """
+        scale = getattr(self, "ui_scale", 1.0)
+        return (max(1, int(self._RESIZE_MIN_W * scale)),
+                max(1, int(self._RESIZE_MIN_H * scale)))
+
     def _init_resize(self):
         self._rsz_dir  = 0
         self._rsz_orig = QPoint()
@@ -60,18 +71,19 @@ class ResizeMixin:
         if self._rsz_dir and (event.buttons() & Qt.LeftButton):
             delta = event.globalPosition().toPoint() - self._rsz_orig
             geo   = QRect(self._rsz_geo)
+            min_w, min_h = self._min_size()
 
             if self._rsz_dir & _L:
-                new_w = max(self._RESIZE_MIN_W, geo.width() - delta.x())
+                new_w = max(min_w, geo.width() - delta.x())
                 geo.setLeft(geo.right() - new_w + 1)
             if self._rsz_dir & _R:
-                geo.setRight(max(geo.left() + self._RESIZE_MIN_W - 1,
+                geo.setRight(max(geo.left() + min_w - 1,
                                  geo.right() + delta.x()))
             if self._rsz_dir & _T:
-                new_h = max(self._RESIZE_MIN_H, geo.height() - delta.y())
+                new_h = max(min_h, geo.height() - delta.y())
                 geo.setTop(geo.bottom() - new_h + 1)
             if self._rsz_dir & _B:
-                geo.setBottom(max(geo.top() + self._RESIZE_MIN_H - 1,
+                geo.setBottom(max(geo.top() + min_h - 1,
                                   geo.bottom() + delta.y()))
 
             self.setGeometry(geo)

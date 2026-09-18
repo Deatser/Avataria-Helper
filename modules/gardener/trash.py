@@ -9,9 +9,9 @@ from dataclasses import dataclass
 
 import cv2
 
-from app.core.capture import ScreenCapture
+from app.core.capture import grab_screen_region
 from app.core.template_match import (find_all, load_template,
-                                     primary_monitor_region)
+                                     game_region)
 
 
 # The default bar. Lower than the one the game's own buttons are held to,
@@ -132,9 +132,9 @@ def scan(screen_gray=None, region: dict | None = None,
     26 templates apiece to check instead of one or two.
     """
     if screen_gray is None:
-        region = region or primary_monitor_region()
+        region = region or game_region()
         screen_gray = cv2.cvtColor(
-            ScreenCapture.get().grab(region), cv2.COLOR_BGR2GRAY)
+            grab_screen_region(region), cv2.COLOR_BGR2GRAY)
     origin = (region["left"], region["top"]) if region else (0, 0)
 
     found: list[TrashFind] = []

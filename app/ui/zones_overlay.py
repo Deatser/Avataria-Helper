@@ -25,6 +25,7 @@ class ZonesOverlay(GameLayer):
         self._boxes: list[tuple[QRectF, QColor]] = []
 
     def show_zones(self, zones: list[tuple[QRect, QColor]]):
+        zones = [(self.live_rect(rect), colour) for rect, colour in zones]
         """zones: (rect in screen coordinates, colour) pairs."""
         if not zones:
             return

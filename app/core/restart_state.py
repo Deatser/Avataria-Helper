@@ -29,6 +29,8 @@ HELPER_LOG = "__helper__"
 REASON_BREAK  = "break"
 REASON_STUCK  = "stuck"
 REASON_PAUSE  = "pause"
+REASON_AFK    = "afk"     # картинка не менялась — см. app/core/freeze_watch.py
+REASON_REWARD = "reward"  # окно подарка не закрылось — app/core/daily_reward.py
 REASON_MANUAL = "manual"
 
 

@@ -29,13 +29,11 @@ class _WM:
     def window_rect_screen(self, hwnd): return (0, 0, 1600, 900)
 
 
-class _FakeCapture:
+def _fake_screen(region):
     """A grab that never touches the real screen — only its shape has to
     be plausible; nothing in the cleaning loop reads this content any
     more, only grab_window's, stubbed separately in _stub_environment."""
-
-    def grab(self, region):
-        return np.zeros((region["height"], region["width"], 3), np.uint8)
+    return np.zeros((region["height"], region["width"], 3), np.uint8)
 
 
 def _window(tmp_path, monkeypatch):
@@ -75,8 +73,7 @@ def _stub_environment(monkeypatch, window, found, hwnd=4242):
         return [item for item in found if item.kind.key in keys]
 
     monkeypatch.setattr(window_module, "scan", fake_scan)
-    monkeypatch.setattr(window_module.ScreenCapture, "get",
-                        classmethod(lambda cls: _FakeCapture()))
+    monkeypatch.setattr(window_module, "grab_screen_region", _fake_screen)
     monkeypatch.setattr(window_module, "_WATCH_MS", 1)
     # The watch itself now judges stillness by real elapsed time, not a
     # tick count, so a fast tick alone no longer makes it resolve fast —
@@ -580,8 +577,7 @@ def test_a_closed_popup_is_logged_once(tmp_path, monkeypatch, app):
     monkeypatch.setattr(window_module, "_POPUP_RECHECK_MS", 1)
     template = np.zeros((20, 60), np.uint8)
     monkeypatch.setattr(window_module, "load_template", lambda name: template)
-    monkeypatch.setattr(window_module.ScreenCapture, "get",
-                        classmethod(lambda cls: _FakeCapture()))
+    monkeypatch.setattr(window_module, "grab_screen_region", _fake_screen)
     clicks = []
     monkeypatch.setattr(window_module, "click_at",
                         lambda hwnd, x, y: clicks.append((hwnd, x, y)) or True)
@@ -606,8 +602,7 @@ def test_a_click_that_does_not_close_the_popup_stays_silent(
     monkeypatch.setattr(window_module, "_POPUP_RECHECK_MS", 1)
     template = np.zeros((20, 60), np.uint8)
     monkeypatch.setattr(window_module, "load_template", lambda name: template)
-    monkeypatch.setattr(window_module.ScreenCapture, "get",
-                        classmethod(lambda cls: _FakeCapture()))
+    monkeypatch.setattr(window_module, "grab_screen_region", _fake_screen)
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
     # Stays just as convinced after the click as before it
     monkeypatch.setattr(window_module, "best_match",
@@ -625,8 +620,7 @@ def test_a_popup_below_threshold_is_ignored(tmp_path, monkeypatch, app):
     window._running = True
     template = np.zeros((20, 60), np.uint8)
     monkeypatch.setattr(window_module, "load_template", lambda name: template)
-    monkeypatch.setattr(window_module.ScreenCapture, "get",
-                        classmethod(lambda cls: _FakeCapture()))
+    monkeypatch.setattr(window_module, "grab_screen_region", _fake_screen)
     clicks = []
     monkeypatch.setattr(window_module, "click_at",
                         lambda *a: clicks.append(a) or True)
@@ -766,8 +760,7 @@ def test_the_butterfly_hunt_starts_once_nothing_walkable_is_left(
                                width=1600, height=900)
     monkeypatch.setattr(window._wm, "get_game_hwnd", lambda: 4242,
                         raising=False)
-    monkeypatch.setattr(window_module.ScreenCapture, "get",
-                        classmethod(lambda cls: _FakeCapture()))
+    monkeypatch.setattr(window_module, "grab_screen_region", _fake_screen)
     monkeypatch.setattr(window_module, "click_at", lambda *a: True)
     monkeypatch.setattr(window_module, "scan", lambda *a, **k: [])
 

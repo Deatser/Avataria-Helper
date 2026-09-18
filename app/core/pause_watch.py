@@ -19,7 +19,7 @@ from PySide6.QtCore import QThread, Signal
 from app.core.capture import grab_window, release_window_capture
 from app.core.input_sender import click_at
 from app.core.launcher import PLACES_TEMPLATE
-from app.core.template_match import best_match, load_template, primary_monitor_region
+from app.core.template_match import best_match, load_template, game_region
 
 PAUSE_TEMPLATE  = "PAUSE_MENU.png"
 PAUSE_OK_TEMPLATE = "PAUSE_MENU_OK.png"
@@ -98,7 +98,7 @@ class PauseWatch(QThread):
         brk = load_template(BREAK_TEMPLATE)
         if brk is None:
             self.error.emit(f"Не найден шаблон: {BREAK_TEMPLATE}")
-        region = primary_monitor_region()
+        region = game_region()
 
         try:
             while not self._stop_event.is_set():
@@ -160,7 +160,7 @@ class GameReadyWatch(QThread):
             self.error.emit(f"Не найден шаблон: {PLACES_TEMPLATE}")
             self.timed_out.emit()
             return
-        region   = primary_monitor_region()
+        region   = game_region()
         deadline = time.monotonic() + self._wait_s
 
         try:
@@ -229,7 +229,7 @@ class PauseRecovery(QThread):
         self._await_places(places)
 
     def _press_ok(self, pause, ok) -> bool:
-        region = primary_monitor_region()
+        region = game_region()
         oh, ow = ok.shape[:2]
 
         for attempt in range(1, OK_TRIES + 1):
@@ -264,7 +264,7 @@ class PauseRecovery(QThread):
     def _await_places(self, places):
         """Кнопка «Места» на экране — единственное доказательство, что игра
         не просто закрыла окно паузы, а действительно поднялась заново."""
-        region   = primary_monitor_region()
+        region   = game_region()
         deadline = time.monotonic() + PLACES_WAIT_S
 
         while time.monotonic() < deadline and not self._stop_event.is_set():

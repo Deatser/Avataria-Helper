@@ -2,9 +2,9 @@
 """A titled group of rows in a neon-bordered, slightly darkened card.
 
 For grouping several modules together under one label — "Игры" holding
-Ava Dancers/Хоккей/Сноуборд, "Профессии" holding Уборщик/Садовник — inside
-StatsWindow, on top of whatever backdrop (video, photo, or the panel's own
-drawn scene) sits behind it.
+Ava Dancers, "Профессии" holding Уборщик/Садовник — inside StatsWindow, on
+top of whatever backdrop (video, photo, or the panel's own drawn scene)
+sits behind it.
 """
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PySide6.QtGui import QPainter, QColor, QPen
@@ -14,8 +14,10 @@ from app.ui import theme
 
 _RADIUS      = 14
 _TITLE_H     = 30    # strip reserved at the top for the section's own label
-_FILL_ALPHA  = 130   # a wash, not a solid card — the backdrop behind the
-                     # stats window should still read through
+_FILL_ALPHA  = 170   # a wash, not a solid card — the backdrop behind the
+                     # stats window should still read through, but a light
+                     # frame of it used to leave the text inside barely
+                     # readable, so the wash carries more of the contrast
 _GLOW_PASSES = 4
 
 

@@ -6,6 +6,8 @@ import win32api
 import win32con
 import win32gui
 
+from app.core.game_geometry import geometry
+
 _HOLD_S = 0.02   # KEYDOWN to KEYUP gap
 
 # AvaDancers' isolated HSV-threshold test tool (testlogs/test#16-33.json)
@@ -201,6 +203,18 @@ def type_text(hwnd: int, text: str) -> bool:
     return True
 
 
+def _live_point(hwnd: int, screen_x: int, screen_y: int) -> tuple[int, int]:
+    """Эталонная точка → та же точка при нынешнем размере игры.
+
+    Всё, что сюда приходит, посчитано в эталонных координатах: и забитые
+    руками точки кнопок, и то, что нашли детекторы — они читают кадр,
+    приведённый к эталону (см. capture.grab_window). Игра ужата вдвое —
+    клик обязан прийти вдвое ближе к её углу, иначе он уходит в пустоту за
+    краем окна. На игре эталонного размера перевод ничего не меняет.
+    """
+    return geometry(hwnd).point(screen_x, screen_y)
+
+
 def _lparam(x: int, y: int) -> int:
     """Pack a point the way a mouse message carries it.
 
@@ -213,6 +227,9 @@ def _lparam(x: int, y: int) -> int:
 def click_at(hwnd: int, screen_x: int, screen_y: int,
              give_back: bool = True) -> bool:
     """Post a left click at a screen point, in hwnd's own client coordinates.
+
+    Точка — в эталонных координатах, тех же, в которых считает весь
+    остальной код; перевод в нынешний размер игры делает _live_point.
 
     Posted, not synthesised with the real cursor, for the same reason keys
     are: the game does not have to be focused, the pointer never jumps out
@@ -234,7 +251,8 @@ def click_at(hwnd: int, screen_x: int, screen_y: int,
         return False
     target = _input_target(hwnd)
     try:
-        cx, cy = win32gui.ScreenToClient(target, (int(screen_x), int(screen_y)))
+        cx, cy = win32gui.ScreenToClient(
+            target, _live_point(hwnd, screen_x, screen_y))
     except win32gui.error:
         return False
     pos = _lparam(cx, cy)
@@ -257,8 +275,9 @@ def _release(hwnd: int, pos: int, give_back: bool):
 
 
 def _to_client(hwnd: int, screen_x: int, screen_y: int) -> tuple[int, int] | None:
+    """Эталонная точка → клиентские координаты окна, куда летит сообщение."""
     try:
-        return win32gui.ScreenToClient(hwnd, (int(screen_x), int(screen_y)))
+        return win32gui.ScreenToClient(hwnd, _live_point(hwnd, screen_x, screen_y))
     except win32gui.error:
         return None
 

@@ -57,9 +57,10 @@ class TrackingOverlay(GameLayer):
         self._border = border or _BORDER
 
     def update_targets(self, rects: list[QRect]):
-        """`rects` — the latest detections, screen coordinates. Every call
-        after the first one moves existing boxes rather than replacing
+        """`rects` — the latest detections, в эталонных координатах. Every
+        call after the first one moves existing boxes rather than replacing
         them, as long as a detection lands close enough to one."""
+        rects = [self.live_rect(r) for r in rects]
         origin_rect = self.game_rect()
         if origin_rect is not None:
             self.setGeometry(origin_rect)

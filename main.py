@@ -49,9 +49,13 @@ def _repair_overlay_position(config, wm, overlay):
     rect = wm.get_game_rect()
     if rect is None:
         return
+    # Считаем по живому месту, а не по тому, что записано: в config лежат
+    # эталонные числа, и на ужатой игре они больше её клиентской области
+    # сами по себе — окно при этом стоит там, где надо.
     ov = config.data.overlay
-    fits_x = 0 <= ov.x <= max(0, rect.width  - overlay.width())
-    fits_y = 0 <= ov.y <= max(0, rect.height - overlay.height())
+    x, y, width, height = overlay.live_geometry()
+    fits_x = 0 <= x <= max(0, rect.width  - width)
+    fits_y = 0 <= y <= max(0, rect.height - height)
     if fits_x and fits_y:
         return
     ov.x, ov.y = _FALLBACK_POS
@@ -101,15 +105,16 @@ def main():
     open_game()
 
     found = wm.find_game("Аватария")
+    # Всегда, а не только когда игра уже нашлась: она может подняться позже,
+    # и слежение само объявит её окно основным, как только увидит. См.
+    # GameWatch.check.
+    overlay.start_game_watch()
     if found:
         tlog("Аватария found")
         _repair_overlay_position(config, wm, overlay)
         wm.attach_overlay(
             int(overlay.winId()),
-            config.data.overlay.x,
-            config.data.overlay.y,
-            config.data.overlay.width,
-            config.data.overlay.height,
+            *overlay.live_geometry(),
         )
     # Молча, если игры нет: помощник и так поднимается сам по себе, а
     # почему её нет — уже сказал лаунчер строкой выше.

@@ -7,9 +7,9 @@ from dataclasses import dataclass
 
 import cv2
 
-from app.core.capture import ScreenCapture, grab_window
+from app.core.capture import grab_screen_region, grab_window
 from app.core.template_match import (find_all, load_template,
-                                     primary_monitor_region)
+                                     game_region)
 
 MATCH_THRESHOLD = 0.72
 
@@ -74,9 +74,9 @@ def scan(screen_gray=None, region: dict | None = None,
     otherwise read as missing trash rather than as something covering it.
     """
     if screen_gray is None:
-        region = region or primary_monitor_region()
+        region = region or game_region()
         frame = (grab_window(hwnd, region) if hwnd
-                 else ScreenCapture.get().grab(region))
+                 else grab_screen_region(region))
         screen_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     origin = (region["left"], region["top"]) if region else (0, 0)
 

@@ -71,43 +71,38 @@ def test_placeholders_show_for_the_fields_nobody_filled_in(tmp_path,
     window.close()
 
 
-def test_the_gardener_row_shows_a_real_zero_and_the_time_left(
+def test_both_professions_show_their_finished_shifts(tmp_path, monkeypatch,
+                                                     app):
+    """Одна плитка на профессию, рядом, и на каждой ровно одно число —
+    сколько смен эта профессия закрыла, независимо от соседней."""
+    monkeypatch.chdir(tmp_path)
+    stats = StatsManager()
+    stats.record_janitor_cleanup()
+    stats.record_janitor_cleanup()
+    stats.record_gardener_cleanup()
+    window, _config = _window(tmp_path, monkeypatch, app, stats)
+
+    assert window._janitor_shifts_tile.value == "2"
+    assert window._gardener_shifts_tile.value == "1"
+    window.close()
+
+
+def test_a_fresh_install_shows_a_real_zero_for_both_professions(
         tmp_path, monkeypatch, app):
     window, _config = _window(tmp_path, monkeypatch, app)
 
-    assert window._cleanup_tile.value == "0"          # real zero, not %...%
-    assert window._next_tile.value == "Доступна!"       # nothing recorded yet
+    assert window._janitor_shifts_tile.value == "0"    # real zero, not %...%
+    assert window._gardener_shifts_tile.value == "0"
     window.close()
 
 
-def test_the_gardener_countdown_counts_down(tmp_path, monkeypatch, app):
-    from datetime import datetime
+def test_the_games_section_only_counts_ava_dancers(tmp_path, monkeypatch, app):
+    """Хоккей и Сноуборд ещё не готовы — их тайлы на доске мода погашены, и
+    в статистике для них нет ни строки."""
+    window, _config = _window(tmp_path, monkeypatch, app)
 
-    monkeypatch.chdir(tmp_path)
-    stats = StatsManager()
-    stats.data.gardener.clean_next_time = "1:02:03"
-    stats.data.gardener.clean_was_time = datetime.now().isoformat()
-    window, _config = _window(tmp_path, monkeypatch, app, stats)
-
-    assert window._next_tile.value in ("1:02:03", "1:02:02")   # tick skew
-    window.close()
-
-
-def test_the_gardener_countdown_catches_up_after_being_closed(
-        tmp_path, monkeypatch, app):
-    """The mod does not run while it's closed, so nothing decrements
-    clean_next_time by hand — the countdown has to be worked out from how
-    long ago clean_was_time was instead."""
-    from datetime import datetime, timedelta
-
-    monkeypatch.chdir(tmp_path)
-    stats = StatsManager()
-    stats.data.gardener.clean_next_time = "1:00:00"
-    stats.data.gardener.clean_was_time = (
-        datetime.now() - timedelta(minutes=45)).isoformat()
-    window, _config = _window(tmp_path, monkeypatch, app, stats)
-
-    assert window._next_tile.value in ("0:15:00", "0:14:59")   # tick skew
+    assert not hasattr(window, "_hk_games_tile")
+    assert not hasattr(window, "_sb_games_tile")
     window.close()
 
 

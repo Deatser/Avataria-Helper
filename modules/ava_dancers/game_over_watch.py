@@ -6,7 +6,7 @@ import cv2
 from PySide6.QtCore import QThread, Signal
 
 from app.core.capture import grab_window, release_window_capture
-from app.core.template_match import best_match, load_template, primary_monitor_region
+from app.core.template_match import best_match, load_template, game_region
 
 # Once a second is plenty: this only answers "has the round ended yet", a
 # state that holds for seconds once it arrives, and the tile detector already
@@ -49,7 +49,7 @@ class GameOverWatch(QThread):
         if template is None:
             self.error.emit(f"Не найден шаблон: {GAMEOVER_TEMPLATE}")
             return
-        region = primary_monitor_region()
+        region = game_region()
 
         try:
             while not self._stop_event.is_set():

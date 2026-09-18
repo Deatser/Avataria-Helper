@@ -1,0 +1,23 @@
+{
+    "overlay": {
+        "x": 1415,
+        "y": 674,
+        "width": 424,
+        "height": 543,
+        "skip_close_confirm": true,
+        "background": "",
+        "video_background": false,
+        "show_links": true,
+        "auto_continue": true
+    },
+    "stats_window": {
+        "favorite": true,
+        "position_saved": true,
+        "x": 78,
+        "y": 713,
+        "width": 460,
+        "height": 542,
+        "background": "",
+        "video_background": false
+    }
+}

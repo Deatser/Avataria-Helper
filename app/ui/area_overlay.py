@@ -26,9 +26,15 @@ class AreaOverlay(GameLayer):
         self._reference = reference
         self._fill = fill
         self._border = border
+        # Эталонный прямоугольник, а не тот, что выставлен на экране: игра
+        # может поменять размер, пока область висит, и пересчитать её тогда
+        # можно только из исходных чисел (см. refit).
+        self._area: QRect | None = None
 
     def show_area(self, rect: QRect):
-        self.setGeometry(rect)
+        """`rect` — в эталонных координатах, как всё, что считают моды."""
+        self._area = QRect(rect)
+        self.setGeometry(self.live_rect(rect))
         if not self.isVisible():
             self.show()
             self.raise_()
@@ -38,6 +44,16 @@ class AreaOverlay(GameLayer):
 
     def clear(self):
         self.hide()
+
+    def refit(self):
+        """Игра стала другого размера — переехать вместе с ней.
+
+        Область выставляется один раз на весь проход мода, и без этого она
+        осталась бы висеть там, где игра была раньше: жёлтая рамка не над
+        тем местом, которое мод на самом деле смотрит.
+        """
+        if self._area is not None and self.isVisible():
+            self.setGeometry(self.live_rect(self._area))
 
     def paintEvent(self, event):
         painter = QPainter(self)
