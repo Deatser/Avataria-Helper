@@ -29,9 +29,7 @@ from app.core.term_log import tlog
 LAUNCHER_TITLE = "Tortuga Game Club"
 GAME_TITLE     = "Аватария"
 
-# «Места» — признак того, что игра догрузилась и в неё можно жать. Живёт
-# здесь, а не в pause_watch: сюда он попал раньше, и оба модуля должны
-# смотреть на один и тот же файл.
+# «Места» — признак того, что игра догрузилась и в неё можно жать.
 PLACES_TEMPLATE = "button_places.png"
 
 LAUNCH_TEMPLATE = "launch.png"   # кнопка ИГРАТЬ внутри лаунчера

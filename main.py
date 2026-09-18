@@ -21,7 +21,6 @@ def _qt_msg_handler(mode, context, message):
 from app.core.capture import release_all_capture
 from app.core.config import ConfigManager
 from app.core.launcher import open_game
-from app.core.restart_state import take_restart
 from app.core.term_log import tlog
 from app.core.stats import StatsManager
 from app.core.tropikania_config import TropikaniaConfigManager
@@ -72,14 +71,6 @@ def main():
     wm     = WindowManager()
 
     overlay = Overlay(config, wm, stats)
-    # Записка от прошлого запуска, если мы вернулись после перезапуска игры:
-    # почему ушли и кого включить обратно (см. app/core/restart_state.py).
-    restart_info = take_restart()
-    if restart_info is not None:
-        overlay.note_restart(restart_info)
-        tlog(f"Вернулись после перезапуска ({restart_info.reason})")
-    # Логи прошлой сессии — до того, как окна начнут писать свои строки.
-    overlay.restore_logs()
 
     # Clicking any window brings it forward — see RaiseOnClick. Kept on the
     # application and owned by it, so it outlives every window it serves.
@@ -130,8 +121,6 @@ def main():
     # against a hidden overlay has nothing to draw a wire to.
     if found:
         overlay.restore_favorite_windows()
-        # …и только после них — моды, работавшие до перезапуска игры.
-        overlay.resume_after_restart()
 
     # Own WindowManager and its own config/stats files — Tropikania and
     # Avataria are separate game windows and separate records.

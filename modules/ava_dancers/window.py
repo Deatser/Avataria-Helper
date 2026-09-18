@@ -15,7 +15,6 @@ from app.core.capture import grab_window, set_wgc_enabled
 from app.core.input_sender import press_key
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
                                      load_template, game_region)
-from app.core.restart_state import REASON_STUCK
 from app.ui.module_window import ModuleWindow
 from app.ui.settings_panel import SettingsPanel
 from app.ui.widgets.mode_button import ModeButton
@@ -564,25 +563,13 @@ class AvaDancersWindow(ModuleWindow):
         """Кнопка нажата столько раз, сколько ей отпущено, и всё ещё на
         экране — игра под ней подвисла.
 
-        Кликом это не лечится — в отличие от меню паузы, где видно, куда
-        жать. Поэтому: сказать в оба лога, выключить бота, чтобы он не жал
-        вслепую, и попросить помощник перезапустить игру. Перезапуск уносит
-        и сам помощник (см. Overlay.request_restart), мод после него
-        включится обратно сам.
+        Кликом это не лечится: сказать в оба лога и выключить бота, чтобы
+        он не жал вслепую. Дальше — руками, игру помощник не перезапускает.
         """
-        message = f"Игра залагала на «{label}» ({clicks} нажатий) — требуется перезапуск"
+        message = f"Игра залагала на «{label}» ({clicks} нажатий) — выключаю бота"
         self._log.add_log(message, level="error")
         self._log_to_helper(message)
-        overlay = self.parent_overlay
-        if overlay is None or not hasattr(overlay, "request_restart"):
-            self._stop_bot()
-            return
-        # Себя называем прямо, а не оставляем помощнику догадываться по
-        # списку работающих: к этому моменту бот мог и не числиться
-        # запущенным (проверочная кнопка, обрыв на входе в игру), а вернуться
-        # он должен в любом случае — после перезапуска мод откроется заново и
-        # снова пойдёт играть.
-        overlay.request_restart(REASON_STUCK, [self.module_name])
+        self._stop_bot()
 
     def _on_entry_error(self, message: str):
         """A step that never found its button leaves the bot switched off."""
