@@ -8,11 +8,11 @@ wiping the other.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from app.core.daily_log import DailyLog
 from app.core.duration import from_seconds, to_seconds
 from app.core.json_store import load_dataclass, save_dataclass
+from app.core.paths import data_path
 
 
 @dataclass
@@ -115,7 +115,7 @@ def shown(value, field_name: str) -> str:
 
 
 class StatsManager:
-    STATS_FILE = Path("stats.json")
+    STATS_FILE = data_path("stats.json")
 
     def __init__(self):
         self.data = load_dataclass(self.STATS_FILE, AppStats)

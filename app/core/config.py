@@ -1,17 +1,19 @@
 # app/core/config.py
 from __future__ import annotations
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from app.core.json_store import load_dataclass, save_dataclass
+from app.core.paths import data_path
 
 
 @dataclass
 class OverlayConfig:
     x: int = 10
     y: int = 10
-    width: int = 330
-    height: int = 1050
+    # Под доску плиток, а не под старую колонку кнопок: на чистой
+    # установке config.json ещё нет, и окно раскрывается по этим числам.
+    width: int = 713
+    height: int = 828
     opacity: int = 220
     skip_close_confirm: bool = False   # "Не спрашивать снова" on the close dialog
     background: str = ""            # explicit backdrop path; empty → auto-pick
@@ -196,7 +198,7 @@ class AppConfig:
 
 
 class ConfigManager:
-    CONFIG_FILE = Path("config.json")
+    CONFIG_FILE = data_path("config.json")
 
     def __init__(self):
         self.data = load_dataclass(self.CONFIG_FILE, AppConfig)

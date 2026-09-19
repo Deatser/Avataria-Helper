@@ -10,9 +10,9 @@ keeping — and risking drifting from — a second copy.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from app.core.json_store import load_dataclass, save_dataclass
+from app.core.paths import data_path
 from app.core.tropikania_daily_log import TropikaniaDailyLog
 
 
@@ -29,7 +29,7 @@ class TropikaniaAppStats:
 
 
 class TropikaniaStatsManager:
-    STATS_FILE = Path("tropikania_stats.json")
+    STATS_FILE = data_path("tropikania_stats.json")
 
     def __init__(self):
         self.data = load_dataclass(self.STATS_FILE, TropikaniaAppStats)

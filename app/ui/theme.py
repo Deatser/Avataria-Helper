@@ -1,7 +1,8 @@
 # app/ui/theme.py
-from pathlib import Path
 
 from PySide6.QtGui import QColor, QFont, QFontDatabase
+
+from app.core.paths import ASSETS
 
 # ── Backgrounds — neutral near-black with a faint violet cast ────────────────
 BG_BASE     = "#08070d"
@@ -143,7 +144,7 @@ FONT_SIZE_S = 11
 FONT_SIZE_M = 13
 FONT_SIZE_L = 16
 
-_FONT_DIR = Path(__file__).resolve().parents[2] / "assets" / "fonts"
+_FONT_DIR = ASSETS / "fonts"
 
 # The four getters survive as *voices* of Comfortaa rather than separate
 # faces: they differ by weight and letter-spacing only, which is what keeps

@@ -1,6 +1,5 @@
 # app/ui/stats_window.py
 from __future__ import annotations
-from pathlib import Path
 
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
                                QScrollArea, QWidget, QFrame,
@@ -9,6 +8,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QTimer, Signal
 
 from app.core import energy_bar
+from app.core.paths import TEMPLATES
 from app.core.stats import shown
 from app.ui import theme
 from app.ui.module_window import ModuleWindow
@@ -39,8 +39,7 @@ _COUNTDOWN_MS = 1000
 # Same auto-pick rule every module's own backdrop uses — see
 # modules.ava_dancers.window._default_backdrop.
 _BACKDROP_STEM  = "AvaStats"
-_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
-_TEMPLATES      = _PROJECT_ROOT / "templates"
+_TEMPLATES      = TEMPLATES
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 # Верхние строки лежат прямо на фоне окна, а фон бывает светлым — видео

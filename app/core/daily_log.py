@@ -18,8 +18,9 @@ from datetime import datetime
 from pathlib import Path
 
 from app.core.json_store import load_dataclass, save_dataclass
+from app.core.paths import data_path
 
-LOGS_DIR  = Path("logs")
+LOGS_DIR  = data_path("logs")
 KEEP_DAYS = 30   # older files are pruned away on the next ensure_today()
 
 

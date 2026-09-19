@@ -1,12 +1,12 @@
 # app/ui/promo_window.py
 from __future__ import annotations
 from html import escape
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout
 
 from app.core import activated_promo_log
+from app.core.paths import TEMPLATES
 from app.core.promo_activate import PromoActivateFlow
 from app.core.promo_watch import PromoCheck, PromoFetchLatest
 from app.ui import theme
@@ -51,8 +51,7 @@ _STATUS_NOTE = {
 }
 
 _BACKDROP_STEM  = "AvaPromo"
-_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
-_TEMPLATES      = _PROJECT_ROOT / "templates"
+_TEMPLATES      = TEMPLATES
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 

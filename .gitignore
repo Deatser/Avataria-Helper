@@ -60,3 +60,8 @@ desktop.ini
 # Черновики с живыми токенами в открытом виде - в публичный репозиторий им нельзя
 /twitch_monitor.py
 /vk_test_post.py
+
+# Сборка установщика: папка PyInstaller, готовое приложение и сам setup.exe
+/build/
+/dist/
+/Output/

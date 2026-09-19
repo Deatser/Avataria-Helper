@@ -6,7 +6,6 @@ with no promo-code rows, and one farm section instead of the games/
 professions ones.
 """
 from __future__ import annotations
-from pathlib import Path
 
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
                                QScrollArea, QWidget, QFrame,
@@ -14,6 +13,7 @@ from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QTimer, Signal
 
+from app.core.paths import TEMPLATES
 from app.core.stats import shown
 from app.ui import theme
 from app.ui.module_window import ModuleWindow
@@ -37,8 +37,7 @@ _MIN_H = 420
 # Same backdrop file as the main app's own StatsWindow — "такой же фон",
 # by explicit request, not a Tropikania-specific asset.
 _BACKDROP_STEM  = "AvaStats"
-_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
-_TEMPLATES      = _PROJECT_ROOT / "templates"
+_TEMPLATES      = TEMPLATES
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 

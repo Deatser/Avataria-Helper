@@ -1,12 +1,12 @@
 # app/ui/overlay.py
 from __future__ import annotations
-from pathlib import Path
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QApplication, QDialog, QSizePolicy)
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer
 
 from app.core.daily_reward import DailyRewardCollect, DailyRewardWatch
+from app.core.paths import TEMPLATES
 from app.core.promo_activate import PromoAutoLoop
 from app.core.stats import StatsManager
 from app.ui.promo_window import PromoWindow
@@ -37,8 +37,7 @@ from app.module_registry import MODULES
 # Same auto-pick rule every module's own backdrop uses — see
 # modules.ava_dancers.window._default_backdrop.
 _BACKDROP_STEM  = "AvaHelper"
-_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
-_TEMPLATES      = _PROJECT_ROOT / "templates"
+_TEMPLATES      = TEMPLATES
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 

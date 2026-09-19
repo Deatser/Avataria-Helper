@@ -2,14 +2,14 @@
 from __future__ import annotations
 import time
 import threading
-from pathlib import Path
 
 import cv2
 from PySide6.QtCore import QThread, Signal
 
 from app.core.capture import grab_window, release_window_capture
+from app.core.paths import TEMPLATES
 
-_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
+_TEMPLATES_DIR = TEMPLATES
 
 # Every mark seen so far is a few seconds' warning before a speed wave that
 # always comes (per the person who timed it live: 3-15s later, but always).

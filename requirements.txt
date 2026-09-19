@@ -1,0 +1,11 @@
+# Что нужно помощнику, чтобы запуститься и собраться.
+# Версии те, на которых он живёт у автора: py -m pip install -r requirements.txt
+PySide6==6.11.1
+opencv-python==5.0.0.93
+numpy==2.4.6
+mss==10.2.0
+requests==2.34.2
+pywin32==312
+
+# Только для сборки установщика (py build_installer.py)
+pyinstaller==6.22.3

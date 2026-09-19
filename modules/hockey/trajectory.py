@@ -42,10 +42,12 @@ from statistics import median
 import cv2
 import numpy as np
 
+from app.core.paths import data_path
+
 # Where measured flights accumulate, next to config.json and for the same
-# reason — relative to the working directory, so a test writes into its own
-# tmp directory rather than the repo.
-TRAJECTORY_FILE = Path("hockey_trajectories.json")
+# reason — the working directory when run from source, so a test writes into
+# its own tmp directory rather than the repo, and %APPDATA% once built.
+TRAJECTORY_FILE = data_path("hockey_trajectories.json")
 
 # A pixel has to change by this much between frames to count as movement.
 # Low rather than safe: the puck is small and only middling in contrast

@@ -15,7 +15,6 @@ marking out a lane's own slanted edges.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -27,6 +26,7 @@ from PySide6.QtCore import Qt, QRect, QTimer
 
 from app.core.capture import grab_window
 from app.core.input_sender import click_at, press_key
+from app.core.paths import TEMPLATES
 from app.core.template_match import best_match, load_template
 from app.ui import theme
 from app.ui.multi_polygon_overlay import MultiPolygonOverlay
@@ -43,8 +43,7 @@ from modules.snowboard.settings_panel import SnowboardSettingsPanel
 from modules.snowboard.track_rows import ROW_COLOURS, ROW_QUADS, ROW_REGIONS
 
 _BACKDROP_STEM = "snowboard_sinthwawe"
-_PROJECT_ROOT  = Path(__file__).resolve().parents[2]
-_TEMPLATES     = _PROJECT_ROOT / "templates"
+_TEMPLATES     = TEMPLATES
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 

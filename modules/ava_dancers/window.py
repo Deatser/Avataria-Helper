@@ -1,6 +1,5 @@
 # modules/ava_dancers/window.py
 from __future__ import annotations
-from pathlib import Path
 
 import time
 
@@ -13,6 +12,7 @@ from PySide6.QtCore import Qt, QRectF, QTimer
 
 from app.core.capture import grab_window, set_wgc_enabled
 from app.core.input_sender import press_key
+from app.core.paths import TEMPLATES
 from app.core.template_match import (FINISH_GOLD, FINISH_SILVER, best_match,
                                      load_template, game_region)
 from app.ui.module_window import ModuleWindow
@@ -121,8 +121,7 @@ _KIND_COLOUR = {
 
 
 _BACKDROP_STEM = "vaporwawe"
-_PROJECT_ROOT  = Path(__file__).resolve().parents[2]
-_TEMPLATES     = _PROJECT_ROOT / "templates"
+_TEMPLATES     = TEMPLATES
 
 
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")

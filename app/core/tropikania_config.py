@@ -4,9 +4,9 @@ its stats live apart from stats.json — a separate app, a separate record.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from app.core.json_store import load_dataclass, save_dataclass
+from app.core.paths import data_path
 
 
 @dataclass
@@ -40,7 +40,7 @@ class TropikaniaAppConfig:
 
 
 class TropikaniaConfigManager:
-    CONFIG_FILE = Path("tropikania_config.json")
+    CONFIG_FILE = data_path("tropikania_config.json")
 
     def __init__(self):
         self.data = load_dataclass(self.CONFIG_FILE, TropikaniaAppConfig)

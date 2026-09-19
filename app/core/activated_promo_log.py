@@ -8,9 +8,10 @@ a code already handled is never entered a second time.
 from __future__ import annotations
 import json
 from datetime import datetime
-from pathlib import Path
 
-LOG_PATH = Path("logs") / "Активированные промокоды.json"
+from app.core.paths import data_path
+
+LOG_PATH = data_path("logs") / "Активированные промокоды.json"
 
 
 def _load() -> list[dict]:

@@ -45,6 +45,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout
 
 from app.core.capture import grab_window, set_wgc_enabled
+from app.core.paths import TEMPLATES
 from app.ui import theme
 from app.ui.module_window import ModuleWindow
 from app.ui.widgets.log_actions import build_log_actions
@@ -58,8 +59,7 @@ from modules.hockey import patrol, red_watch, rink, standing
 from modules.hockey.settings_panel import HockeySettingsPanel
 
 _BACKDROP_STEM  = "snowboard_sinthwawe"
-_PROJECT_ROOT   = Path(__file__).resolve().parents[2]
-_TEMPLATES      = _PROJECT_ROOT / "templates"
+_TEMPLATES      = TEMPLATES
 _STILL_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 # Размер, до которого окно доведено руками (config.json на 2026-08-14), он же

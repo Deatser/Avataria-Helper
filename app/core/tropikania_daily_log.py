@@ -9,8 +9,9 @@ from datetime import datetime
 from pathlib import Path
 
 from app.core.json_store import load_dataclass, save_dataclass
+from app.core.paths import data_path
 
-LOGS_DIR  = Path("logs_tropikania")
+LOGS_DIR  = data_path("logs_tropikania")
 KEEP_DAYS = 30
 
 

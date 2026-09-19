@@ -1,15 +1,15 @@
 # app/core/template_match.py
 from __future__ import annotations
 from functools import lru_cache
-from pathlib import Path
 
 import cv2
 import numpy as np
 import mss
 
 from app.core.game_geometry import geometry
+from app.core.paths import TEMPLATES
 
-TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
+TEMPLATES_DIR = TEMPLATES
 
 # Which reward a run is farmed for — stored in config as `finish_on` and
 # used to work out the payout once GameOverWatch sees the round end. See

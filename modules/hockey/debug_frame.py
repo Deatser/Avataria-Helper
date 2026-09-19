@@ -23,10 +23,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# Relative to the working directory, the same way ConfigManager.CONFIG_FILE
-# is — the app runs from the project root, and a test that has chdir'd into a
-# tmp directory should leave its snapshots there rather than in the repo.
-_OUT_DIR = Path("debug_frames")
+from app.core.paths import data_path
+
+# The same place ConfigManager.CONFIG_FILE goes: the working directory when
+# run from source, so a test that has chdir'd into a tmp directory leaves its
+# snapshots there rather than in the repo, and %APPDATA% once built.
+_OUT_DIR = data_path("debug_frames")
 
 _HELMET = (0, 0, 255)     # BGR — what the detector actually found
 _BODY   = (0, 0, 0)       # what a shot has to get past
